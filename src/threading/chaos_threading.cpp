@@ -103,10 +103,22 @@ namespace SC {
   void ChaosThreading::pushTask(const Priority p, std::function<void(int)> task) {
     {
       std::lock_guard lock(queueMutex);
-      tasks.push({p, std::move(task)});
-      QueueSize::record(1);
+      tasks.emplace(p, std::move(task));
     }
+
+    QueueSize::record(1);
     cv.notify_one();
+  }
+
+  void ChaosThreading::pushBatch(const Priority p, std::span<std::function<void(int)> > batch) {
+    {
+      std::lock_guard lock(queueMutex);
+      for (auto &t: batch) {
+        tasks.emplace(p, std::move(t));
+      }
+    }
+    QueueSize::record(batch.size());
+    cv.notify_all();
   }
 
   void ChaosThreading::pushLongTaskInternal(std::string_view name, std::function<void(std::stop_token)> task) {
