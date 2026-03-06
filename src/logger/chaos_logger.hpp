@@ -18,47 +18,49 @@ namespace SC {
   public:
     static void init(spdlog::level::level_enum level = spdlog::level::info);
 
+
+    template<typename... StatsTypes, typename... Args>
+    static void stats(spdlog::format_string_t<Args...> fmt, Args &&... args) {
+      stats<StatsTypes...>(spdlog::level::info, fmt, std::forward<Args>(args)...);
+    }
+
+    template<typename... StatsTypes, typename... Args>
+    static void stats(spdlog::level::level_enum level, spdlog::format_string_t<Args...> fmt, Args &&... args) {
+      if constexpr (sizeof...(StatsTypes) == 0) return;
+      std::string stats_msg;
+      stats_msg.reserve(sizeof...(StatsTypes) * 64);
+
+      bool first = true;
+      auto append_stat = [&](auto name, auto value_str) {
+        if (!first) {
+          stats_msg += " | ";
+        }
+        stats_msg += std::format("{}: {}", name, value_str);
+        first = false;
+      };
+
+      (append_stat(StatsTypes::name(), StatsTypes::str()), ...);
+      std::string user_msg = fmt::format(fmt, std::forward<Args>(args)...);
+      if (!stats_msg.empty()) {
+        get()->log(level, "{} -> [{}]", user_msg, stats_msg);
+      } else {
+        get()->log(level, "{}", user_msg);
+      }
+    }
+
     template<typename... Args>
     [[nodiscard]] static auto time(std::string_view fmt_str, Args &&... args) {
-      return make_timer([fmt_str, ...captured_args = std::forward<Args>(args)](TimeResult res) mutable {
-        std::string timeStr = fmt::format("{:.2f}{}", res.value, res.suffix);
-        info(fmt::runtime(fmt_str), timeStr, std::forward<decltype(captured_args)>(captured_args)...);
-      });
+      return time(spdlog::level::info, fmt_str, std::forward<Args>(args)...);
     }
+
 
     template<typename... Args>
     [[nodiscard]] static auto time(spdlog::level::level_enum level, std::string_view fmt_str, Args &&... args) {
       return make_timer([level,fmt_str, ...captured_args = std::forward<Args>(args)](TimeResult res) mutable {
         std::string timeStr = fmt::format("{:.2f}{}", res.value, res.suffix);
-        switch (level) {
-          case spdlog::level::trace:
-            trace(fmt::runtime(fmt_str), timeStr, std::forward<decltype(captured_args)>(captured_args)...);
-
-            break;
-          case spdlog::level::debug:
-            debug(fmt::runtime(fmt_str), timeStr, std::forward<decltype(captured_args)>(captured_args)...);
-
-            break;
-          case spdlog::level::info:
-            info(fmt::runtime(fmt_str), timeStr, std::forward<decltype(captured_args)>(captured_args)...);
-            break;
-          case spdlog::level::warn:
-            warn(fmt::runtime(fmt_str), timeStr, std::forward<decltype(captured_args)>(captured_args)...);
-
-            break;
-          case spdlog::level::err:
-            err(fmt::runtime(fmt_str), timeStr, std::forward<decltype(captured_args)>(captured_args)...);
-
-            break;
-          case spdlog::level::critical:
-            critical(fmt::runtime(fmt_str), timeStr, std::forward<decltype(captured_args)>(captured_args)...);
-
-            break;
-          default: break;;
-        }
+        get()->log(level, fmt::runtime(fmt_str), timeStr, res.value);
       });
     }
-
 
     template<typename... Args>
     static void info(spdlog::format_string_t<Args...> fmt, Args &&... args) {
@@ -180,8 +182,6 @@ namespace SC {
     logger->flush_on(spdlog::level::warn);
   }
 
-#define DEFINE_LOG_TAG(TagName, StringValue) \
-struct TagName { static constexpr std::string_view name() { return StringValue; } };
 
   // Helfer zum Zählen der Argumente (VA_ARGS Trick)
 #define _GET_LOG_MACRO(_1, _2, _3, NAME, ...) NAME

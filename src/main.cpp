@@ -1,46 +1,29 @@
 #include "logger/chaos_logger.hpp"
-#include <thread>
+#include "stats/chaos_global.hpp"
+#include "threading/chaos_threading.hpp"
 
-
-using namespace std::chrono_literals;
-
-// 1. Tags und Aliase definieren
-LOG_ALIAS(MainLog, "CORE");
-LOG_ALIAS(NetLog, "NETWORK", "HTTP");
+LOG_ALIAS(PoolLog, "Chaos", "ThreadPool");
 
 int main() {
-  // --- Basis Test ---
-  MainLog::info("Programm gestartet...");
-  NetLog::debug("Versuche Verbindung zu Port {}", 8080);
+  SC::ChaosThreading::init();
 
-  // --- Timer Test 1: Info (Standard) ---
-  {
-    auto t = MainLog::time("{} - Task 'Initialisierung' beendet für User {}", "Admin");
-    std::this_thread::sleep_for(50ms);
-  }
-
-  // --- Timer Test 2: Debug Level + Positions-Argumente ---
-  {
-
-    auto t = NetLog::time(spdlog::level::debug,
-                         "Request ID {1} brauchte genau {0} bis zum Timeout", 42);
-    std::this_thread::sleep_for(1200us); // Mikrosekunden-Test
-  }
-
-  // --- Timer Test 3: Verschiedene Einheiten (Auto-Erkennung) ---
-  {
-    auto t1 = MainLog::time("{} - Schneller Task", "Short");
-    std::this_thread::sleep_for(100ns);
-  }
+  PoolLog::info("Starte Belastungstest für StructuredChaos Pool...");
 
   {
-    auto t2 = MainLog::time("{} - Langer Task", "Long");
-    std::this_thread::sleep_for(1.2s);
+    auto t = PoolLog::time("Verarbeitung von 1000 Tasks dauerte {}");
+
+    for (int i = 0; i < 1000; ++i) {
+      SC::ChaosThreading::enqueue([]() {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      });
+    }
+
+    PoolLog::stats<QueueSize, PoolThroughput, ActiveTask>("Status während der Last");
   }
 
-  // --- Fehlerfall Test ---
-  NetLog::err("Kritischer Verbindungsfehler!");
+  SC::ChaosThreading::wait_until_finished();
+  PoolLog::stats<PoolThroughput>("Test beendet. Finaler Durchsatz");
 
-  MainLog::info("Test beendet. Schau in den Ordner 'logs/'!");
+  SC::ChaosGlobal::report_all();
   return 0;
 }
