@@ -13,7 +13,7 @@ int main() {
     auto t = PoolLog::time("Verarbeitung von 1000 Tasks dauerte {}");
 
     for (int i = 0; i < 1000; ++i) {
-      SC::ChaosThreading::enqueue([]() {
+      SC::ChaosThreading::enqueue([](int id) {
         std::this_thread::sleep_for(std::chrono::microseconds(100));
       });
     }

@@ -37,7 +37,7 @@ target_sources(StructuredChaos PUBLIC
 )
 
 target_link_libraries(StructuredChaos PUBLIC spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
-target_include_directories( StructuredChaos
+target_include_directories(StructuredChaos
         PUBLIC
         src
 )

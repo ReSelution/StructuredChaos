@@ -26,7 +26,7 @@ REGISTER_CHAOS_STAT(LongRunningThreads);
 
 namespace SC {
   class ChaosThreading {
-    public:
+  public:
     enum class Priority : int {
       Low = 0,
       Normal = 10,
@@ -40,27 +40,28 @@ namespace SC {
     static void wait_until_finished();
 
     template<class F, class... Args>
-    static auto enqueue(Priority p, F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...> > {
-      using return_type = std::invoke_result_t<F, Args...>;
+    static auto enqueue(Priority p, F &&f, Args &&... args) -> std::future<std::invoke_result_t<F,int, Args...> > {
+      using return_type = std::invoke_result_t<F,int, Args...>;
 
-      auto task = std::make_shared<std::packaged_task<return_type()> >(
-        std::bind(std::forward<F>(f), std::forward<Args>(args)...)
+      auto task = std::make_shared<std::packaged_task<return_type(int)> >(
+        std::bind(std::forward<F>(f), std::placeholders::_1, std::forward<Args>(args)...)
       );
 
       std::future<return_type> res = task->get_future();
 
-      pushTask(p, [task]() { (*task)(); });
+      pushTask(p, [task](int id) { (*task)(id); });
 
       return res;
     }
 
     template<class F, class... Args>
-    static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...> > {
+    static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
       return enqueue(Priority::Normal, std::forward<F>(f), std::forward<Args>(args)...);
     }
 
     template<class F, class... Args>
-    static auto enqueueLong(std::string_view name, F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...> > {
+    static auto enqueueLong(std::string_view name, F &&f,
+                            Args &&... args) -> std::future<std::invoke_result_t<F, Args...> > {
       using return_type = std::invoke_result_t<F, std::stop_token, Args...>;
 
       auto promise = std::make_shared<std::promise<return_type> >();
@@ -80,13 +81,13 @@ namespace SC {
         }
       };
 
-      pushLongTaskInternal(name,std::move(boundTask));
+      pushLongTaskInternal(name, std::move(boundTask));
       return res;
     }
 
     template<class F, class... Args>
     static auto enqueueLong(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...> > {
-     return enqueueLong("ChaosLongTask", std::forward<F>(f), std::forward<Args>(args)...);
+      return enqueueLong("ChaosLongTask", std::forward<F>(f), std::forward<Args>(args)...);
     }
 
   private:
