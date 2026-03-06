@@ -90,7 +90,7 @@ namespace SC {
     }
 
   private:
-    static void pushTask(Priority p, std::function<void()> task);
+    static void pushTask(Priority p, std::function<void(int)> task);
 
     static void pushLongTaskInternal(std::string_view name, std::function<void(std::stop_token)> task);
   };

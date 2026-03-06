@@ -15,12 +15,11 @@
 
 
 namespace SC {
-
   struct ChaosTask {
     ChaosThreading::Priority priority;
-    mutable std::function<void()> func;
+    mutable std::function<void(int)> func;
 
-    bool operator<(const ChaosTask& other) const {
+    bool operator<(const ChaosTask &other) const {
       return priority < other.priority;
     }
   };
@@ -54,7 +53,7 @@ namespace SC {
     snprintf(name, sizeof(name), "ChaosPool-%d", id);
     set_thread_name(name);
     while (!st.stop_requested()) {
-      std::function<void()> task;
+      std::function<void(int)> task;
       {
         std::unique_lock lock(queueMutex);
         if (!cv.wait(lock, st, [] { return !tasks.empty(); }))
@@ -64,10 +63,12 @@ namespace SC {
         tasks.pop();
         QueueSize::record(-1);
       }
-      task();
+      task(id);
       ActiveTask::record(-1);
       PoolThroughput::record(1);
-      wait_cv.notify_all();
+      if (tasks.empty()) {
+        wait_cv.notify_all();
+      }
     }
   }
 
@@ -88,10 +89,10 @@ namespace SC {
   }
 
   void ChaosThreading::init(uint32_t numThreads) {
-
     if (!threads.empty()) return;
-    auto maxThreads = std::thread::hardware_concurrency()-1 - LongRunningThreads::m_storage.value.load(std::memory_order::acquire);
-    auto threadCount = std::min(std::max<size_t>(numThreads, 1),maxThreads );
+    auto maxThreads = std::thread::hardware_concurrency() - 1 - LongRunningThreads::m_storage.value.load(
+                        std::memory_order::acquire);
+    auto threadCount = std::min(std::max<size_t>(numThreads, 1), maxThreads);
     PoolThroughput::start();
     std::atexit(shutdown);
     for (uint32_t i = 0; i < threadCount; ++i) {
@@ -99,10 +100,10 @@ namespace SC {
     }
   }
 
-  void ChaosThreading::pushTask(const Priority p, std::function<void()> task) {
+  void ChaosThreading::pushTask(const Priority p, std::function<void(int)> task) {
     {
       std::lock_guard lock(queueMutex);
-      tasks.push({p,std::move(task)});
+      tasks.push({p, std::move(task)});
       QueueSize::record(1);
     }
     cv.notify_one();

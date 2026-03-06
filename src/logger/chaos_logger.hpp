@@ -56,9 +56,9 @@ namespace SC {
 
     template<typename... Args>
     [[nodiscard]] static auto time(spdlog::level::level_enum level, std::string_view fmt_str, Args &&... args) {
-      return make_timer([level,fmt_str, ...captured_args = std::forward<Args>(args)](TimeResult res) mutable {
+      return make_timer([level,fmt_str, &args...](TimeResult res) mutable {
         std::string timeStr = fmt::format("{:.2f}{}", res.value, res.suffix);
-        get()->log(level, fmt::runtime(fmt_str), timeStr, res.value);
+        get()->log(level, fmt::runtime(fmt_str), timeStr, args...);
       });
     }
 
