@@ -40,15 +40,31 @@ namespace SC {
     }
 
     static std::string format(const Storage& s) {
-      // Wir müssen hier lügen, da format const ist, aber der Lock nicht.
-      // In diesem Kontext (Reporting) ist ein const_cast vertretbar.
+
       auto& mutable_s = const_cast<Storage&>(s);
       SpinLockGuard guard(mutable_s.lock);
 
-      uint64_t total = 0;
-      for (const auto& [_, count] : s.counts) total += count;
+      if (s.counts.empty()) return "No data recorded";
 
-      return std::format("Unique: {} | Total: {}", s.counts.size(), total);
+      uint64_t total = 0;
+      std::vector<std::pair<Key, uint64_t>> sorted;
+      sorted.reserve(s.counts.size());
+
+      for (const auto& [key, count] : s.counts) {
+        total += count;
+        sorted.push_back({key, count});
+      }
+
+      std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+          return a.second > b.second;
+      });
+
+      std::string details;
+      size_t limit = std::min<size_t>(15, sorted.size());
+      for (size_t i = 0; i < limit; ++i) {
+        details += std::format("    {}.\t-> {} ({}){}", i+1,sorted[i].first, sorted[i].second, (i < limit - 1 ? ",\n" : ""));
+      }
+      return std::format("Unique: {} | Total: {} | Top: {} ({}) \n{}", s.counts.size(), total, sorted[0].first, sorted[0].second,details);
     }
   };
 

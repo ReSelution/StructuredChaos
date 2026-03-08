@@ -19,6 +19,7 @@ namespace SC {
 
     static inline std::atomic<uint64_t> m_idGenerator{0};
     uint64_t m_id;
+
   public:
     explicit ChaosSlab(size_t size = 8 * 1024);
 
@@ -42,6 +43,17 @@ namespace SC {
         };
       }
       return obj;
+    }
+
+    template<typename T = uint8_t>
+    [[nodiscard]] std::span<T> allocateSpan(size_t count, size_t alignment = alignof(T)) {
+      if (count == 0) [[unlikely]] {
+        return {};
+      }
+
+      void *ptr = internal_allocate(count * sizeof(T), alignment);
+
+      return std::span<T>(static_cast<T *>(ptr), count);
     }
 
     std::string_view utf16ToUtf8(std::span<const char16_t> input);

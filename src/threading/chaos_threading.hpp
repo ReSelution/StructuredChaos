@@ -36,15 +36,19 @@ namespace SC {
 
     static void init(uint32_t numThreads = std::thread::hardware_concurrency() - 1);
 
+    static size_t getNumThreads();
 
     static void wait_until_finished();
 
     template<class F, class... Args>
+    requires std::invocable<F, int, Args...>
     static auto enqueue(Priority p, F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
       using return_type = std::invoke_result_t<F, int, Args...>;
 
       auto task = std::make_shared<std::packaged_task<return_type(int)> >(
-        std::bind(std::forward<F>(f), std::placeholders::_1, std::forward<Args>(args)...)
+        [f = std::forward<F>(f), ...args = std::forward<Args>(args)](int id) mutable {
+          return f(id, std::forward<Args>(args)...);
+        }
       );
 
       std::future<return_type> res = task->get_future();
@@ -55,14 +59,18 @@ namespace SC {
     }
 
     template<class F, class... Args>
+    requires std::invocable<F, int, Args...>
     static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
       return enqueue(Priority::Normal, std::forward<F>(f), std::forward<Args>(args)...);
     }
 
-    template<typename Iterator, typename F>
-    static auto enqueueBatch(Priority p, Iterator begin, Iterator end, F &&f) {
+    template<typename Iterator, typename F, typename... Args>
+    static auto enqueueBatch(Priority p, Iterator begin, Iterator end, F &&f, Args &&... args) {
       using ArgType = std::iterator_traits<Iterator>::value_type;
-      using return_type = std::invoke_result_t<F, int, ArgType>;
+      using return_type = std::invoke_result_t<F, int, ArgType, Args...>;
+
+      auto shared_f = std::make_shared<std::decay_t<F> >(std::forward<F>(f));
+      auto shared_args = std::make_shared<std::tuple<std::decay_t<Args>...> >(std::forward<Args>(args)...);
 
       std::vector<std::future<return_type> > futures;
       std::vector<std::function<void(int)> > batch;
@@ -73,8 +81,10 @@ namespace SC {
 
       for (auto it = begin; it != end; ++it) {
         auto task = std::make_shared<std::packaged_task<return_type(int)> >(
-          [&f, arg = *it](int id) mutable {
-            return f(id, arg);
+          [shared_f, arg = std::move(*it), shared_args](int id) mutable {
+            return std::apply([&](auto &&... unpacked_args) {
+              return (*shared_f)(id, arg, unpacked_args...);
+            }, *shared_args);
           }
         );
 

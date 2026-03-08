@@ -100,6 +100,10 @@ namespace SC {
     }
   }
 
+  size_t ChaosThreading::getNumThreads() {
+    return threads.size();
+  }
+
   void ChaosThreading::pushTask(const Priority p, std::function<void(int)> task) {
     {
       std::lock_guard lock(queueMutex);

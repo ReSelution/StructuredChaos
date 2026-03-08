@@ -19,6 +19,9 @@ namespace SC {
     static std::unique_ptr<ChaosSlab> acquire();
 
     static void release(std::unique_ptr<ChaosSlab> &arena);
+    static size_t getBufferSize() {
+      return m_defaultSize;
+    }
 
   private:
     static inline std::vector<std::unique_ptr<ChaosSlab> > m_storage;

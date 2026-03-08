@@ -41,9 +41,16 @@ namespace SC {
 
       (append_stat(StatsTypes::name(), StatsTypes::str()), ...);
       std::string user_msg = fmt::format(fmt, std::forward<Args>(args)...);
-      if (!stats_msg.empty()) {
+
+      bool has_user = !user_msg.empty();
+      bool has_stats = !stats_msg.empty();
+      if (has_user && has_stats) {
         get()->log(level, "{} -> [{}]", user_msg, stats_msg);
-      } else {
+      }
+      else if (has_stats) {
+        get()->log(level, "[{}]", stats_msg);
+      }
+      else if (has_user) {
         get()->log(level, "{}", user_msg);
       }
     }
