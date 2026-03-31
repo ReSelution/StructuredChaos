@@ -8,8 +8,10 @@
 #include <span>
 #include <atomic>
 
+#include "chaos_monotonic_resource.hpp"
+
 namespace SC {
-  class ChaosSlab {
+  class ChaosBumpArena {
     struct CleanupNode {
       void (*destroyer)(void *);
 
@@ -21,26 +23,31 @@ namespace SC {
     uint64_t m_id;
 
   public:
-    explicit ChaosSlab(size_t size = 8 * 1024);
+    explicit ChaosBumpArena(size_t size = 8 * 1024);
 
-    ChaosSlab(const ChaosSlab &) = delete;
+    ChaosBumpArena(const ChaosBumpArena &) = delete;
 
-    ChaosSlab &operator=(const ChaosSlab &) = delete;
+    ChaosBumpArena &operator=(const ChaosBumpArena &) = delete;
 
     std::pmr::memory_resource *resource() { return &m_pool; }
 
     template<typename T, typename... Args>
     T *make(Args &&... args) {
-      void *mem = internal_allocate(sizeof(T), alignof(T));
+      void *mem = allocate(sizeof(T), alignof(T));
       T *obj = new(mem) T(std::forward<Args>(args)...);
 
       if constexpr (!std::is_trivially_destructible_v<T>) {
-        void *nodeMem = internal_allocate(sizeof(CleanupNode), alignof(CleanupNode));
-        m_cleanupHead = new(nodeMem) CleanupNode{
+        void *nodeMem = allocate(sizeof(CleanupNode), alignof(CleanupNode));
+        auto *newNode = new(nodeMem) CleanupNode{
           .destroyer = [](void *p) { static_cast<T *>(p)->~T(); },
           .object = obj,
-          .next = m_cleanupHead
+          .next = nullptr
         };
+
+        newNode->next = m_cleanupHead.load(std::memory_order_relaxed);
+        while (!m_cleanupHead.compare_exchange_weak(newNode->next, newNode,
+                                                    std::memory_order_release,
+                                                    std::memory_order_relaxed));
       }
       return obj;
     }
@@ -51,21 +58,21 @@ namespace SC {
         return {};
       }
 
-      void *ptr = internal_allocate(count * sizeof(T), alignment);
+      void *ptr = allocate(count * sizeof(T), alignment);
 
       return std::span<T>(static_cast<T *>(ptr), count);
     }
 
     std::string_view utf16ToUtf8(std::span<const char16_t> input);
 
+    void *allocate(size_t size, size_t align);
+
     void reset();
 
   private :
-    void *internal_allocate(size_t size, size_t align);
-
-    CleanupNode *m_cleanupHead = nullptr;
+    std::atomic<CleanupNode *> m_cleanupHead = nullptr;
     const size_t m_capacity;
     std::unique_ptr<uint8_t[]> m_backingBuffer;
-    std::pmr::monotonic_buffer_resource m_pool;
+    ChaosMonotonicResource m_pool;
   };
 } // SC

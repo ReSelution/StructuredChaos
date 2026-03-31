@@ -5,7 +5,7 @@
 #pragma once
 #include <atomic>
 #include <chrono>
-
+#include "tracy/Tracy.hpp"
 #include "chaos_units.hpp"
 
 namespace SC {
@@ -14,7 +14,8 @@ namespace SC {
     using DurationNS = std::chrono::nanoseconds;
     using TimePoint = std::chrono::high_resolution_clock::time_point;
 
-    struct Storage {
+    struct alignas(64) Storage {
+      const std::string_view name;
       std::atomic<uint64_t> value{0};
       std::atomic<DurationNS::rep> accumulated_ns{0};
       std::atomic<TimePoint::duration::rep> startTimeTicks{0};
@@ -30,7 +31,8 @@ namespace SC {
 
     static void record(Storage &s, uint64_t b) {
       start(s);
-      s.value.fetch_add(b, std::memory_order_relaxed);
+      auto total = s.value.fetch_add(b, std::memory_order_relaxed);
+      TracyPlot(s.name.data(), static_cast<int64_t>(total));
     }
 
     static void stop(Storage &s) {

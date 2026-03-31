@@ -8,39 +8,82 @@ project(StructuredChaos)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_subdirectory(external/spdlog)
+include(cmake/dependencies.cmake)
 
-add_library(StructuredChaos STATIC)
+option(ENABLE_CHAOS_STATS "Enable Chaos Stats" OFF)
+
+add_library(StructuredChaos STATIC
+        src/memory/chaos_memory_resource.cpp
+        src/memory/chaos_memory_resource.hpp
+        src/memory/chaos_memory_cell.cpp
+        src/memory/chaos_memory_cell.hpp
+
+
+)
 
 target_sources(StructuredChaos PRIVATE
-        src/stats/chaos_global.cpp
-        src/cache/chaos_slab.cpp
-        src/cache/chaos_slab_pool.cpp
+        src/memory/chaos_bump_arena.cpp
+        src/memory/chaos_arena_pool.cpp
+
         src/threading/chaos_threading.cpp
+
+        src/ecs/chaos_registry.cpp
+        src/ecs/chaos_entity.cpp
+
+        src/memory/chaos_monotonic_resource.cpp
+        src/threading/chaos_spin_lock.cpp
 )
+
 
 target_sources(StructuredChaos PUBLIC
         src/logger/chaos_logger.hpp
+
+        src/memory/chaos_monotonic_resource.hpp
+        src/memory/chaos_tls_arena.hpp
+        src/memory/chaos_sharded_cache.hpp
+        src/memory/chaos_bump_arena.hpp
+        src/memory/chaos_arena_pool.hpp
+
+        src/ecs/chaos_registry.hpp
+        src/ecs/chaos_entity.hpp
+
         src/stats/chaos_timer.hpp
-        src/cache/chaos_tls_slab.hpp
-        src/cache/chaos_sharded_cache.hpp
         src/stats/chaos_stats.hpp
         src/stats/chaos_throughput.hpp
         src/stats/chaos_units.hpp
         src/stats/chaos_counter.hpp
         src/stats/chaos_global.hpp
-        src/cache/chaos_slab.hpp
         src/stats/chaos_map_counter.hpp
-        src/cache/chaos_slab_pool.hpp
-        src/threading/chaos_threading.hpp
 
+        src/threading/chaos_threading.hpp
+        src/threading/chaos_spin_lock.hpp
 )
 
-target_link_libraries(StructuredChaos PUBLIC spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
+if(NOT MSVC)
+    target_compile_options(StructuredChaos PUBLIC -mcx16 -march=native)
+else()
+    target_compile_options(StructuredChaos PUBLIC /arch:AVX2)
+endif()
+
+add_subdirectory(external/tracy)
+target_link_libraries(StructuredChaos
+        PUBLIC
+        spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>
+        TracyClient
+        atomic
+        EnTT
+)
+
 target_include_directories(StructuredChaos
         PUBLIC
         src
 )
+
+if(ENABLE_CHAOS_STATS)
+    target_compile_definitions(StructuredChaos PUBLIC CHAOS_STATS_ENABLED)
+endif ()
+
+
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(SC_IS_MAIN_PROJECT ON)

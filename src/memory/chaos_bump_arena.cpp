@@ -2,21 +2,21 @@
 // Created by oleub on 05.03.26.
 //
 
-#include "chaos_slab.hpp"
+#include "chaos_bump_arena.hpp"
 
 namespace SC {
-  ChaosSlab::ChaosSlab(const size_t size) : m_capacity(size),
+  ChaosBumpArena::ChaosBumpArena(const size_t size) : m_capacity(size),
                                             m_backingBuffer(
                                               std::make_unique_for_overwrite<uint8_t[]>(m_capacity)),
-                                            m_pool(m_backingBuffer.get(), size) {
+                                            m_pool(m_backingBuffer.get(), m_capacity) {
   }
 
 
-  std::string_view ChaosSlab::utf16ToUtf8(const std::span<const char16_t> input) {
+  std::string_view ChaosBumpArena::utf16ToUtf8(const std::span<const char16_t> input) {
     if (input.empty()) return "";
 
     size_t maxLen = input.size() * 3;
-    char *target = static_cast<char *>(internal_allocate(maxLen + 1, alignof(char)));
+    char *target = static_cast<char *>(allocate(maxLen + 1, alignof(char)));
     char *curr = target;
 
     for (uint16_t cp: input) {
@@ -35,15 +35,16 @@ namespace SC {
     return {target, static_cast<size_t>(curr - target)};
   }
 
-  void ChaosSlab::reset() {
-    while (m_cleanupHead) {
-      m_cleanupHead->destroyer(m_cleanupHead->object);
-      m_cleanupHead = m_cleanupHead->next;
+  void ChaosBumpArena::reset() {
+    CleanupNode* head = m_cleanupHead.exchange(nullptr, std::memory_order_acq_rel);
+    while (head) {
+      head->destroyer(head->object);
+      head = head->next;
     }
     m_pool.release();
   }
 
-  void *ChaosSlab::internal_allocate(const size_t size, const size_t align) {
-    return m_pool.allocate(size, align);
+  void *ChaosBumpArena::allocate(const size_t size, const size_t align) {
+    return  m_pool.allocate(size, align);
   }
 } // SC

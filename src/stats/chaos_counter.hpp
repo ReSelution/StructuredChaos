@@ -8,17 +8,18 @@
 #include <string>
 
 #include "chaos_units.hpp"
+#include "tracy/Tracy.hpp"
 
 namespace SC {
   struct MetricUnits;
 
   template<typename UnitSystem = MetricUnits>
   struct ChaosCounter {
-    struct Storage {
+    struct alignas(64) Storage {
+      const std::string_view name;
       std::atomic<uint64_t> value{0};
     };
 
-    // Für das Interface-Matching (macht hier einfach nichts)
     static void start(Storage &) {
     }
 
@@ -27,6 +28,8 @@ namespace SC {
 
     static void record(Storage &s, uint64_t v) {
       s.value.fetch_add(v, std::memory_order_relaxed);
+
+      TracyPlot(s.name.data(), static_cast<int64_t>(s.value.load(std::memory_order_relaxed)));
     }
 
     static void reset(Storage &s) {

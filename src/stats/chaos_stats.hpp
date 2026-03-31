@@ -1,21 +1,20 @@
 #pragma once
 #include <string>
-#include <format>
 
 #include "chaos_global.hpp"
 
 namespace SC {
-  template<typename NameTag, typename ChaosTracker>
+  template<typename NameTag, typename ChaosTracker, bool AllowReset = true>
   class ChaosStats : public IChaosStat {
     friend class ChaosGlobal;
 
-
   public:
-    static inline typename ChaosTracker::Storage m_storage;
+    static inline typename ChaosTracker::Storage m_storage{NameTag::name()};
 
-    IChaosStat * get() {
+    IChaosStat *get() {
       return this;
     }
+
     template<typename... Args>
     static void record(Args &&... args) {
       ChaosTracker::record(m_storage, std::forward<Args>(args)...);
@@ -32,7 +31,9 @@ namespace SC {
     }
 
     static void reset() {
-      ChaosTracker::reset(m_storage);
+      if constexpr (AllowReset) {
+        ChaosTracker::reset(m_storage);
+      }
     }
 
     static constexpr std::string_view name() { return NameTag::name(); }
@@ -40,6 +41,7 @@ namespace SC {
     [[nodiscard]] static std::string str() {
       return ChaosTracker::format(m_storage);
     }
+
   private:
     void internal_reset() override {
       reset();
@@ -67,9 +69,37 @@ namespace SC {
     }
   };
 
-#define DEFINE_CHAOS_STAT(AliasName, TagString, TrackerType) \
+#define DEFINE_CHAOS_CORE_STAT(AliasName, TagString, ...) \
 struct _Tag_##AliasName { static constexpr std::string_view name() { return TagString; } }; \
-using AliasName = SC::ChaosStats<_Tag_##AliasName, TrackerType>;\
+using AliasName = SC::ChaosStats<_Tag_##AliasName, __VA_ARGS__>;
 
 
+#ifdef CHAOS_STATS_ENABLED
+#define DEFINE_CHAOS_STAT(AliasName, TagString, ...) \
+struct _Tag_##AliasName { static constexpr std::string_view name() { return TagString; } }; \
+using AliasName = SC::ChaosStats<_Tag_##AliasName,  __VA_ARGS__>;
+
+#define CHAOS_RECORD(AliasName, ...)\
+AliasName::record(__VA_ARGS__);
+
+#define CHAOS_START(AliasName, ...)\
+AliasName::start(__VA_ARGS__);
+
+#define CHAOS_STOP(AliasName, ...)\
+AliasName::stop(__VA_ARGS__);
+
+#define CHAOS_RESET(AliasName, ...)\
+AliasName::reset(__VA_ARGS__);
+
+#define  CHAOS_STATS_LOG(LOGGER, TAG, ...)\
+LOGGER::stats<__VA_ARGS__>(TAG);
+
+#else
+#define DEFINE_CHAOS_STAT(AliasName, TagString, ...)
+#define CHAOS_RECORD(AliasName, ...)
+#define CHAOS_START(AliasName, ...)
+#define CHAOS_STOP(AliasName, ...)
+#define CHAOS_RESET(AliasName, ...)
+#define  CHAOS_STATS_LOG(LOGGER, TAG, ...)
+#endif
 } // namespace SC

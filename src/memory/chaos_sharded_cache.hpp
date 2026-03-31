@@ -4,6 +4,8 @@
 #include <atomic>
 #include <unordered_map>
 
+#include "threading/chaos_spin_lock.hpp"
+
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
@@ -20,7 +22,6 @@ namespace SC {
     requires std::integral<K>
   class ChaosShardedCache {
     struct IdentityHash {
-      using is_transparent = void;
       size_t operator()(size_t key) const noexcept { return key; }
     };
 
@@ -29,19 +30,15 @@ namespace SC {
      * Aligned to 64 bytes to prevent "False Sharing".
      */
     struct alignas(64) Shard {
-      std::atomic_flag lock = ATOMIC_FLAG_INIT;
+      ChaosSpinLock lock;
       std::unordered_map<K, V, IdentityHash> data;
 
       void acquire() {
-        while (lock.test_and_set(std::memory_order_acquire)) {
-#if defined(__x86_64__) || defined(_M_X64)
-          _mm_pause(); // Lowers power consumption and improves spinlock performance
-#endif
-        }
+        lock.lock();
       }
 
       void release() {
-        lock.clear(std::memory_order_release);
+        lock.unlock();
       }
     };
 
@@ -56,8 +53,8 @@ namespace SC {
 
   public:
     /**
-     * @brief Constructs the cache with an optional initial capacity.
-     * @param totalInitialCapacity Pre-allocates memory for the whole cache.
+     * @brief Constructs the memory with an optional initial capacity.
+     * @param totalInitialCapacity Pre-allocates memory for the whole memory.
      */
     explicit ChaosShardedCache(size_t totalInitialCapacity = 0) {
       if (totalInitialCapacity > 0) {
@@ -78,7 +75,7 @@ namespace SC {
     }
 
     /**
-     * @brief Clears the cache.
+     * @brief Clears the memory.
      * @note Your original logic assumed V is a weak_ptr to an object with a reset() method.
      */
     void reset() {
@@ -112,7 +109,7 @@ namespace SC {
     }
 
     /**
-     * @brief Inserts or updates a value in the cache.
+     * @brief Inserts or updates a value in the memory.
      */
     void insert(const K &key, V value) {
       auto &shard = get_shard(key);

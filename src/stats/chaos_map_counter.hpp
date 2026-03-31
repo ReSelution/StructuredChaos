@@ -1,9 +1,9 @@
 #pragma once
-#include <atomic>
 #include <unordered_map>
 #include <string>
 #include <format>
 #include <algorithm>
+#include "threading/chaos_spin_lock.hpp"
 
 namespace SC {
 
@@ -11,38 +11,27 @@ namespace SC {
   struct ChaosMapCounter {
     using Key = KeyType;
 
-    struct Storage {
+    struct alignas(64) Storage {
+      const std::string_view name;
       std::unordered_map<Key, uint64_t> counts;
-      std::atomic_flag lock = ATOMIC_FLAG_INIT;
+      mutable ChaosSpinLock lock;
     };
 
-    // RAII-Guard für den Spinlock
-    struct SpinLockGuard {
-      std::atomic_flag& flag;
-      SpinLockGuard(std::atomic_flag& f) : flag(f) {
-        while (flag.test_and_set(std::memory_order_acquire)) {
-#if defined(__x86_64__) || defined(_M_X64)
-          __builtin_ia32_pause();
-#endif
-        }
-      }
-      ~SpinLockGuard() { flag.clear(std::memory_order_release); }
-    };
 
     static void record(Storage& s, const Key& key, uint64_t amount = 1) {
-      SpinLockGuard guard(s.lock);
+      ChaosSpinLockGuard guard(s.lock);
       s.counts[key] += amount;
     }
 
     static void reset(Storage& s) {
-      SpinLockGuard guard(s.lock);
+      ChaosSpinLockGuard guard(s.lock);
       s.counts.clear();
     }
 
     static std::string format(const Storage& s) {
 
       auto& mutable_s = const_cast<Storage&>(s);
-      SpinLockGuard guard(mutable_s.lock);
+      ChaosSpinLockGuard guard(s.lock);
 
       if (s.counts.empty()) return "No data recorded";
 
