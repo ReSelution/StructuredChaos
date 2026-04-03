@@ -10,15 +10,11 @@ set(CMAKE_CXX_STANDARD 20)
 
 include(cmake/dependencies.cmake)
 
-option(ENABLE_CHAOS_STATS "Enable Chaos Stats" OFF)
+option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
 
 add_library(StructuredChaos STATIC
         src/memory/chaos_memory_resource.cpp
         src/memory/chaos_memory_resource.hpp
-        src/memory/chaos_memory_cell.cpp
-        src/memory/chaos_memory_cell.hpp
-
-
 )
 
 target_sources(StructuredChaos PRIVATE
@@ -81,6 +77,7 @@ target_include_directories(StructuredChaos
 
 if(ENABLE_CHAOS_STATS)
     target_compile_definitions(StructuredChaos PUBLIC CHAOS_STATS_ENABLED)
+    message(STATUS "[SC] STATS Enabled")
 endif ()
 
 
