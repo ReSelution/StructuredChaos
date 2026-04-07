@@ -9,7 +9,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(EnTT)
 
-
+FetchContent_Declare(
+        mimalloc
+        GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
+        GIT_TAG       v3.2.8
+)
+FetchContent_MakeAvailable(mimalloc)
 
 FetchContent_Declare(
         spdlog

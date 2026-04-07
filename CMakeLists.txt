@@ -15,6 +15,8 @@ option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
 add_library(StructuredChaos STATIC
         src/memory/chaos_memory_resource.cpp
         src/memory/chaos_memory_resource.hpp
+        src/ecs/chaos_resource.cpp
+        src/ecs/chaos_resource.hpp
 )
 
 target_sources(StructuredChaos PRIVATE
@@ -68,6 +70,7 @@ target_link_libraries(StructuredChaos
         TracyClient
         atomic
         EnTT
+        mimalloc-static
 )
 
 target_include_directories(StructuredChaos

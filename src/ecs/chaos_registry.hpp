@@ -50,10 +50,17 @@ namespace SC {
 
     template<typename Component, auto Method, typename... Args>
       requires IsRegistryMethod<Method>
-    decltype(auto) execute(entity e, Args &&... args);
+    decltype(auto) executeWrite(entity e, Args &&... args);
 
   private:
     void createEntities();
+
+    template<typename Component>
+    void tryConnectCleanup(entt::registry &reg, auto *acc) {
+      if constexpr (requires { Component::_chaos_cleanup; }) {
+        reg.on_destroy<Component>().template connect<&Component::_chaos_cleanup>();
+      }
+    }
 
     template<typename T>
     auto *getComponentAccess() {
@@ -85,9 +92,11 @@ namespace SC {
   }
 
   template<typename Component, auto Method, typename... Args> requires IsRegistryMethod<Method>
-  decltype(auto) ChaosRegistry::execute(entity e, Args &&... args) {
+  decltype(auto) ChaosRegistry::executeWrite(entity e, Args &&... args) {
     using AccessType = ComponentAccess<Component>;
     auto *acc = getComponentAccess<AccessType>();
+    static_assert(std::is_move_constructible_v<Component>, "Component must be moveable");
+    static_assert(std::is_nothrow_move_constructible_v<Component>, "Move must be no-throw for EnTT performance");
 
     auto doCall = [&]() -> decltype(auto) {
       return (m_reg.*Method).template operator()<Component>(e, std::forward<Args>(args)...);
@@ -98,6 +107,7 @@ namespace SC {
       std::lock_guard guard(m_regMutex);
       if (!acc->created) {
         decltype(auto) ret = doCall();
+        tryConnectCleanup<Component>(m_reg, acc);
         acc->created = true;
         return ret;
       }
