@@ -4,20 +4,16 @@ if(TARGET StructuredChaos)
     return()
 endif()
 
-project(StructuredChaos)
+project(StructuredChaos LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 
 include(cmake/dependencies.cmake)
 
 option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
 
-add_library(StructuredChaos STATIC
-        src/memory/chaos_memory_resource.cpp
-        src/memory/chaos_memory_resource.hpp
-        src/ecs/chaos_resource.cpp
-        src/ecs/chaos_resource.hpp
-)
+add_library(StructuredChaos STATIC)
 
 target_sources(StructuredChaos PRIVATE
         src/memory/chaos_bump_arena.cpp
@@ -43,7 +39,6 @@ target_sources(StructuredChaos PUBLIC
         src/memory/chaos_arena_pool.hpp
 
         src/ecs/chaos_registry.hpp
-        src/ecs/chaos_entity.hpp
 
         src/stats/chaos_timer.hpp
         src/stats/chaos_stats.hpp
@@ -68,9 +63,9 @@ target_link_libraries(StructuredChaos
         PUBLIC
         spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>
         TracyClient
+        mimalloc-static
         atomic
         EnTT
-        mimalloc-static
 )
 
 target_include_directories(StructuredChaos
@@ -80,7 +75,6 @@ target_include_directories(StructuredChaos
 
 if(ENABLE_CHAOS_STATS)
     target_compile_definitions(StructuredChaos PUBLIC CHAOS_STATS_ENABLED)
-    message(STATUS "[SC] STATS Enabled")
 endif ()
 
 
@@ -92,9 +86,12 @@ else()
 endif()
 
 if(SC_IS_MAIN_PROJECT)
-    message(STATUS "[SC] Building as main project - enabling tests")
-    add_executable(StructuredChaosTest src/main.cpp)
-    target_link_libraries(StructuredChaosTest PRIVATE StructuredChaos)
+    message(STATUS "[SC] Building as main project - enabling test suite")
+    enable_testing()
+    add_subdirectory(tests)
+
+    add_executable(StructuredChaosSandbox src/main.cpp)
+    target_link_libraries(StructuredChaosSandbox PRIVATE StructuredChaos)
 else()
     message(STATUS "[SC] Building as subdirectory - skipping tests")
 endif()

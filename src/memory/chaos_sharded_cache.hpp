@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <atomic>
 #include <unordered_map>
 
 #include "threading/chaos_spin_lock.hpp"

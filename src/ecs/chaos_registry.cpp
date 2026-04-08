@@ -4,7 +4,6 @@
 
 #include "chaos_registry.hpp"
 
-#include "chaos_entity.hpp"
 #include "memory/chaos_arena_pool.hpp"
 
 namespace SC {
@@ -20,7 +19,7 @@ namespace SC {
   }
 
   void ChaosRegistry::createEntities() {
-    std::lock_guard guard{m_regMutex};
+    std::unique_lock guard{m_regMutex};
     auto idx = mEntityIdx.load(std::memory_order_relaxed);
     if (idx < ENTITY_BLOCK_SIZE) {
       return;

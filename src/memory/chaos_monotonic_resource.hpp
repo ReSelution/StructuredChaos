@@ -5,7 +5,6 @@
 #include <mutex>
 #include <vector>
 
-#include "stats/chaos_counter.hpp"
 #include "stats/chaos_stats.hpp"
 #include "stats/chaos_throughput.hpp"
 
@@ -60,9 +59,9 @@ namespace SC {
     }
 
   protected:
-    void *do_allocate(size_t bytes, size_t alignment) override;
+    void *do_allocate(size_t bytes, size_t alignment) final;
 
-    void do_deallocate(void *, size_t, size_t) override {
+    void do_deallocate(void *, size_t, size_t) final {
     }
 
     [[nodiscard]] bool do_is_equal(const memory_resource &other) const noexcept override {

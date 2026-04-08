@@ -18,12 +18,11 @@ int main() {
       });
     }
 
-    PoolLog::stats<QueueSize, PoolThroughput, ActiveTask>("Status während der Last");
+    PoolLog::stats<SC::QueueSize, SC::PoolThroughput, SC::ActiveTask>("Status während der Last");
   }
 
   SC::ChaosThreading::wait_until_finished();
-  PoolLog::stats<PoolThroughput>("Test beendet. Finaler Durchsatz");
+  PoolLog::stats<SC::PoolThroughput>("Test beendet. Finaler Durchsatz");
 
-  SC::ChaosGlobal::report_all();
   return 0;
 }

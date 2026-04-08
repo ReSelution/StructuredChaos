@@ -2,22 +2,11 @@
 #include <cstring>
 #include <concepts>
 #include <type_traits>
+
+#include "chaos_registry.hpp"
 #include "mimalloc.h"
 
 namespace SC {
-#define CHAOS_MANAGED(...) \
-static void _chaos_cleanup(entt::registry& reg, entt::entity e) { \
-auto& comp = reg.get<decltype(*this)>(e); \
-auto cleanup_one = [&](auto& field) { \
-if constexpr (requires { field.view; }) { \
-if (field.view.data()) { \
-mi_free(const_cast<void*>(static_cast<const void*>(field.view.data()))); \
-field.view = {}; \
-} \
-} \
-}; \
-(cleanup_one(comp.__VA_ARGS__), ...); \
-}
 
   template<typename T>
   concept IsContiguousResource = requires(T t)
@@ -27,9 +16,11 @@ field.view = {}; \
     typename T::value_type;
   };
 
+
   template<IsContiguousResource ResourceType>
   struct ChaosResource {
     static constexpr bool is_chaos_resource = true;
+    std::pmr::memory_resource* pool = PoolAnchor::current;
     ResourceType view{};
 
 
@@ -47,11 +38,14 @@ field.view = {}; \
     template<typename T>
       requires requires(T t) { { t.data() }; { t.size() }; }
     ChaosResource &operator=(const T &newVal) {
+      assert(pool != nullptr);
+
       if (view.data() == newVal.data()) {
         return *this;
       }
       if (view.data()) {
-        mi_free(const_cast<void *>(static_cast<const void *>(view.data())));
+        size_t oldByteSize = view.size() * sizeof(typename ResourceType::value_type);
+        pool->deallocate(const_cast<void*>(static_cast<const void*>(view.data())), oldByteSize);
       }
 
       if (newVal.empty()) {
@@ -60,7 +54,7 @@ field.view = {}; \
       }
 
       const size_t byteSize = newVal.size() * sizeof(typename ResourceType::value_type);
-      void *buf = mi_malloc(byteSize);
+      void *buf = pool->allocate(byteSize);
       std::memcpy(buf, newVal.data(), byteSize);
 
       view = ResourceType{static_cast<typename ResourceType::value_type *>(buf), newVal.size()};

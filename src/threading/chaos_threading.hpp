@@ -80,6 +80,7 @@ namespace SC {
     static void init(uint32_t numThreads = std::thread::hardware_concurrency() - 1);
 
     static size_t getNumThreads();
+    static uint32_t getThreadId();
 
     static void wait_until_finished();
 
@@ -111,6 +112,7 @@ namespace SC {
     static auto enqueueBatch(Priority p, Iterator begin, Iterator end, F &&f, Args &&... args) {
       using ArgType = std::iterator_traits<Iterator>::value_type;
       using return_type = std::invoke_result_t<F, int, ArgType, Args...>;
+      using IterRef = decltype(*std::declval<Iterator&>());
 
       auto shared_f = std::make_shared<std::decay_t<F> >(std::forward<F>(f));
       auto shared_args = std::make_shared<std::tuple<std::decay_t<Args>...> >(std::forward<Args>(args)...);
@@ -124,7 +126,7 @@ namespace SC {
 
       for (auto it = begin; it != end; ++it) {
         auto task = std::make_unique<std::packaged_task<return_type(int)> >(
-          [shared_f, arg = std::move(*it), shared_args](int id) mutable {
+          [shared_f, arg = static_cast<IterRef>(*it), shared_args](int id) mutable {
             try {
               return std::apply([&](auto &&... unpacked_args) {
                 return (*shared_f)(id, arg, unpacked_args...);

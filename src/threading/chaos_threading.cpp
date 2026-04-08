@@ -4,8 +4,8 @@
 #include <condition_variable>
 #include <queue>
 
-#include "tracy/Tracy.hpp"
 
+#include "tracy/Tracy.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #include <processthreadsapi.h>
@@ -42,6 +42,8 @@ namespace SC {
   static std::condition_variable_any cv;
   static std::condition_variable_any wait_cv;
 
+  static thread_local uint32_t threadId = 0;
+
   void set_thread_name(std::string_view name) {
 #ifdef _WIN32
     wchar_t wName[64];
@@ -60,6 +62,7 @@ namespace SC {
     char name[16];
     snprintf(name, sizeof(name), "ChaosPool-%d", id);
     //set_thread_name(name);
+    threadId = id;
     //tracy::SetThreadName(name);
     while (!st.stop_requested()) {
       MoveOnlyTask task;
@@ -105,12 +108,16 @@ namespace SC {
     CHAOS_START(PoolThroughput)
     std::atexit(shutdown);
     for (uint32_t i = 0; i < threadCount; ++i) {
-      threads.emplace_back(workerThread, i);
+      threads.emplace_back(workerThread, 1+i+longRunningThreads.size());
     }
   }
 
   size_t ChaosThreading::getNumThreads() {
     return threads.size();
+  }
+
+  uint32_t ChaosThreading::getThreadId() {
+    return threadId;
   }
 
   void ChaosThreading::pushTask(const Priority p, MoveOnlyTask task) {
@@ -142,13 +149,15 @@ namespace SC {
     CHAOS_RECORD(LongRunningThreads, 1)
     std::lock_guard lock(threadMutex);
     std::erase_if(longRunningThreads, [](const std::jthread &t) { return !t.joinable(); });
+
     longRunningThreads.emplace_back([name, task = std::move(task)](const std::stop_token &st) {
       std::string nameStr(name);
       set_thread_name(nameStr);
-
+      threadId = LongRunningThreads::m_storage.value;
       task(st);
       CHAOS_RECORD(LongRunningThreads, -1);
     });
+
   }
 
   void ChaosThreading::wait_until_finished() {
