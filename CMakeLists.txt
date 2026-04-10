@@ -66,6 +66,7 @@ target_link_libraries(StructuredChaos
         mimalloc-static
         atomic
         EnTT
+        pfr
 )
 
 target_include_directories(StructuredChaos

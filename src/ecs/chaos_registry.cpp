@@ -15,7 +15,7 @@ namespace SC {
       return create();
     }
 
-    return {mEntities[myIdx], this};
+    return mEntities[myIdx];
   }
 
   void ChaosRegistry::createEntities() {
@@ -25,6 +25,9 @@ namespace SC {
       return;
     }
     m_reg.create(mEntities.begin(), mEntities.end());
+    for (auto &e : mEntities) {
+      e.registry = this;
+    }
     mEntityIdx.store(0, std::memory_order_relaxed);
   }
 } // SC

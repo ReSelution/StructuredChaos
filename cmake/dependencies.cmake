@@ -22,3 +22,10 @@ FetchContent_Declare(
         GIT_TAG        v1.17.0
 )
 FetchContent_MakeAvailable(spdlog)
+
+FetchContent_Declare(
+        pfr
+        GIT_REPOSITORY https://github.com/apolukhin/pfr_non_boost.git
+        GIT_TAG        2.3.2
+)
+FetchContent_MakeAvailable(pfr)

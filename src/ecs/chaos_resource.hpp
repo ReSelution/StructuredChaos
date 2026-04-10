@@ -3,8 +3,6 @@
 #include <concepts>
 #include <type_traits>
 
-#include "chaos_registry.hpp"
-#include "mimalloc.h"
 
 namespace SC {
 
@@ -23,18 +21,27 @@ namespace SC {
     std::pmr::memory_resource* pool = PoolAnchor::current;
     ResourceType view{};
 
-
     template<typename T>
       requires requires(T t) { { t.data() }; { t.size() }; }
     ChaosResource(const T &initialVal) {
       *this = initialVal;
     }
-
+    constexpr ChaosResource() noexcept : pool(nullptr) {}
     ChaosResource(ChaosResource& other) = delete;
     ChaosResource(ChaosResource&& other) noexcept : view(other.view) {
       other.view = {};
     }
 
+    // ~ChaosResource() {
+    //   clear();
+    // }
+    //
+    void clear() {
+      if (view.data()) {
+        size_t oldByteSize = view.size() * sizeof(typename ResourceType::value_type);
+        pool->deallocate(const_cast<void*>(static_cast<const void*>(view.data())), oldByteSize);
+      }
+    }
     template<typename T>
       requires requires(T t) { { t.data() }; { t.size() }; }
     ChaosResource &operator=(const T &newVal) {
@@ -87,4 +94,9 @@ namespace SC {
     std::size_t size() const { return view.size(); }
     bool empty() const { return view.empty(); }
   };
+
+  template<typename T>
+  concept IsChaosResource = requires {
+    { T::is_chaos_resource } -> std::convertible_to<bool>;
+  } && T::is_chaos_resource;
 } // SC
