@@ -67,6 +67,9 @@ target_link_libraries(StructuredChaos
         atomic
         EnTT
         pfr
+        PRIVATE
+        atomic_queue::atomic_queue
+
 )
 
 target_include_directories(StructuredChaos

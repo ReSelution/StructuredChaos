@@ -29,3 +29,10 @@ FetchContent_Declare(
         GIT_TAG        2.3.2
 )
 FetchContent_MakeAvailable(pfr)
+
+FetchContent_Declare(
+        atomic_queue
+        GIT_REPOSITORY https://github.com/max0x7ba/atomic_queue.git
+        GIT_TAG        v1.7.3
+)
+FetchContent_MakeAvailable(atomic_queue)

@@ -3,7 +3,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
-
+#include <atomic_queue/atomic_queue.h>
 
 #include "tracy/Tracy.hpp"
 
@@ -34,10 +34,12 @@ namespace SC {
 #else
     std::mutex queueMutex;
 #endif
+    using aQueue = atomic_queue::AtomicQueueB2<MoveOnlyTask, std::allocator<MoveOnlyTask>>;
 
     struct alignas(64) WorkerData {
-        std::mutex queueMutex;
-        std::queue<MoveOnlyTask> tasks;
+        explicit WorkerData(uint32_t cap) : queue(cap) {}
+
+        aQueue queue;
     };
 
     static std::priority_queue<ChaosTask> tasks;
@@ -50,7 +52,6 @@ namespace SC {
     static std::condition_variable_any wait_cv;
 
     static std::vector<std::unique_ptr<WorkerData>> workerStores;
-    static std::atomic<uint32_t> helpers{0};
     static std::atomic<uint32_t> available{0};
 
     static thread_local int32_t threadId = 0;
@@ -85,14 +86,10 @@ namespace SC {
 
         for (size_t i = 0; i < numWorkers; ++i) {
             size_t targetIdx = (startIdx + i) % numWorkers;
-            auto& targetStore = workerStores[targetIdx];
+            auto &targetStore = workerStores[targetIdx];
 
-            std::unique_lock lock(targetStore->queueMutex, std::try_to_lock);
-
-            if (lock.owns_lock() && !targetStore->tasks.empty()) {
-                MoveOnlyTask task = std::move(targetStore->tasks.front());
-                targetStore->tasks.pop();
-                available.fetch_sub(1, std::memory_order_release);
+            MoveOnlyTask task;
+            if (targetStore->queue.try_pop(task)) {
                 return task; // Sofort raus hier!
             }
         }
@@ -155,7 +152,7 @@ namespace SC {
 
         workerStores.reserve(threadCount);
         for (uint32_t i = 0; i < threadCount; ++i) {
-            workerStores.push_back(std::make_unique<WorkerData>());
+            workerStores.push_back(std::make_unique<WorkerData>(threadCount * HELPER_TASK_MULTIPLYER));
         }
 
         CHAOS_START(PoolThroughput)
@@ -209,23 +206,16 @@ namespace SC {
     void ChaosThreading::pushHelperTask(std::vector<MoveOnlyTask> &batch) {
         const auto id = getThreadId();
         auto &store = workerStores[id];
-        store->queueMutex.lock();
         for (auto &task: batch) {
-            store->tasks.emplace(std::move(task));
+            store->queue.push(std::move(task));
         }
-        store->queueMutex.unlock();
         available.fetch_add(1);
         cv.notify_all();
         while (true) {
             MoveOnlyTask task;
-            {
-                std::lock_guard lock(store->queueMutex);
-                if (store->tasks.empty()) {
-                    available.fetch_sub(1);
-                    return;
-                }
-                task = std::move(store->tasks.front());
-                store->tasks.pop();
+            if (!store->queue.try_pop(task)) {
+                available.fetch_sub(1);
+                return;
             }
             task(id);
         }

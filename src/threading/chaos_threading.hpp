@@ -30,6 +30,7 @@ namespace SC {
     REGISTER_CHAOS_STAT(PoolThroughput)
     REGISTER_CHAOS_STAT(LongRunningThreads)
 
+    constexpr uint32_t  HELPER_TASK_MULTIPLYER  = 4;
 
     struct MoveOnlyTask {
         struct Base {
@@ -90,15 +91,12 @@ namespace SC {
         static void wait_until_finished();
 
         template<typename Iter, typename Func>
-        static void parralelFor(Iter begin, Iter end, Func &&func, uint32_t numTask = 0) {
+        static void parralelFor(Iter begin, Iter end, Func &&func) {
             auto totalSize = std::distance(begin, end);
             if (totalSize == 0) {
                 return;
             }
-            if (numTask == 0) {
-                numTask = getNumThreads() * 4;
-            }
-
+            auto numTask = getNumThreads() * HELPER_TASK_MULTIPLYER;
             if (static_cast<size_t>(totalSize) < numTask)[[unlikely]] {
                 numTask = static_cast<uint32_t>(totalSize);
             }
@@ -110,12 +108,13 @@ namespace SC {
             struct alignas(64) BatchContext {
                 std::atomic<uint32_t> remaining;
                 std::promise<void> promise;
+
                 BatchContext(uint32_t count) : remaining(count) {}
             };
 
             auto ctx = std::make_unique<BatchContext>(numTask);
             auto ftr = ctx->promise.get_future();
-            auto rawCtx =ctx.get();
+            auto rawCtx = ctx.get();
 
             auto current = begin;
             for (uint32_t i = 0; i < numTask; ++i) {
