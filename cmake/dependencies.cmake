@@ -1,7 +1,5 @@
 include(FetchContent)
 
-
-# EnTT für das ECS-Backend
 FetchContent_Declare(
         EnTT
         GIT_REPOSITORY https://github.com/skypjack/entt.git
@@ -36,3 +34,24 @@ FetchContent_Declare(
         GIT_TAG        v1.7.3
 )
 FetchContent_MakeAvailable(atomic_queue)
+
+FetchContent_Declare(
+        glm
+        GIT_REPOSITORY https://github.com/g-truc/glm.git
+        GIT_TAG        1.0.3
+)
+FetchContent_MakeAvailable(glm)
+
+FetchContent_Declare(
+        hwy
+        GIT_REPOSITORY https://github.com/google/highway.git
+        GIT_TAG        1.3.0
+)
+FetchContent_MakeAvailable(hwy)
+
+FetchContent_Declare(
+        tracy
+        GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+        GIT_TAG       v0.13.1
+)
+FetchContent_MakeAvailable(tracy)

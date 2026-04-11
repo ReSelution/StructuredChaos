@@ -144,7 +144,15 @@ namespace SC {
 
         };
 
-        template<Priority P = Priority::Normal, class F, class... Args>
+
+        template< class F, class... Args>
+        requires std::invocable<F, int, Args...>
+        static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
+            return enqueue<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args) ...);
+        }
+
+
+        template<Priority P , class F, class... Args>
         requires std::invocable<F, int, Args...>
         static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
             using return_type = std::invoke_result_t<F, int, Args...>;
@@ -241,7 +249,7 @@ namespace SC {
 
     private:
         template<Priority P>
-        static void pushTask(MoveOnlyTask task);
+        static void pushTask(MoveOnlyTask &&task);
 
         template<Priority P>
         static void pushBatch( std::vector<MoveOnlyTask> &batch);

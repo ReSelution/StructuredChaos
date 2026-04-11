@@ -1,19 +1,91 @@
 cmake_minimum_required(VERSION 3.24)
 
-if(TARGET StructuredChaos)
-    return()
-endif()
-
 project(StructuredChaos LANGUAGES CXX)
+
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    message(STATUS "ccache gefunden und aktiviert.")
+endif()
+include(CheckCXXCompilerFlag)
+
+
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+
+add_library(StructuredChaos STATIC
+        src/hash/hash.cpp
+        src/hash/hash.hpp)
+
+if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    set(SAA_TARGETING_WINDOWS TRUE)
+    if (CMAKE_CXX_COMPILER_ID MATCHES "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        add_link_options("-static")
+        add_link_options("-static-libgcc")
+        add_link_options("-static-libstdc++")
+    endif ()
+else ()
+    set(SAA_TARGETING_WINDOWS FALSE)
+endif ()
+
+if (NOT MSVC)
+    include(CheckCXXCompilerFlag)
+
+    set(_SAA_LINKER "Default (Slow)")
+
+    if (NOT SAA_TARGETING_WINDOWS)
+        check_cxx_compiler_flag("-fuse-ld=mold" SAA_HAS_MOLD)
+        check_cxx_compiler_flag("-fuse-ld=lld" SAA_HAS_LLD)
+    endif ()
+
+    if (SAA_HAS_MOLD AND NOT SAA_TARGETING_WINDOWS)
+        set(_SAA_LINKER "mold")
+        add_link_options("-fuse-ld=mold")
+    elseif (SAA_HAS_LLD AND NOT SAA_TARGETING_WINDOWS)
+        set(_SAA_LINKER "lld")
+        add_link_options("-fuse-ld=lld")
+    endif ()
+
+    message(STATUS "[CHAOS] Using Linker: ${_SAA_LINKER}")
+endif ()
+
+if (NOT MSVC)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT supported OUTPUT error)
+    if(supported)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    else()
+        message(STATUS "IPO/LTO is not supported: ${error}")
+    endif()
+
+    if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(StructuredChaos PUBLIC  -O3 -march=native -fno-rtti)
+    else()
+        target_compile_options(StructuredChaos PUBLIC -g -O0)
+        message(STATUS "[SAA] Debug mode: Optimizations disabled")
+    endif()
+endif()
+
+
 
 include(cmake/dependencies.cmake)
-
+add_subdirectory(external/cityhash)
+add_subdirectory(external/xxHash)
 option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
 
-add_library(StructuredChaos STATIC)
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT supported OUTPUT error)
+if(supported)
+    set_target_properties(StructuredChaos PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+else()
+    message(STATUS "IPO/LTO is not supported: ${error}")
+endif()
 
 target_sources(StructuredChaos PRIVATE
         src/memory/chaos_bump_arena.cpp
@@ -58,7 +130,6 @@ else()
     target_compile_options(StructuredChaos PUBLIC /arch:AVX2)
 endif()
 
-add_subdirectory(external/tracy)
 target_link_libraries(StructuredChaos
         PUBLIC
         spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>
@@ -67,8 +138,11 @@ target_link_libraries(StructuredChaos
         atomic
         EnTT
         pfr
+        hwy
+        xxHASH
         PRIVATE
         atomic_queue::atomic_queue
+        CITY_HASH
 
 )
 

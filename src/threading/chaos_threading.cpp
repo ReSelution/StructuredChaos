@@ -201,11 +201,16 @@ namespace SC {
     }
 
     template<ChaosThreading::Priority P>
-    void ChaosThreading::pushTask(MoveOnlyTask task) {
-        queues.enqueue<P>(task);
+    void ChaosThreading::pushTask(MoveOnlyTask &&task) {
+        queues.enqueue<P>(std::move(task));
         QueueSize::record(1);
         cv.notify_one();
     }
+
+    template void ChaosThreading::pushTask<ChaosThreading::Priority::High>(MoveOnlyTask &&task);
+    template void ChaosThreading::pushTask<ChaosThreading::Priority::Normal>(MoveOnlyTask &&task);
+    template void ChaosThreading::pushTask<ChaosThreading::Priority::Low>(MoveOnlyTask &&task);
+
 
     template<ChaosThreading::Priority P>
     void ChaosThreading::pushBatch(std::vector<MoveOnlyTask> &batch) {
