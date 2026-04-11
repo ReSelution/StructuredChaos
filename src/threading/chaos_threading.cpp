@@ -29,11 +29,7 @@ namespace SC {
         }
     };
 
-#ifdef TRACY_ENABLE
-    TracyLockable(std::mutex, queueMutex);
-#else
-    std::mutex queueMutex;
-#endif
+
     using aQueue = atomic_queue::AtomicQueueB2<MoveOnlyTask, std::allocator<MoveOnlyTask>>;
 
     struct alignas(64) WorkerData {
@@ -42,7 +38,40 @@ namespace SC {
         aQueue queue;
     };
 
-    static std::priority_queue<ChaosTask> tasks;
+    struct alignas(64) Queues {
+        using Priority = ChaosThreading::Priority;
+        std::array<aQueue, static_cast<size_t>(Priority::PriorityCount)> pQueues;
+
+        Queues() : pQueues{aQueue(QUEUE_CAP), aQueue(QUEUE_CAP), aQueue(QUEUE_CAP)} {
+
+        }
+
+        bool try_pop_any(MoveOnlyTask &task) {
+            return try_pop_impl(task, std::make_index_sequence<static_cast<size_t>(Priority::PriorityCount)>{});
+        }
+
+        [[nodiscard]] bool was_empty() const {
+            return was_empty_impl(std::make_index_sequence<static_cast<size_t>(Priority::PriorityCount)>{});
+        }
+
+        template<Priority p>
+        void enqueue(MoveOnlyTask &&task) {
+            constexpr int index = static_cast<int>(p);
+            pQueues[index].push(std::move(task));
+        }
+
+    private:
+
+        template<size_t... Is>
+        bool try_pop_impl(MoveOnlyTask &task, std::index_sequence<Is...>) {
+            return (pQueues[Is].try_pop(task) || ...); // Fold Expression (C++17)
+        }
+
+        template<size_t... Is>
+        [[nodiscard]] bool was_empty_impl(std::index_sequence<Is...>) const {
+            return (pQueues[Is].was_empty() && ...);
+        }
+    };
 
     static std::mutex threadMutex;
     static std::vector<std::jthread> threads;
@@ -50,6 +79,9 @@ namespace SC {
 
     static std::condition_variable_any cv;
     static std::condition_variable_any wait_cv;
+
+    static Queues queues;
+    static std::mutex queueMutex;
 
     static std::vector<std::unique_ptr<WorkerData>> workerStores;
     static std::atomic<uint32_t> available{0};
@@ -104,28 +136,34 @@ namespace SC {
         //tracy::SetThreadName(name);
         while (!st.stop_requested()) {
             MoveOnlyTask task;
-            {
-                std::unique_lock lock(queueMutex);
-                if (!cv.wait(lock, st, [] { return !tasks.empty() || available.load(std::memory_order_acquire) >= 1; }))
-                    return;
 
-                if (!tasks.empty()) {
-                    ActiveTask::record(1);
-                    task = std::move(tasks.top().task);
-                    tasks.pop();
-                    QueueSize::record(-1);
-                } else {
-                    lock.unlock();
-                    task = helpThread(id);
-                }
+
+            if (queues.try_pop_any(task)) {
+                ActiveTask::record(1);
+                QueueSize::record(-1);
+                task(id);
+                ActiveTask::record(-1);
+                CHAOS_RECORD(PoolThroughput, 1)
+                continue;
             }
 
-            task(id);
-            ActiveTask::record(-1);
-            CHAOS_RECORD(PoolThroughput, 1)
-            if (tasks.empty() && ActiveTask::m_storage.value.load() == 0) {
+            task = helpThread(id);
+            if (task) {
+                task(id);
+                continue;
+            }
+
+
+            if (queues.was_empty() && ActiveTask::m_storage.value.load() == 0) {
                 wait_cv.notify_all();
             }
+            {
+                std::unique_lock lock(queueMutex);
+                if (!cv.wait(lock, st,
+                             [] { return !queues.was_empty() || available.load(std::memory_order_acquire) >= 1; }))
+                    return;
+            }
+
         }
     }
 
@@ -162,27 +200,26 @@ namespace SC {
         }
     }
 
-
-    void ChaosThreading::pushTask(const Priority p, MoveOnlyTask task) {
-        {
-            std::lock_guard lock(queueMutex);
-            tasks.emplace(p, std::move(task));
-        }
+    template<ChaosThreading::Priority P>
+    void ChaosThreading::pushTask(MoveOnlyTask task) {
+        queues.enqueue<P>(task);
         QueueSize::record(1);
         cv.notify_one();
     }
 
-    void ChaosThreading::pushBatch(const Priority p, std::vector<MoveOnlyTask> &batch) {
-        {
-            std::lock_guard lock(queueMutex);
-            for (auto &t: batch) {
-                tasks.emplace(p, std::move(t));
-            }
+    template<ChaosThreading::Priority P>
+    void ChaosThreading::pushBatch(std::vector<MoveOnlyTask> &batch) {
+
+        for (auto &t: batch) {
+            queues.enqueue<P>(std::move(t));
         }
         QueueSize::record(batch.size());
-
         cv.notify_all();
     }
+
+    template void ChaosThreading::pushBatch<ChaosThreading::Priority::High>(std::vector<MoveOnlyTask>&);
+    template void ChaosThreading::pushBatch<ChaosThreading::Priority::Normal>(std::vector<MoveOnlyTask>&);
+    template void ChaosThreading::pushBatch<ChaosThreading::Priority::Low>(std::vector<MoveOnlyTask>&);
 
     void ChaosThreading::pushLongTaskInternal(std::string_view name, std::function<void(std::stop_token)> task) {
         if (!threads.empty()) {

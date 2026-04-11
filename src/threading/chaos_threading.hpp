@@ -30,7 +30,8 @@ namespace SC {
     REGISTER_CHAOS_STAT(PoolThroughput)
     REGISTER_CHAOS_STAT(LongRunningThreads)
 
-    constexpr uint32_t  HELPER_TASK_MULTIPLYER  = 4;
+    constexpr uint32_t HELPER_TASK_MULTIPLYER = 4;
+    constexpr  uint32_t  QUEUE_CAP = 50000;
 
     struct MoveOnlyTask {
         struct Base {
@@ -68,18 +69,18 @@ namespace SC {
 
         MoveOnlyTask &operator=(const MoveOnlyTask &) = delete;
 
-        void operator()(int id) { if (ptr) ptr->call(id); }
+        void operator()(int id) const { if (ptr) ptr->call(id); }
 
-        explicit operator bool() const { return !!ptr; }
+        explicit operator bool() const { return ptr != nullptr; }
     };
 
     class ChaosThreading {
     public:
-        enum class Priority : int {
-            Low = 0,
-            Normal = 10,
-            High = 20,
-            Critical = 100
+        enum class Priority : int32_t {
+            High,
+            Normal,
+            Low,
+            PriorityCount,
         };
 
         static void init(uint32_t numThreads = std::thread::hardware_concurrency() - 1);
@@ -143,9 +144,9 @@ namespace SC {
 
         };
 
-        template<class F, class... Args>
+        template<Priority P = Priority::Normal, class F, class... Args>
         requires std::invocable<F, int, Args...>
-        static auto enqueue(Priority p, F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
+        static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
             using return_type = std::invoke_result_t<F, int, Args...>;
 
             auto task = std::make_unique<std::packaged_task<return_type(int)> >(
@@ -156,19 +157,19 @@ namespace SC {
 
             std::future<return_type> res = task->get_future();
 
-            pushTask(p, [task = std::move(task)](int id) { (*task)(id); });
+            pushTask<P>([task = std::move(task)](int id) { (*task)(id); });
 
             return res;
         }
 
-        template<class F, class... Args>
-        requires std::invocable<F, int, Args...>
-        static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
-            return enqueue(Priority::Normal, std::forward<F>(f), std::forward<Args>(args)...);
-        }
+//        template<class F, class... Args>
+//        requires std::invocable<F, int, Args...>
+//        static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
+//            return enqueue( std::forward<F>(f), std::forward<Args>(args)...);
+//        }
 
-        template<typename Iterator, typename F, typename... Args>
-        static auto enqueueBatch(Priority p, Iterator begin, Iterator end, F &&f, Args &&... args) {
+        template<Priority P = Priority::Normal, typename Iterator, typename F, typename... Args>
+        static auto enqueueBatch(Iterator begin, Iterator end, F &&f, Args &&... args) {
             using ArgType = std::iterator_traits<Iterator>::value_type;
             using return_type = std::invoke_result_t<F, int, ArgType, Args...>;
             using IterRef = decltype(*std::declval<Iterator &>());
@@ -207,7 +208,7 @@ namespace SC {
                 batch.emplace_back([task = std::move(task)](int id) { (*task)(id); });
             }
 
-            pushBatch(p, batch);
+            pushBatch<P>( batch);
 
             return futures;
         }
@@ -239,9 +240,11 @@ namespace SC {
         }
 
     private:
-        static void pushTask(Priority p, MoveOnlyTask task);
+        template<Priority P>
+        static void pushTask(MoveOnlyTask task);
 
-        static void pushBatch(Priority p, std::vector<MoveOnlyTask> &batch);
+        template<Priority P>
+        static void pushBatch( std::vector<MoveOnlyTask> &batch);
 
         static void pushLongTaskInternal(std::string_view name, std::function<void(std::stop_token)> task);
 

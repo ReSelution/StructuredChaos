@@ -70,8 +70,8 @@ void run_registry_stress_test() {
         for (int i = 0; i < TOTAL_ENTITIES; i += BATCH_SIZE) {
             entitiesStart.emplace_back(i);
         }
-        SC::ChaosThreading::enqueueBatch(
-                SC::ChaosThreading::Priority::Normal,
+        SC::ChaosThreading::enqueueBatch< SC::ChaosThreading::Priority::Normal>(
+
                 entitiesStart.begin(), entitiesStart.end(), [&registry, BATCH_SIZE](int thread_id, int start) {
                     // 1. Entities erstellen
                     std::vector<SC::ChaosEntity> entities{BATCH_SIZE};
