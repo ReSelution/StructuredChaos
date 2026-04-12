@@ -4,9 +4,12 @@
 
 #pragma once
 
-#include <cstdint>
-#include "constexpr-xxh3.h"
-#include "xxh3.h"
+#include <utility>
+#include <tuple>
+#include <type_traits>
+#include <string_view>
+#include "rapidhash/rapidhash.h"
+
 
 #if defined(_MSC_VER) // MSVC
 #define FORCE_INLINE __forceinline
@@ -16,39 +19,16 @@
 #define FORCE_INLINE inline
 #endif
 
-namespace internal {
-    consteval uint64_t compute_xxh3(const char *s, size_t len) {
-        return constexpr_xxh3::XXH3_64bits_const(s, len);
-    }
-}
 
 inline namespace literals {
     consteval uint64_t operator ""_h(const char *s, size_t len) {
-        return internal::compute_xxh3(s, len);
+        return rapidhash(s, len);
     }
 }
 
 
 namespace SC {
-     FORCE_INLINE uint64_t xxhash(std::string_view str){
-         return XXH3_64bits(str.data(), str.size());
-     }
-
-    FORCE_INLINE uint64_t xxhash_lowercase(const std::string_view str) {
-
-        // Kleiner Stack-Buffer für Performance
-        constexpr size_t MAX_STR_LEN = 512;
-        char buffer[MAX_STR_LEN];
-        const size_t len = std::min<size_t>(str.length(), MAX_STR_LEN);
-
-        for (size_t i = 0; i < len; ++i) {
-            const auto c = static_cast<uint8_t>(str[i]);
-            buffer[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : static_cast<char>(c);
-        }
-
-        return XXH3_64bits(buffer, len);
-    }
-
+    using h64 = uint64_t;
 
     struct IdentityHash {
         using is_transparent = void;
@@ -62,20 +42,38 @@ namespace SC {
         }
     };
 
-    FORCE_INLINE uint64_t hash(std::string_view value) {
-        return xxhash(value);
+    template<typename ... Args>
+    FORCE_INLINE constexpr h64 hash(Args &&...args) {
+        if constexpr (sizeof ... (Args) == 2) {
+            auto extract = [](auto &&first, auto &&second) {
+                return rapidhash(static_cast<const void *>(first), static_cast<size_t>(second));
+            };
+            return extract(std::forward<Args>(args)...);
+        } else if constexpr (sizeof ...(Args) == 1) {
+            auto &&arg = std::get<0>(std::forward_as_tuple(std::forward<Args>(args)...));
+
+            return rapidhash(arg.data(), arg.size());
+        }
     }
 
-    template<typename T>
-    FORCE_INLINE constexpr T hash(std::string_view value) {
-        static_assert(std::is_enum_v<T>, "T must be an enum");
-        static_assert(std::is_same_v<uint64_t, std::underlying_type_t<T>>, "Enum must underlie uint64_t");
+    FORCE_INLINE constexpr h64 hash_lowercase(std::string_view str) {
+        constexpr size_t MAX_STR_LEN = 512;
+        char buffer[MAX_STR_LEN];
+        const size_t len = std::min<size_t>(str.length(), MAX_STR_LEN);
 
-        if consteval {
-            return static_cast<T>(internal::compute_xxh3(value.data(), value.size()));
+        for (size_t i = 0; i < len; ++i) {
+            const auto c = static_cast<uint8_t>(str[i]);
+            buffer[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : static_cast<char>(c);
         }
-        return static_cast<T>(xxhash(value));
+        return rapidhash(buffer, len);
+    }
+    
 
+    template<typename T, typename ... Args>
+    FORCE_INLINE constexpr T hash(Args &&...args) {
+        static_assert(std::is_enum_v<T>, "T must be an enum");
+        static_assert(std::is_same_v<h64, std::underlying_type_t<T>>, "Enum must underlie uint64_t");
+        return static_cast<T>(hash(std::forward<Args>(args)...));
     }
 
 

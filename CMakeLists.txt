@@ -74,7 +74,7 @@ endif()
 
 
 include(cmake/dependencies.cmake)
-add_subdirectory(external/xxHash)
+add_subdirectory(external/rapidhash)
 option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
 
 
@@ -138,10 +138,9 @@ target_link_libraries(StructuredChaos
         EnTT
         pfr
         hwy
-        xxHASH
+        rapidHash
         PRIVATE
         atomic_queue::atomic_queue
-        CITY_HASH
 
 )
 

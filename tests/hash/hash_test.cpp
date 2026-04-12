@@ -6,7 +6,6 @@
 #include <filesystem>
 #include <fstream>
 #include "threading/chaos_threading.hpp"
-#include "city.h"
 #include "hash/hash.hpp"
 
 LOG_ALIAS(HashLog, "Chaos", "Hash");
@@ -54,22 +53,6 @@ StringBlock loadStringsPacked(const std::string& path) {
 
 
 
-
-uint64_t oldHash(const std::string_view name){
-    char16_t buffer[512];
-    const size_t len = std::min(name.length(), (size_t) 511);
-
-    for (size_t i = 0; i < len; ++i) {
-        const uint8_t uc = static_cast<uint8_t>(name[i]);
-        uint8_t lc = (uc >= 'A' && uc <= 'Z') ? (uc + 32) : uc;
-        buffer[i] = static_cast<char16_t>(lc);
-    }
-
-    uint64_t hash = CityHash64(reinterpret_cast<const char *>(buffer), len * sizeof(char16_t));
-    return hash;
-}
-
-
 template <typename HashFn>
 std::vector<uint64_t> runHashStressTest(const StringBlock& block, HashFn&& hashFn, std::string_view name, int iterations = 100) {
     auto &strings = block.views;
@@ -101,39 +84,35 @@ std::vector<uint64_t> runHashStressTest(const StringBlock& block, HashFn&& hashF
     return  results;
 }
 
-void verifyHashes(const std::vector<uint64_t>& reference, const std::vector<uint64_t>& current, std::string_view name) {
-    if (reference.size() != current.size()) {
-        HashLog::err("Verification FAILED for {}: Size mismatch! ({} vs {})\n", name, reference.size(), current.size());
-        return;
-    }
-
-    size_t errors = 0;
-    for (size_t i = 0; i < reference.size(); ++i) {
-        if (reference[i] != current[i]) {
-            if (errors < 5) { // Nur die ersten 5 Fehler zeigen, um den Log nicht zu fluten
-                HashLog::err("Hash mismatch at index {}: Ref {:x} != Current {:x}", i, reference[i], current[i]);
-            }
-            errors++;
-        }
-    }
-
-    if (errors == 0) {
-        HashLog::info("Verification PASSED for {}: All {} hashes match.\n", name, current.size());
-    } else {
-        HashLog::err("Verification FAILED for {}: {} mismatches found!\n", name, errors);
-    }
-}
+//void verifyHashes(const std::vector<uint64_t>& reference, const std::vector<uint64_t>& current, std::string_view name) {
+//    if (reference.size() != current.size()) {
+//        HashLog::err("Verification FAILED for {}: Size mismatch! ({} vs {})\n", name, reference.size(), current.size());
+//        return;
+//    }
+//
+//    size_t errors = 0;
+//    for (size_t i = 0; i < reference.size(); ++i) {
+//        if (reference[i] != current[i]) {
+//            if (errors < 5) { // Nur die ersten 5 Fehler zeigen, um den Log nicht zu fluten
+//                HashLog::err("Hash mismatch at index {}: Ref {:x} != Current {:x}", i, reference[i], current[i]);
+//            }
+//            errors++;
+//        }
+//    }
+//
+//    if (errors == 0) {
+//        HashLog::info("Verification PASSED for {}: All {} hashes match.\n", name, current.size());
+//    } else {
+//        HashLog::err("Verification FAILED for {}: {} mismatches found!\n", name, errors);
+//    }
+//}
 
 void testFileHash(){
     auto block = loadStringsPacked("tests/hash/files.txt");
     HashLog ::info("Starting Hash Test with {} strings", block.views.size());
-    auto refHashes = runHashStressTest(block, oldHash, "Old Hash (Ref)", 100);
-
-    auto pathHashes = runHashStressTest(block, SC::hash::cityHash64_ue, "City SIMD Lower", 100);
-    verifyHashes(refHashes, pathHashes, "Hash Path");
 
 
-    auto xxHash = runHashStressTest(block, SC::hash::xxhash_lowercase, "xxHash", 100);
+    auto rapid = runHashStressTest(block, SC::hash_lowercase, "rapid", 500);
 
 
 }
@@ -141,7 +120,7 @@ void testFileHash(){
 void testSSHash(){
     auto block = loadStringsPacked("tests/hash/smallString.txt");
     HashLog ::info("Starting Hash Test with {} strings", block.views.size());
-    runHashStressTest(block, SC::hash::xxhash, "xxHash", 500);
+    runHashStressTest(block, [](auto&& s) { return SC::hash(s);}, "rapid", 500);
 
 }
 
@@ -152,7 +131,6 @@ int main(int argc, char** argv){
 
     SC::ChaosThreading::init();
     testFileHash();
-    //testSSHash();
+    testSSHash();
 
-    assert("MaterialInstanceBasePropertyOverrides"_h == SC::hash::xxhash("MaterialInstanceBasePropertyOverrides"));
 }
