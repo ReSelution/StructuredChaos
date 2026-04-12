@@ -74,7 +74,6 @@ endif()
 
 
 include(cmake/dependencies.cmake)
-add_subdirectory(external/cityhash)
 add_subdirectory(external/xxHash)
 option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
 
@@ -123,7 +122,7 @@ target_sources(StructuredChaos PUBLIC
         src/threading/chaos_threading.hpp
         src/threading/chaos_spin_lock.hpp
 )
-
+#set_source_files_properties(src/hash/hash.cpp PROPERTIES COMPILE_FLAGS "-O3 -march=native")
 if(NOT MSVC)
     target_compile_options(StructuredChaos PUBLIC -mcx16 -march=native)
 else()

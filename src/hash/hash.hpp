@@ -6,25 +6,36 @@
 #include <cstdint>
 #include "constexpr-xxh3.h"
 
+namespace internal {
+    consteval uint64_t compute_xxh3(const char* s, size_t len) {
+        return constexpr_xxh3::XXH3_64bits_const(s, len);
+    }
+}
+
+inline namespace literals {
+    consteval uint64_t operator ""_h(const char* s, size_t len) {
+        return internal::compute_xxh3(s, len);
+    }
+}
+
+
 namespace SC::hash {
     uint64_t xxhash(const std::string_view str);
     uint64_t xxhash_lowercase(const std::string_view str);
 
-
-
     uint64_t cityHash64_ue(const std::string_view str);
 
-    namespace internal {
-        consteval uint64_t compute_xxh3(const char* s, size_t len) {
-            return constexpr_xxh3::XXH3_64bits_const(s, len);
-        }
-    }
+    struct IdentityHash {
+        using is_transparent = void;
 
-    inline namespace literals {
-        consteval uint64_t operator ""_h(const char* s, size_t len) {
-            return internal::compute_xxh3(s, len);
+        [[nodiscard]] size_t operator()(uint32_t value) const noexcept {
+            return value;
         }
-    }
+
+        size_t operator()(uint64_t v) const {
+            return v;
+        }
+    };
 
     template<typename T>
     constexpr T hash(std::string_view value) {

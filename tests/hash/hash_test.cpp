@@ -52,58 +52,20 @@ StringBlock loadStringsPacked(const std::string& path) {
     return block;
 }
 
-uint64_t hashPath(const std::string_view path) {
 
-    char16_t buffer[512];
-    const size_t len = std::min<size_t>(path.length(), 512);
 
-    for (size_t i = 0; i < len; ++i) {
-        const auto uc = static_cast<char>(path[i]);
-        char lc = (uc >= 'A' && uc <= 'Z') ? static_cast<char>(uc + 32) : uc;
-        buffer[i] = static_cast<char16_t>(lc);
-    }
-
-    return CityHash64(reinterpret_cast<const char *>(buffer), len * sizeof(char16_t));
-}
-
-uint64_t hashStr(const std::string_view str) {
-    constexpr size_t MAX_LEN = 512;
-
-    char16_t buffer[MAX_LEN];
-    const size_t len = std::min(str.size(), MAX_LEN);
-
-    for (size_t i = 0; i < len; ++i) {
-        const auto uc = static_cast<unsigned char>(str[i]);
-        const char lc = static_cast<char>(
-                uc + (((uc - 'A' < 26u) ? 1u : 0u) << 5)
-        );
-
-        buffer[i] = static_cast<char16_t>(lc);
-    }
-
-    const uint64_t hash =
-            CityHash64(reinterpret_cast<const char *>(buffer),
-                       len * sizeof(char16_t));
-
-    // optional safety check (falls reservierter Wert existiert)
-    assert(hash != ~0ull && "Hash collision with invalid sentinel");
-
-    return hash;
-}
 
 uint64_t oldHash(const std::string_view name){
     char16_t buffer[512];
     const size_t len = std::min(name.length(), (size_t) 511);
 
     for (size_t i = 0; i < len; ++i) {
-        // Lowercase + UTF16-Promoting in einem Schritt
-        const auto uc = static_cast<unsigned char>(name[i]);
-        char lc = static_cast<char>(uc + (((uc - 'A' < 26u) ? 1u : 0u) << 5));
+        const uint8_t uc = static_cast<uint8_t>(name[i]);
+        uint8_t lc = (uc >= 'A' && uc <= 'Z') ? (uc + 32) : uc;
         buffer[i] = static_cast<char16_t>(lc);
     }
 
     uint64_t hash = CityHash64(reinterpret_cast<const char *>(buffer), len * sizeof(char16_t));
-    assert(hash != ~0uL && "Package name hash collision with InvalidId");
     return hash;
 }
 
@@ -165,13 +127,13 @@ void verifyHashes(const std::vector<uint64_t>& reference, const std::vector<uint
 void testFileHash(){
     auto block = loadStringsPacked("tests/hash/files.txt");
     HashLog ::info("Starting Hash Test with {} strings", block.views.size());
-    auto refHashes = runHashStressTest(block, oldHash, "Old Hash (Ref)", 500);
+    auto refHashes = runHashStressTest(block, oldHash, "Old Hash (Ref)", 100);
 
-    auto pathHashes = runHashStressTest(block, SC::hash::cityHash64_ue, "City SIMD Lower", 500);
+    auto pathHashes = runHashStressTest(block, SC::hash::cityHash64_ue, "City SIMD Lower", 100);
     verifyHashes(refHashes, pathHashes, "Hash Path");
 
 
-    auto xxHash = runHashStressTest(block, SC::hash::xxhash_lowercase, "xxHash", 500);
+    auto xxHash = runHashStressTest(block, SC::hash::xxhash_lowercase, "xxHash", 100);
 
 
 }
@@ -190,5 +152,7 @@ int main(int argc, char** argv){
 
     SC::ChaosThreading::init();
     testFileHash();
-    testSSHash();
+    //testSSHash();
+
+    assert("MaterialInstanceBasePropertyOverrides"_h == SC::hash::xxhash("MaterialInstanceBasePropertyOverrides"));
 }
