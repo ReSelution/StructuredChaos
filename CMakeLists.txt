@@ -139,6 +139,7 @@ target_link_libraries(StructuredChaos
         pfr
         hwy
         rapidHash
+        unordered_dense
         PRIVATE
         atomic_queue::atomic_queue
 
