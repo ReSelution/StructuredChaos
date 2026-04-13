@@ -32,7 +32,8 @@ namespace SC {
                     return rapid::constExpr::rapidhash(first, static_cast<size_t>(second));
                 };
                 return extract(std::forward<Args>(args)...);
-            } else {
+            }
+            else {
                 auto extract = [](auto &&first, auto &&second) {
                     return rapidhash(reinterpret_cast<const uint8_t *>(first), static_cast<size_t>(second));
                 };
@@ -46,11 +47,12 @@ namespace SC {
             if constexpr (std::is_integral_v<ArgType>) {
                 auto val = static_cast<uint64_t>(arg);
                 if consteval {
-                    return rapid::constExpr::rapidhash(reinterpret_cast<const uint8_t*>(&val), sizeof(val));
-                } else {
-                    return rapidhash(reinterpret_cast<const uint8_t*>(&val), sizeof(val));
+                    return rapid::constExpr::rapidhash(reinterpret_cast<const uint8_t *>(&val), sizeof(val));
                 }
-            }else {
+                else {
+                    return rapidhash(reinterpret_cast<const uint8_t *>(&val), sizeof(val));
+                }
+            } else {
                 auto dispatch = [](auto &&a) constexpr {
                     if constexpr (std::is_convertible_v<decltype(a), std::string_view>) {
                         std::string_view sv = a;
@@ -76,18 +78,19 @@ namespace SC {
     }
 
     FORCE_INLINE constexpr h64 hash_lowercase(std::string_view str) {
-        constexpr size_t MAX_STR_LEN = 512;
-        uint8_t buffer[MAX_STR_LEN];
-        const size_t len = std::min<size_t>(str.length(), MAX_STR_LEN);
-
-        for (size_t i = 0; i < len; ++i) {
-            const auto c = static_cast<uint8_t>(str[i]);
-            buffer[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : static_cast<char>(c);
-        }
         if consteval {
+            constexpr size_t MAX_STR_LEN = 512;
+            uint8_t buffer[MAX_STR_LEN];
+            const size_t len = std::min<size_t>(str.length(), MAX_STR_LEN);
+
+            for (size_t i = 0; i < len; ++i) {
+                const auto c = static_cast<uint8_t>(str[i]);
+                buffer[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : static_cast<char>(c);
+            }
             return rapid::constExpr::rapidhash(buffer, len);
-        } else {
-            return rapidhash(buffer, len);
+        }
+        else {
+            return rapidhash_lowercase(str.data(), str.size());
         }
     }
 
@@ -114,6 +117,7 @@ namespace SC {
         [[nodiscard]] size_t operator()(std::string_view v) const noexcept {
             return hash(v);
         }
+
         [[nodiscard]] size_t operator()(std::string v) const noexcept {
             return hash(v);
         }
