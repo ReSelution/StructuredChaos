@@ -12,6 +12,7 @@
 #include "rapidhash-constexpr.h"
 
 
+
 #if defined(_MSC_VER) // MSVC
 #define FORCE_INLINE __forceinline
 #elif defined(__GNUC__) || defined(__clang__) // GCC / Clang

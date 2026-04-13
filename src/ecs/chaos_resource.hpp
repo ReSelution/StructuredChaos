@@ -32,10 +32,6 @@ namespace SC {
       other.view = {};
     }
 
-    // ~ChaosResource() {
-    //   clear();
-    // }
-    //
     void clear() {
       if (view.data()) {
         size_t oldByteSize = view.size() * sizeof(typename ResourceType::value_type);

@@ -52,9 +52,66 @@ struct MaterialComponent {
   float metallic;
   uint32_t shaderFlags;
 };
+void run_registry_stress_test(){
+  constexpr int TOTAL_ENTITIES = 1000000;
+  constexpr int BATCH_SIZE = 5000; // Tasks pro Enqueue-Welle
+  RegLog::info("Starting High-Throughput Test: {} Entitäten...", TOTAL_ENTITIES);
+  {
+    auto t = RegLog::time("Registry-Processing of {1} Entitäten dauerte {0}", TOTAL_ENTITIES);
+    SC::ChaosRegistry registry;
+    RegistryThroughput::reset();
 
 
-void run_registry_stress_test() {
+    std::vector<int> entitiesStart;
+    entitiesStart.reserve(TOTAL_ENTITIES / BATCH_SIZE + 1);
+    for (int i = 0; i < TOTAL_ENTITIES; i += BATCH_SIZE) {
+      entitiesStart.emplace_back(i);
+    }
+    SC::ChaosThreading::enqueueBatch(
+            entitiesStart.begin(), entitiesStart.end(), [&registry, BATCH_SIZE](int thread_id, int start) {
+                for(int i = 0; i < BATCH_SIZE; i++){
+                  float rawData[200];
+                  auto e = registry.create();
+                  e.add<TransformComponent>();
+                  e.add<PhysicsComponent>();
+                  e.add<MaterialComponent>();
+                  e.add<TagComponent>();
+                  e.add<MeshComponent>(std::span<const float>(rawData, 200),
+                                       static_cast<uint32_t>(start + i));
+                }
+                RegistryThroughput::record(BATCH_SIZE);
+
+            }
+
+    );
+    SC::ChaosThreading::wait_until_finished();
+    RegistryThroughput::stop();
+    auto time1 = RegLog::time("Manipulating  of {1} Entitäten dauerte {0}", TOTAL_ENTITIES);
+    auto &&[lock, view] = registry.view<PhysicsComponent>();
+//    for (auto &&[e, phy] : view.each() ){
+//      auto &&[x,y,z ] = phy.velocity;
+//      x+=0.1f;
+//      y -= 0.3f;
+//      z += 1.0f;
+//    }
+
+    RegisteryManipulate::reset();
+    RegisteryManipulate::start();
+    const auto &iter = view.each();
+    SC::ChaosThreading::parralelFor(iter.begin(), iter.end(), [](auto e, auto &phy) {
+        auto &&[x, y, z] = phy.velocity;
+        x += 0.1f;
+        y -= 0.3f;
+        z += 1.0f;
+    });
+    RegisteryManipulate::record(view.size());
+    RegisteryManipulate::stop();
+  }
+
+  RegLog::stats<RegistryThroughput, RegisteryManipulate>("");
+}
+
+void run_registry_stress_testBatch() {
   // Konfiguration
   constexpr int TOTAL_ENTITIES = 1000000;
   constexpr int BATCH_SIZE = 5000; // Tasks pro Enqueue-Welle
@@ -145,7 +202,7 @@ void run_registry_stress_test() {
 
 int main() {
   SC::ChaosThreading::init();
-
+  run_registry_stress_testBatch();
   run_registry_stress_test();
 
   return 0;

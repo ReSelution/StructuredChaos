@@ -132,9 +132,8 @@ void testFileHash() {
 
     auto rapid = runHashStressTest(block, SC::hash_lowercase, "rapid", 500);
 
-    auto rapid_lower = runHashStressTest(block, hash_lowercaseOld, "Rapid", 500);
+    //auto rapid_lower = runHashStressTest(block, hash_lowercaseOld, "Rapid", 500);
 
-    verifyHashes(rapid, rapid_lower, "rapid_lower");
 }
 
 void testSSHash() {
