@@ -24,18 +24,6 @@
 namespace SC {
     using h64 = uint64_t;
 
-    struct IdentityHash {
-        using is_transparent = void;
-
-        [[nodiscard]] size_t operator()(uint32_t value) const noexcept {
-            return value;
-        }
-
-        size_t operator()(uint64_t v) const {
-            return v;
-        }
-    };
-
     template<typename ... Args>
     FORCE_INLINE constexpr h64 hash(Args &&...args) {
         if constexpr (sizeof...(Args) == 2) {
@@ -53,24 +41,37 @@ namespace SC {
         } else if constexpr (sizeof...(Args) == 1) {
             auto &&arg = std::get<0>(std::forward_as_tuple(std::forward<Args>(args)...));
 
-            auto dispatch = [](auto&& a) constexpr {
-                if constexpr (std::is_convertible_v<decltype(a), std::string_view>) {
-                    std::string_view sv = a;
-                    if consteval {
-                        return rapid::constExpr::rapidhash(sv.data(), sv.size());
-                    } else {
-                        return rapidhash(reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
-                    }
-                } else {
-                    if consteval {
-                        return rapid::constExpr::rapidhash(a.data(), a.size());
-                    } else {
-                        return rapidhash(reinterpret_cast<const uint8_t*>(a.data()), a.size());
-                    }
-                }
-            };
+            using ArgType = std::decay_t<decltype(arg)>;
 
-            return dispatch(arg);
+            if constexpr (std::is_integral_v<ArgType>) {
+                auto val = static_cast<uint64_t>(arg);
+                if consteval {
+                    return rapid::constExpr::rapidhash(reinterpret_cast<const uint8_t*>(&val), sizeof(val));
+                } else {
+                    return rapidhash(reinterpret_cast<const uint8_t*>(&val), sizeof(val));
+                }
+            }else {
+                auto dispatch = [](auto &&a) constexpr {
+                    if constexpr (std::is_convertible_v<decltype(a), std::string_view>) {
+                        std::string_view sv = a;
+                        if consteval {
+                            return rapid::constExpr::rapidhash(sv.data(), sv.size());
+                        }
+                        else {
+                            return rapidhash(reinterpret_cast<const uint8_t *>(sv.data()), sv.size());
+                        }
+                    } else {
+                        if consteval {
+                            return rapid::constExpr::rapidhash(a.data(), a.size());
+                        }
+                        else {
+                            return rapidhash(reinterpret_cast<const uint8_t *>(a.data()), a.size());
+                        }
+                    }
+                };
+
+                return dispatch(arg);
+            }
         }
     }
 
@@ -98,6 +99,25 @@ namespace SC {
         return static_cast<T>(hash(std::forward<Args>(args)...));
     }
 
+    struct IdentityHash {
+        using is_transparent = void;
+        using is_avalanching = void;
+
+        [[nodiscard]] size_t operator()(uint32_t value) const noexcept {
+            return value;
+        }
+
+        size_t operator()(uint64_t v) const {
+            return v;
+        }
+
+        [[nodiscard]] size_t operator()(std::string_view v) const noexcept {
+            return hash(v);
+        }
+        [[nodiscard]] size_t operator()(std::string v) const noexcept {
+            return hash(v);
+        }
+    };
 
 } // SC
 inline namespace literals {

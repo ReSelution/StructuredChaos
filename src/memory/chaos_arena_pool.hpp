@@ -15,7 +15,7 @@ namespace SC {
 
   class ChaosArenaPool {
     static constexpr size_t DEFAULT_SIZE = 16 * 1024;
-    static constexpr size_t MAX_LOADED_ARENAS = 256;
+    static constexpr size_t MAX_LOADED_ARENAS = 1024;
 
   public:
     static void init(size_t poolSize, size_t arenaSize = DEFAULT_SIZE);

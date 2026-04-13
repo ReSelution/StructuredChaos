@@ -196,7 +196,7 @@ namespace SC {
         CHAOS_START(PoolThroughput)
         std::atexit(shutdown);
         for (uint32_t i = 0; i < threadCount; ++i) {
-            threads.emplace_back(workerThread, 1 + i + longRunningThreads.size());
+            threads.emplace_back(workerThread, i + longRunningThreads.size());
         }
     }
 

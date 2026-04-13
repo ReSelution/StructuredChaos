@@ -3,6 +3,7 @@
 //
 
 #pragma once
+
 #include <memory>
 #include <memory_resource>
 #include <span>
@@ -11,68 +12,81 @@
 #include "chaos_monotonic_resource.hpp"
 
 namespace SC {
-  class ChaosBumpArena {
-    struct CleanupNode {
-      void (*destroyer)(void *);
 
-      void *object;
-      CleanupNode *next;
+    template<typename T, typename = void>
+    struct is_pmr_container : std::false_type {
     };
 
-    static inline std::atomic<uint64_t> m_idGenerator{0};
-    uint64_t m_id;
+    template<typename T>
+    struct is_pmr_container<T, std::void_t<typename T::allocator_type>> {
+        static constexpr bool value = std::is_same_v<typename T::allocator_type, std::pmr::polymorphic_allocator<typename T::value_type>>;
+    };
 
-  public:
-    explicit ChaosBumpArena(size_t size = 8 * 1024);
+    template<typename T>
+    inline constexpr bool is_pmr_container_v = is_pmr_container<T>::value;
 
-    ChaosBumpArena(const ChaosBumpArena &) = delete;
+    class ChaosBumpArena {
+        struct CleanupNode {
+            void (*destroyer)(void *);
 
-    ChaosBumpArena &operator=(const ChaosBumpArena &) = delete;
-
-    std::pmr::memory_resource *resource() { return &m_pool; }
-
-    template<typename T, typename... Args>
-    T *make(Args &&... args) {
-      void *mem = allocate(sizeof(T), alignof(T));
-      T *obj = new(mem) T(std::forward<Args>(args)...);
-
-      if constexpr (!std::is_trivially_destructible_v<T>) {
-        void *nodeMem = allocate(sizeof(CleanupNode), alignof(CleanupNode));
-        auto *newNode = new(nodeMem) CleanupNode{
-          .destroyer = [](void *p) { static_cast<T *>(p)->~T(); },
-          .object = obj,
-          .next = nullptr
+            void *object;
+            CleanupNode *next;
         };
 
-        newNode->next = m_cleanupHead.load(std::memory_order_relaxed);
-        while (!m_cleanupHead.compare_exchange_weak(newNode->next, newNode,
-                                                    std::memory_order_release,
-                                                    std::memory_order_relaxed));
-      }
-      return obj;
-    }
+        static inline std::atomic<uint64_t> m_idGenerator{0};
+        uint64_t m_id;
 
-    template<typename T = uint8_t>
-    [[nodiscard]] std::span<T> allocateSpan(size_t count, size_t alignment = alignof(T)) {
-      if (count == 0) [[unlikely]] {
-        return {};
-      }
+    public:
+        explicit ChaosBumpArena(size_t size = 8 * 1024);
 
-      void *ptr = allocate(count * sizeof(T), alignment);
+        ChaosBumpArena(const ChaosBumpArena &) = delete;
 
-      return std::span<T>(static_cast<T *>(ptr), count);
-    }
+        ChaosBumpArena &operator=(const ChaosBumpArena &) = delete;
 
-    std::string_view utf16ToUtf8(std::span<const char16_t> input);
+        std::pmr::memory_resource *resource() { return &m_pool; }
 
-    void *allocate(size_t size, size_t align);
+        template<typename T, typename... Args>
+        T *make(Args &&... args) {
+            void *mem = allocate(sizeof(T), alignof(T));
+            T *obj = new(mem) T(std::forward<Args>(args)...);
 
-    void reset();
+            if constexpr (!std::is_trivially_destructible_v<T>) {
+                void *nodeMem = allocate(sizeof(CleanupNode), alignof(CleanupNode));
+                auto *newNode = new(nodeMem) CleanupNode{
+                        .destroyer = [](void *p) { static_cast<T *>(p)->~T(); },
+                        .object = obj,
+                        .next = nullptr
+                };
 
-  private :
-    std::atomic<CleanupNode *> m_cleanupHead = nullptr;
-    const size_t m_capacity;
-    std::unique_ptr<uint8_t[]> m_backingBuffer;
-    ChaosMonotonicResource m_pool;
-  };
+                newNode->next = m_cleanupHead.load(std::memory_order_relaxed);
+                while (!m_cleanupHead.compare_exchange_weak(newNode->next, newNode,
+                                                            std::memory_order_release,
+                                                            std::memory_order_relaxed));
+            }
+            return obj;
+        }
+
+        template<typename T = uint8_t>
+        [[nodiscard]] std::span<T> allocateSpan(size_t count, size_t alignment = alignof(T)) {
+            if (count == 0) [[unlikely]] {
+                return {};
+            }
+
+            void *ptr = allocate(count * sizeof(T), alignment);
+
+            return std::span<T>(static_cast<T *>(ptr), count);
+        }
+
+        std::string_view utf16ToUtf8(std::span<const char16_t> input);
+
+        void *allocate(size_t size, size_t align);
+
+        void reset();
+
+    private :
+        std::atomic<CleanupNode *> m_cleanupHead = nullptr;
+        const size_t m_capacity;
+        std::unique_ptr<uint8_t[]> m_backingBuffer;
+        ChaosMonotonicResource m_pool;
+    };
 } // SC

@@ -32,8 +32,8 @@
 /*
  *  Includes.
  */
- #include <stdint.h>
- #include <string.h>
+ #include <cstdint>
+ #include <cstring>
  #if defined(_MSC_VER)
  # include <intrin.h>
  # if defined(_M_X64) && !defined(_M_ARM64EC)

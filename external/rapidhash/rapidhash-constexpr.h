@@ -32,7 +32,6 @@
 /*
  *  Includes.
  */
-#include <string.h>
 #include <type_traits>
 #include <cstddef>
 #include <cstdint>
