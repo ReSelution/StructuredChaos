@@ -14,7 +14,7 @@ namespace SC {
       createEntities();
       return create();
     }
-
+    CHAOS_RECORD(Entities, 1);
     return mEntities[myIdx];
   }
 

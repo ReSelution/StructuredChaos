@@ -16,6 +16,9 @@
 
 #include "pfr.hpp"
 
+#include "stats/chaos_stats.hpp"
+#include "stats/chaos_throughput.hpp"
+
 namespace SC {
     // template<typename T>
     // struct get_class_from_member;
@@ -78,7 +81,11 @@ namespace SC {
     template<typename T>
     concept Mutable = !std::is_const_v<T>;
 
-    class ChaosRegistry {
+  DEFINE_CHAOS_STAT(Entities, "Entities", SC::ChaosThroughput<SC::MetricUnits>, false);
+  REGISTER_CHAOS_STAT(Entities)
+
+
+  class ChaosRegistry {
         template<typename Component>
         struct alignas(64) ComponentAccess {
             mutable std::shared_mutex mutex;
@@ -184,6 +191,7 @@ namespace SC {
         for (auto iter = begin; iter != end; ++iter) {
             iter->registry = this;
         }
+        CHAOS_RECORD(Entities,std::distance(begin,end) )
     }
 
     template<typename... Components>
