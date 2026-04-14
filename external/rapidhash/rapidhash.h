@@ -344,34 +344,48 @@ RAPIDHASH_INLINE_CONSTEXPR uint64_t rapidhash_internal(const void *key, size_t l
 }
 
 #ifdef RAPIDHASH_LITTLE_ENDIAN
+/**
+ * Reads 8 bytes and converts any uppercase ASCII characters to lowercase in-place.
+ * This uses a branchless SWAR (SIMD Within A Register) technique to process
+ * all 8 characters in parallel without expensive if-statements.
+ */
 RAPIDHASH_INLINE uint64_t rapid_read64_lowercase(const char *p) RAPIDHASH_NOEXCEPT {
-    uint64_t v;
-    std::memcpy(&v, p, sizeof(uint64_t));
+  uint64_t chunk;
+  std::memcpy(&chunk, p, sizeof(uint64_t));
 
-    // Bit-Magie: Erzeuge eine Maske für alle Bytes, die zwischen 'A' (0x41) und 'Z' (0x5A) liegen.
-    // Wir addieren einen Wert, der bei 'A'-'Z' einen Overflow in das MSB des Bytes erzwingt.
-    uint64_t msb = 0x8080808080808080ULL;
-    uint64_t a = v + (msb - 0x4141414141414141ULL);
-    uint64_t b = v + (msb - 0x5B5B5B5B5B5B5B5BULL);
+  // The MSB (Most Significant Bit) of each byte in the 64-bit word.
+  const uint64_t msb_mask = 0x8080808080808080ULL;
 
-    // c enthält das gesetzte MSB (0x80) nur für Bytes, die Großbuchstaben sind.
-    uint64_t c = (a ^ b) & msb;
+  // Trick: Check if a byte is in range ['A', 'Z'] by leveraging integer underflow/overflow.
+  // 1. If byte >= 'A' (0x41), adding (0x80 - 0x41) will set the MSB to 1.
+  // 2. If byte >= 'Z' + 1 (0x5B), adding (0x80 - 0x5B) will set the MSB to 1.
+  uint64_t at_least_A = chunk + (msb_mask - 0x4141414141414141ULL);
+  uint64_t beyond_Z   = chunk + (msb_mask - 0x5B5B5B5B5B5B5B5BULL);
 
-    // Shift das 0x80 Bit auf die 0x20 Position und "Oder" es auf den Originalwert.
-    // Das macht aus 'A' (0x41) ein 'a' (0x61), lässt aber Zahlen und Kleinbuchstaben in Ruhe.
-    return v | (c >> 2);
+  // XOR the results: The MSB is now 1 ONLY if the byte was >= 'A' AND < 'Z'+1.
+  uint64_t uppercase_mask = (at_least_A ^ beyond_Z) & msb_mask;
+
+  // ASCII 'A' (0x41) to 'a' (0x61) is a flip of the 6th bit (0x20).
+  // Shift our MSB (0x80) mask 2 bits to the right to target the 0x20 bit.
+  return chunk | (uppercase_mask >> 2);
 }
 
+/**
+ * Reads 4 bytes and converts uppercase ASCII to lowercase.
+ * Same logic as the 64-bit version but for a 32-bit word.
+ */
 RAPIDHASH_INLINE uint32_t rapid_read32_lowercase(const char *p) RAPIDHASH_NOEXCEPT {
-    uint32_t v;
-    std::memcpy(&v, p, sizeof(uint32_t));
+  uint32_t chunk;
+  std::memcpy(&chunk, p, sizeof(uint32_t));
 
-    uint32_t msb = 0x80808080;
-    uint32_t a = v + (msb - 0x41414141);
-    uint32_t b = v + (msb - 0x5B5B5B5B);
-    uint32_t c = (a ^ b) & msb;
+  const uint32_t msb_mask = 0x80808080;
 
-    return v | (c >> 2);
+  uint32_t at_least_A = chunk + (msb_mask - 0x41414141);
+  uint32_t beyond_Z   = chunk + (msb_mask - 0x5B5B5B5B);
+
+  uint32_t uppercase_mask = (at_least_A ^ beyond_Z) & msb_mask;
+
+  return chunk | (uppercase_mask >> 2);
 }
 #elif defined(__GNUC__) || defined(__INTEL_COMPILER) || defined(__clang__)
 RAPIDHASH_INLINE uint64_t rapid_read64(const uint8_t *p) RAPIDHASH_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return __builtin_bswap64(v);}
