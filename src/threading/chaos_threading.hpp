@@ -8,6 +8,8 @@
 #include <functional>
 #include <future>
 #include <thread>
+#include <ranges>
+#include <utility>
 
 #include "stats/chaos_counter.hpp"
 #include "stats/chaos_stats.hpp"
@@ -30,52 +32,14 @@ namespace SC {
   REGISTER_CHAOS_STAT(PoolThroughput)
   REGISTER_CHAOS_STAT(LongRunningThreads)
 
-  constexpr uint32_t HELPER_TASK_MULTIPLYER = 4;
-  constexpr uint32_t QUEUE_CAP = 50000;
+  constexpr uint64_t HELPER_TASK_MULTIPLYER = 4;
+  constexpr uint64_t QUEUE_CAP = 50000;
 
-  struct MoveOnlyTask {
-    struct Base {
-      virtual ~Base() = default;
-
-      virtual void call(int id) = 0;
-    };
-
-    template<typename F>
-    struct Impl : Base {
-      F f;
-
-      Impl(F &&f) : f(std::forward<F>(f)) {
-      }
-
-      void call(int id) override { f(id); }
-    };
-
-    std::unique_ptr<Base> ptr;
-
-    MoveOnlyTask() = default;
-
-    template<typename F>
-    requires (!std::is_same_v<std::decay_t<F>, MoveOnlyTask>)
-    MoveOnlyTask(F &&f)
-            : ptr(std::make_unique<Impl<std::decay_t<F> > >(std::forward<F>(f))) {
-    }
-
-    // 3. Move-only Logik
-    MoveOnlyTask(MoveOnlyTask &&) noexcept = default;
-
-    MoveOnlyTask &operator=(MoveOnlyTask &&) noexcept = default;
-
-    MoveOnlyTask(const MoveOnlyTask &) = delete;
-
-    MoveOnlyTask &operator=(const MoveOnlyTask &) = delete;
-
-    void operator()(int id) const { if (ptr) ptr->call(id); }
-
-    explicit operator bool() const { return ptr != nullptr; }
-  };
+  using MoveOnlyFunction = std::move_only_function<void(int)>;
 
   class ChaosThreading {
-  public:
+
+    public:
     enum class Priority : int32_t {
       High,
       Normal,
@@ -84,27 +48,21 @@ namespace SC {
     };
 
     static void init(uint32_t numThreads = std::thread::hardware_concurrency() - 1);
-
     static size_t getNumThreads();
-
     static int32_t getThreadId();
-
     static void wait_until_finished();
 
-    template<typename Iter, typename Func>
-    static void parralelFor(Iter begin, Iter end, Func &&func) {
-      auto totalSize = std::distance(begin, end);
-      if (totalSize == 0) {
-        return;
-      }
-      auto numTask = getNumThreads() * HELPER_TASK_MULTIPLYER;
-      if (static_cast<size_t>(totalSize) < numTask)[[unlikely]] {
-        numTask = static_cast<uint32_t>(totalSize);
-      }
-      auto chunkSize = totalSize / numTask;
+    template<std::ranges::input_range R, typename Func>
+    static void parralelFor(R &&range, Func &&func) {
+      auto totalSize = std::ranges::distance(range);
+      if (totalSize <= 0) [[unlikely]] return;
 
-      std::vector<MoveOnlyTask> batch;
-      batch.reserve(numTask);
+
+      const size_t threadLimit = getNumThreads() * HELPER_TASK_MULTIPLYER;
+      const size_t numTasksLimit = std::min<size_t>(totalSize, threadLimit);
+
+      const size_t chunkSize = totalSize / numTasksLimit;
+
 
       struct alignas(64) BatchContext {
         std::atomic<uint32_t> remaining;
@@ -113,24 +71,28 @@ namespace SC {
         BatchContext(uint32_t count) : remaining(count) {}
       };
 
-      auto ctx = std::make_unique<BatchContext>(numTask);
-      auto ftr = ctx->promise.get_future();
-      auto rawCtx = ctx.get();
+      BatchContext ctx(static_cast<uint32_t>(numTasksLimit));
+      auto ftr = ctx.promise.get_future();
+      auto rawCtx = &ctx;
 
-      auto current = begin;
-      for (uint32_t i = 0; i < numTask; ++i) {
+      auto current = range.begin();
+      auto end = range.end();
+      for (uint32_t i = 0; i < numTasksLimit; ++i) {
         auto next = current;
-        if (i == numTask - 1) {
+        if (i == numTasksLimit - 1) {
           next = end; // Den Rest einpacken
-        } else {
+        }
+        else {
           std::advance(next, chunkSize);
         }
-        batch.emplace_back([current, next, rawCtx, &func](int id) {
+        pushHelperTask([current, next, rawCtx, &func](int id) {
           for (auto it = current; it != next; ++it) {
-            if constexpr (requires { std::apply(func, *it); }) {
-              std::apply(func, *it);
-            } else {
-              func(*it);
+            auto &&item = *it;
+            if constexpr (requires { std::apply(func, item); }) {
+              std::apply(func, std::forward<decltype(item)>(item));
+            }
+            else {
+              func(std::forward<decltype(item)>(item));
             }
           }
           if (rawCtx->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -139,7 +101,7 @@ namespace SC {
         });
         current = next;
       }
-      pushHelperTask(batch);
+      doWork();
       ftr.wait();
 
     };
@@ -157,79 +119,134 @@ namespace SC {
     static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
       using return_type = std::invoke_result_t<F, int, Args...>;
 
-      auto task = std::make_unique<std::packaged_task<return_type(int)> >(
-              [f = std::forward<F>(f), ...args = std::forward<Args>(args)](int id) mutable {
-                return f(id, std::forward<Args>(args)...);
-              }
+      auto task = std::packaged_task<return_type(int)>(
+          [f = std::forward<F>(f), ...args = std::forward<Args>(args)](int id) mutable {
+            return f(id, std::forward<Args>(args)...);
+          }
       );
 
-      std::future<return_type> res = task->get_future();
+      std::future<return_type> res = task.get_future();
 
-      pushTask<P>([task = std::move(task)](int id) { (*task)(id); });
+      pushTask<P>([task = std::move(task)](int id) { task(id); });
 
       return res;
     }
 
-//        template<class F, class... Args>
-//        requires std::invocable<F, int, Args...>
-//        static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
-//            return enqueue( std::forward<F>(f), std::forward<Args>(args)...);
-//        }
 
-
-    template<typename Iterator, typename F, typename... Args>
-    static auto enqueueBatch(Iterator begin, Iterator end, F &&f, Args &&... args) {
-      return enqueueBatch<Priority::Normal>(begin, end, std::forward<F>(f), std::forward<Args>(args)...);
+    template<std::ranges::input_range R, typename F, typename... Args>
+    static auto enqueueBatch(R &&r, F &&f, Args &&... args) {
+      return enqueueBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
     }
 
-    template<Priority P, typename Iterator, typename F, typename... Args>
-    static auto enqueueBatch(Iterator begin, Iterator end, F &&f, Args &&... args) {
-      using ArgType = std::iterator_traits<Iterator>::value_type;
+    template<Priority P, std::ranges::input_range R, typename F, typename... Args>
+    static auto enqueueBatch(R &&r, F &&f, Args &&... args) {
+      const auto count = r.size();
+      auto t = ThreadLog::time("Enqueue of {1} took {0}", count);
+
+      using ArgType =std::ranges::range_value_t<R>;
       using return_type = std::invoke_result_t<F, int, ArgType, Args...>;
-      using IterRef = decltype(*std::declval<Iterator &>());
 
-      auto shared_f = std::make_shared<std::decay_t<F> >(std::forward<F>(f));
-      auto shared_args = std::make_shared<std::tuple<std::decay_t<Args>...> >(std::forward<Args>(args)...);
+      constexpr size_t SFO_LIMIT = 64;
+      constexpr size_t SizeF = sizeof(std::decay_t<F>);
+      constexpr size_t SharedArgsSize = (sizeof(std::decay_t<Args>) + ... + 0);
+      constexpr size_t SizeElem = sizeof(ArgType);
 
-      std::vector<std::future<return_type> > futures;
-      std::vector<MoveOnlyTask> batch;
+      // Minimaler Overhead: 8 Bytes für den Promise-State/Pointer
+      constexpr size_t MIN_OVERHEAD = 8;
 
-      auto count = std::distance(begin, end);
+      std::vector<std::future<return_type>> futures;
       futures.reserve(count);
+      std::vector<MoveOnlyFunction> batch;
       batch.reserve(count);
 
-      for (auto it = begin; it != end; ++it) {
-        auto task = std::make_unique<std::packaged_task<return_type(int)> >(
-                [shared_f, arg = static_cast<IterRef>(*it), shared_args](int id) mutable {
-                  try {
-                    return std::apply([&](auto &&... unpacked_args) {
-                      return (*shared_f)(id, arg, unpacked_args...);
-                    }, *shared_args);
-                  } catch (std::exception &e) {
-                    auto safe_arg = [&]() {
-                      if constexpr (std::is_pointer_v<ArgType>) {
-                        return static_cast<const void *>(arg);
-                      } else {
-                        return arg;
-                      }
-                    }();
-                    ThreadLog::err("Exception: Argument-Value: {} Error: {}", safe_arg, e.what());
-                  }
-                }
+
+// --- CASE 1: INDIVIDUAL CAPTURE (Maximale Performance, Zero Shared State) ---
+      // Alles passt direkt in das Lambda-Objekt. Kein Shared_ptr nötig.
+      if constexpr (SizeF + SharedArgsSize + SizeElem + MIN_OVERHEAD <= SFO_LIMIT) {
+        for (auto&& item : r) {
+          std::promise<return_type> promise;
+          futures.push_back(promise.get_future());
+
+          batch.emplace_back([f, args..., arg = std::forward<decltype(item)>(item), p = std::move(promise)](int id) mutable {
+            try {
+              if constexpr (std::is_void_v<return_type>) {
+                f(id, std::move(arg), args...);
+                p.set_value();
+              } else {
+                p.set_value(f(id, std::move(arg), args...));
+              }
+            } catch (...) {
+              p.set_exception(std::current_exception());
+            }
+          });
+        }
+      }
+        // --- CASE 2: SHARED PAYLOAD (Payload zu groß, aber F + Args passen) ---
+        // Der klassische Fall für schwere Komponenten-Daten.
+      else if constexpr (SizeF + SharedArgsSize + 16 + MIN_OVERHEAD <= SFO_LIMIT) {
+        auto shared_payload = std::make_shared<std::decay_t<R>>(std::forward<R>(r));
+
+        for (size_t i = 0; i < count; ++i) {
+          std::promise<return_type> promise;
+          futures.push_back(promise.get_future());
+
+          batch.emplace_back([f, args..., shared_payload, i, p = std::move(promise)](int id) mutable {
+            try {
+              ArgType my_arg = std::move((*shared_payload)[i]);
+              if constexpr (std::is_void_v<return_type>) {
+                f(id, std::move(my_arg), args...);
+                p.set_value();
+              } else {
+                p.set_value(f(id, std::move(my_arg), args...));
+              }
+            } catch (...) {
+              p.set_exception(std::current_exception());
+            }
+          });
+        }
+      }
+        // --- CASE 3: FULL SHARED CONTEXT (Nichts passt ins SFO) ---
+        // Notfall-Plan: Alles in eine einzige Heap-Allokation auslagern.
+      else {
+        auto shared_ctx = std::make_shared<std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>, std::decay_t<R>>>(
+            std::forward<F>(f),
+            std::make_tuple(std::forward<Args>(args)...),
+            std::forward<R>(r)
         );
 
-        futures.push_back(task->get_future());
-        batch.emplace_back([task = std::move(task)](int id) { (*task)(id); });
+        for (size_t i = 0; i < count; ++i) {
+          std::promise<return_type> promise;
+          futures.push_back(promise.get_future());
+
+          batch.emplace_back([shared_ctx, i, p = std::move(promise)](int id) mutable {
+            try {
+              auto& func = std::get<0>(*shared_ctx);
+              auto& base_args = std::get<1>(*shared_ctx);
+              auto& payload_vec = std::get<2>(*shared_ctx);
+              ArgType my_arg = std::move(payload_vec[i]);
+
+              std::apply([&](auto&&... unpacked) {
+                if constexpr (std::is_void_v<return_type>) {
+                  func(id, std::move(my_arg), std::forward<decltype(unpacked)>(unpacked)...);
+                  p.set_value();
+                } else {
+                  p.set_value(func(id, std::move(my_arg), std::forward<decltype(unpacked)>(unpacked)...));
+                }
+              }, base_args);
+            } catch (...) {
+              p.set_exception(std::current_exception());
+            }
+          });
+        }
       }
 
-      pushBatch<P>(batch);
-
+      pushBatch<P>(std::move(batch));
       return futures;
     }
 
     template<class F, class... Args>
-    static auto enqueueLong(std::string_view name, F &&f,
-                            Args &&... args) -> std::future<std::invoke_result_t<F, Args...> > {
+    static auto
+    enqueueLong(std::string_view name, F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...> > {
       using return_type = std::invoke_result_t<F, std::stop_token, Args...>;
 
       auto promise = std::make_unique<std::promise<return_type> >();
@@ -240,7 +257,8 @@ namespace SC {
         if constexpr (std::is_void_v<return_type>) {
           f(st, std::move(args)...);
           promise->set_value();
-        } else {
+        }
+        else {
           promise->set_value(f(st, std::move(args)...));
         }
       };
@@ -253,15 +271,16 @@ namespace SC {
       return enqueueLong("ChaosLongTask", std::forward<F>(f), std::forward<Args>(args)...);
     }
 
-  private:
+    private:
     template<Priority P>
-    static void pushTask(MoveOnlyTask &&task);
+    static void pushTask(MoveOnlyFunction &&task);
 
     template<Priority P>
-    static void pushBatch(std::vector<MoveOnlyTask> &batch);
+    static void pushBatch(std::vector<MoveOnlyFunction> &&batch);
 
     static void pushLongTaskInternal(std::string_view name, std::function<void(std::stop_token)> task);
 
-    static void pushHelperTask(std::vector<MoveOnlyTask> &batch);
+    static void pushHelperTask(MoveOnlyFunction &&task);
+    static void doWork();
   };
 } // SC

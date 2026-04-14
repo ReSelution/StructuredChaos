@@ -3,13 +3,12 @@ cmake_minimum_required(VERSION 3.24)
 project(StructuredChaos LANGUAGES CXX)
 
 find_program(CCACHE_PROGRAM ccache)
-if(CCACHE_PROGRAM)
+if (CCACHE_PROGRAM)
     set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
     set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
     message(STATUS "ccache gefunden und aktiviert.")
-endif()
+endif ()
 include(CheckCXXCompilerFlag)
-
 
 
 set(CMAKE_CXX_STANDARD 23)
@@ -57,20 +56,19 @@ endif ()
 if (NOT MSVC)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT supported OUTPUT error)
-    if(supported)
+    if (supported)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-    else()
+    else ()
         message(STATUS "IPO/LTO is not supported: ${error}")
-    endif()
+    endif ()
 
     if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(StructuredChaos PUBLIC  -O3 -march=native -fno-rtti)
-    else()
+        target_compile_options(StructuredChaos PUBLIC -O3 -march=native -fno-rtti)
+    else ()
         target_compile_options(StructuredChaos PUBLIC -g -O0)
         message(STATUS "[SAA] Debug mode: Optimizations disabled")
-    endif()
-endif()
-
+    endif ()
+endif ()
 
 
 include(cmake/dependencies.cmake)
@@ -80,11 +78,11 @@ option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT supported OUTPUT error)
-if(supported)
+if (supported)
     set_target_properties(StructuredChaos PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-else()
+else ()
     message(STATUS "IPO/LTO is not supported: ${error}")
-endif()
+endif ()
 
 target_sources(StructuredChaos PRIVATE
         src/memory/chaos_bump_arena.cpp
@@ -123,11 +121,11 @@ target_sources(StructuredChaos PUBLIC
         src/threading/chaos_spin_lock.hpp
 )
 #set_source_files_properties(src/hash/hash.cpp PROPERTIES COMPILE_FLAGS "-O3 -march=native")
-if(NOT MSVC)
+if (NOT MSVC)
     target_compile_options(StructuredChaos PUBLIC -mcx16 -march=native)
-else()
+else ()
     target_compile_options(StructuredChaos PUBLIC /arch:AVX2)
-endif()
+endif ()
 
 target_link_libraries(StructuredChaos
         PUBLIC
@@ -140,6 +138,7 @@ target_link_libraries(StructuredChaos
         hwy
         rapidHash
         unordered_dense::unordered_dense
+        glm::glm
         PRIVATE
         atomic_queue::atomic_queue
 
@@ -150,25 +149,24 @@ target_include_directories(StructuredChaos
         src
 )
 
-if(ENABLE_CHAOS_STATS)
+if (ENABLE_CHAOS_STATS)
     target_compile_definitions(StructuredChaos PUBLIC CHAOS_STATS_ENABLED)
 endif ()
 
 
-
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(SC_IS_MAIN_PROJECT ON)
-else()
+else ()
     set(SC_IS_MAIN_PROJECT OFF)
-endif()
+endif ()
 
-if(SC_IS_MAIN_PROJECT)
+if (SC_IS_MAIN_PROJECT)
     message(STATUS "[SC] Building as main project - enabling test suite")
     enable_testing()
     add_subdirectory(tests)
 
     add_executable(StructuredChaosSandbox src/main.cpp)
     target_link_libraries(StructuredChaosSandbox PRIVATE StructuredChaos)
-else()
+else ()
     message(STATUS "[SC] Building as subdirectory - skipping tests")
-endif()
+endif ()
