@@ -97,24 +97,28 @@ namespace SC {
   }
 
   size_t ChaosThreading::getNumThreads() {
-    return threads.size();
+    return threads.size()+1; // +1 to include main Thread
   }
 
   int32_t ChaosThreading::getThreadId() {
     return threadId;
   }
 
-  MoveOnlyFunction helpThread(int id) {
+  MoveOnlyFunction ChaosThreading::helpThread(int id) {
     uint64_t mask = available.load(std::memory_order_acquire);
     if (mask == 0) return {};
 
-    int targetIdx = std::countr_zero(mask);
+    const auto n = workerStores.size();
+
+    uint32_t shift = (id + 1) % n;
+    uint64_t rotated = (mask >> shift) | (mask << (n - shift));
+    rotated &= (1ULL << n) - 1;
+
+    int rotatedIdx = std::countr_zero(rotated);
+    uint32_t targetIdx = (rotatedIdx + shift) % n;
 
     MoveOnlyFunction task;
     if (workerStores[targetIdx]->queue.try_pop(task)) {
-      if (workerStores[targetIdx]->queue.was_empty()) {
-        available.fetch_and(~(1ULL << targetIdx), std::memory_order_release);
-      }
       return task;
     }
     return {};
@@ -136,7 +140,7 @@ namespace SC {
         CHAOS_RECORD(PoolThroughput, 1)
         continue;
       }
-      task = helpThread(id);
+      task = ChaosThreading::helpThread(id);
       if (task) {
         task(id);
         continue;

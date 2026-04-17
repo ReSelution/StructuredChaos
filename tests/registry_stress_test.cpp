@@ -9,7 +9,6 @@
 #include "threading/chaos_threading.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
 
 LOG_ALIAS(RegLog, "Chaos", "Registry");
 
@@ -65,7 +64,7 @@ void run_registry_stress_test() {
   constexpr int BATCH_SIZE_SIZE = 5000; // Tasks pro Enqueue-Welle
   RegLog::info("Starting High-Throughput Test: {} Entitäten...", TOTAL_ENTITIES);
   {
-    auto t = RegLog::time("Registry-Processing of {1} Entitäten dauerte {0}", TOTAL_ENTITIES);
+    auto t = RegLog::time("Registry-Processing of {1} took {0}", TOTAL_ENTITIES);
     SC::ChaosRegistry registry;
     RegistryThroughput::reset();
 
@@ -122,14 +121,19 @@ void run_registry_stress_testBATCH_SIZE() {
   {
     auto t = RegLog::time("Registry-Processing of {1} Entitäten dauerte {0}", TOTAL_ENTITIES);
     SC::ChaosRegistry registry;
-    RegistryThroughput::reset();
-
+    registry.reserve<TransformComponent>(TOTAL_ENTITIES);
+    registry.reserve<PhysicsComponent>(TOTAL_ENTITIES);
+    registry.reserve<TagComponent>(TOTAL_ENTITIES);
+    registry.reserve<MeshComponent>(TOTAL_ENTITIES);
+    registry.reserve<MaterialComponent>(TOTAL_ENTITIES);
+    registry.reserve<AIStateComponent>(TOTAL_ENTITIES);
 
     std::vector<int> entitiesStart;
     entitiesStart.reserve(TOTAL_ENTITIES / BATCH_SIZE + 1);
     for (int i = 0; i < TOTAL_ENTITIES; i += BATCH_SIZE) {
       entitiesStart.emplace_back(i);
     }
+    RegistryThroughput::reset();
     SC::ChaosThreading::enqueueBatch(
         std::move(entitiesStart), [reg = &registry, BATCH_SIZE](int thread_id, int start) {
 
@@ -157,6 +161,10 @@ void run_registry_stress_testBATCH_SIZE() {
           reg->template insert<TagComponent>(entities.begin(), entities.end(), tags.begin());
           RegistryThroughput::record(BATCH_SIZE);
 
+          std::vector<AIStateComponent> ai{BATCH_SIZE, AIStateComponent{}};
+          reg->template insert<AIStateComponent>(entities.begin(), entities.end(), ai.begin());
+          RegistryThroughput::record(BATCH_SIZE);
+
           // 6. Mesh (Die fette Payload mit ChaosResource)
           std::vector<MeshComponent> meshComponents;
           meshComponents.reserve(BATCH_SIZE);
@@ -178,6 +186,8 @@ void run_registry_stress_testBATCH_SIZE() {
 
     SC::ChaosThreading::wait_until_finished();
     RegistryThroughput::stop();
+    t.stop();
+    RegLog::stats<RegistryThroughput>("");
     auto time1 = RegLog::time("Manipulating  of {1} Entitäten dauerte {0}", TOTAL_ENTITIES);
     auto &&[lock, view] = registry.view<PhysicsComponent>();
 
@@ -193,27 +203,14 @@ void run_registry_stress_testBATCH_SIZE() {
     RegisteryManipulate::record(view.size());
     RegisteryManipulate::stop();
     RegLog::stats<RegisteryManipulate>("Parallel For");
-//    RegisteryManipulate::reset();
-//    RegisteryManipulate::start();
-//
-//    for (const auto &[e, phy]: iter) {
-//      for (int i = 0; i < 100; ++i) {
-//        phy.velocity = phy.velocity * 0.99f + glm::vec3(std::sin(i), std::cos(i), 0.0f);
-//      }
-//    }
-//    RegisteryManipulate::record(view.size());
-//    RegisteryManipulate::stop();
-//    RegLog::stats<RegisteryManipulate>("Single Threaded");
   }
-
-  RegLog::stats<RegistryThroughput>("");
 }
 
 int main() {
   SC::ChaosThreading::init();
   run_registry_stress_testBATCH_SIZE();
-  run_registry_stress_testBATCH_SIZE();
-  run_registry_stress_test();
+  //run_registry_stress_testBATCH_SIZE();
+  //run_registry_stress_test();
 
   return 0;
 }

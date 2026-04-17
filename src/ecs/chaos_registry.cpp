@@ -30,4 +30,6 @@ namespace SC {
     }
     mEntityIdx.store(0, std::memory_order_relaxed);
   }
+
+
 } // SC

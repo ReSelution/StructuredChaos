@@ -38,7 +38,6 @@ namespace SC {
   using MoveOnlyFunction = std::move_only_function<void(int)>;
 
   class ChaosThreading {
-
     public:
     enum class Priority : int32_t {
       High,
@@ -106,28 +105,118 @@ namespace SC {
 
     };
 
+    template<typename F, typename... Args>
+    requires std::invocable<F, int, Args...> && std::is_void_v<std::invoke_result_t<F, int, Args...>>
+    void detach(F &&f, Args &&...args) {
+      detach<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args) ...);
+    }
 
-    template<class F, class... Args>
+    template<Priority P, typename F, typename... Args>
+    requires std::invocable<F, int, Args...> && std::is_void_v<std::invoke_result_t<F, int, Args...>>
+    void detach(F &&f, Args &&...args) {
+
+
+      constexpr size_t SFO_LIMIT = 64;
+      constexpr size_t SizeF = sizeof(std::decay_t<F>);
+      constexpr size_t SizeArgs = (sizeof(std::decay_t<Args>) + ... + 0);
+      constexpr size_t MIN_OVERHEAD = 8; // Für den Promise/Pointer
+
+
+      if constexpr (SizeF + SizeArgs + MIN_OVERHEAD <= SFO_LIMIT) {
+        // CASE 1: Alles passt direkt ins Lambda (SFO-Sieg!)
+        pushTask<P>(
+            [f = std::forward<F>(f), ...args = std::forward<Args>(args)](int id) mutable {
+              try {
+                f(id, std::forward<Args>(args)...);
+              } catch (...) {
+                ThreadLog::err("Exception: {}", std::current_exception());
+              }
+            });
+      }
+      else {
+        auto ctx = std::make_unique<std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>>>(
+            std::forward<F>(f),
+            std::make_tuple(std::forward<Args>(args)...)
+        );
+
+        pushTask<P>([ctx = std::move(ctx)](int id) mutable {
+          try {
+            auto &func = std::get<0>(*ctx);
+            auto &base_args = std::get<1>(*ctx);
+
+            std::apply([&](auto &&... unpacked) {
+              func(id, std::forward<decltype(unpacked)>(unpacked)...);
+
+            }, base_args);
+          } catch (...) {
+            ThreadLog::err("Exception: {}", std::current_exception());
+          }
+        });
+      }
+    }
+
+
+    template<typename F, typename... Args>
     requires std::invocable<F, int, Args...>
     static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
       return enqueue<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args) ...);
     }
 
-
-    template<Priority P, class F, class... Args>
+    template<Priority P, typename F, typename... Args>
     requires std::invocable<F, int, Args...>
     static auto enqueue(F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, int, Args...> > {
       using return_type = std::invoke_result_t<F, int, Args...>;
 
-      auto task = std::packaged_task<return_type(int)>(
-          [f = std::forward<F>(f), ...args = std::forward<Args>(args)](int id) mutable {
-            return f(id, std::forward<Args>(args)...);
+      std::promise<return_type> promise;
+      auto res = promise.get_future();
+
+      constexpr size_t SFO_LIMIT = 64;
+      constexpr size_t SizeF = sizeof(std::decay_t<F>);
+      constexpr size_t SizeArgs = (sizeof(std::decay_t<Args>) + ... + 0);
+      constexpr size_t MIN_OVERHEAD = sizeof(std::promise<return_type>);
+
+      if constexpr (SizeF + SizeArgs + MIN_OVERHEAD <= SFO_LIMIT) {
+        // CASE 1: Alles passt direkt ins Lambda (SFO-Sieg!)
+        pushTask<P>(
+            [f = std::forward<F>(f), ...args = std::forward<Args>(args), p = std::move(promise)](int id) mutable {
+              try {
+                if constexpr (std::is_void_v<return_type>) {
+                  f(id, std::forward<Args>(args)...);
+                  p.set_value();
+                }
+                else {
+                  p.set_value(f(id, std::forward<Args>(args)...));
+                }
+              } catch (...) {
+                p.set_exception(std::current_exception());
+              }
+            });
+      }
+      else {
+        auto ctx = std::make_unique<std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>>>(
+            std::forward<F>(f),
+            std::make_tuple(std::forward<Args>(args)...)
+        );
+
+        pushTask<P>([ctx = std::move(ctx), p = std::move(promise)](int id) mutable {
+          try {
+            auto &func = std::get<0>(*ctx);
+            auto &base_args = std::get<1>(*ctx);
+
+            std::apply([&](auto &&... unpacked) {
+              if constexpr (std::is_void_v<return_type>) {
+                func(id, std::forward<decltype(unpacked)>(unpacked)...);
+                p.set_value();
+              }
+              else {
+                p.set_value(func(id, std::forward<decltype(unpacked)>(unpacked)...));
+              }
+            }, base_args);
+          } catch (...) {
+            p.set_exception(std::current_exception());
           }
-      );
-
-      std::future<return_type> res = task.get_future();
-
-      pushTask<P>([task = std::move(task)](int id) { task(id); });
+        });
+      }
 
       return res;
     }
@@ -141,115 +230,143 @@ namespace SC {
     template<Priority P, std::ranges::input_range R, typename F, typename... Args>
     static auto enqueueBatch(R &&r, F &&f, Args &&... args) {
       const auto count = r.size();
-      auto t = ThreadLog::time("Enqueue of {1} took {0}", count);
+//      auto t = ThreadLog::time("Enqueue of {1} took {0}", count);
 
-      using ArgType =std::ranges::range_value_t<R>;
+      using ArgType = std::ranges::range_value_t<R>;
       using return_type = std::invoke_result_t<F, int, ArgType, Args...>;
+      constexpr bool is_void = std::is_void_v<return_type>;
+
+      struct BatchState {
+        std::atomic<size_t> remaining;
+        std::promise<void> batch_promise;
+
+        BatchState(size_t n) : remaining(n) {}
+      };
 
       constexpr size_t SFO_LIMIT = 64;
       constexpr size_t SizeF = sizeof(std::decay_t<F>);
       constexpr size_t SharedArgsSize = (sizeof(std::decay_t<Args>) + ... + 0);
       constexpr size_t SizeElem = sizeof(ArgType);
 
-      // Minimaler Overhead: 8 Bytes für den Promise-State/Pointer
-      constexpr size_t MIN_OVERHEAD = 8;
+      // Exact overhead based on what actually gets captured in the lambda
+      constexpr size_t CAPTURE_OVERHEAD = is_void ? sizeof(std::shared_ptr<BatchState>)
+                                                  : sizeof(std::promise<return_type>);
 
-      std::vector<std::future<return_type>> futures;
-      futures.reserve(count);
       std::vector<MoveOnlyFunction> batch;
       batch.reserve(count);
 
+      // CASE 1: INDIVIDUAL CAPTURE (Fits in SFO)
+      if constexpr (SizeF + SharedArgsSize + SizeElem + CAPTURE_OVERHEAD <= SFO_LIMIT) {
+        if constexpr (is_void) {
+          auto state = std::make_shared<BatchState>(count);
 
-// --- CASE 1: INDIVIDUAL CAPTURE (Maximale Performance, Zero Shared State) ---
-      // Alles passt direkt in das Lambda-Objekt. Kein Shared_ptr nötig.
-      if constexpr (SizeF + SharedArgsSize + SizeElem + MIN_OVERHEAD <= SFO_LIMIT) {
-        for (auto&& item : r) {
-          std::promise<return_type> promise;
-          futures.push_back(promise.get_future());
 
-          batch.emplace_back([f, args..., arg = std::forward<decltype(item)>(item), p = std::move(promise)](int id) mutable {
-            try {
-              if constexpr (std::is_void_v<return_type>) {
+          for (auto &&item: r) {
+            using ForwardType = std::conditional_t<std::is_lvalue_reference_v<R>,
+                decltype(item) &,
+                std::remove_reference_t<decltype(item)> &&>;
+            batch.emplace_back([f, args..., arg = static_cast<ForwardType>(item), state](int id) mutable {
+              try {
                 f(id, std::move(arg), args...);
-                p.set_value();
-              } else {
-                p.set_value(f(id, std::move(arg), args...));
-              }
-            } catch (...) {
-              p.set_exception(std::current_exception());
-            }
-          });
+                if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) state->batch_promise.set_value();
+              } catch (...) { state->batch_promise.set_exception(std::current_exception()); }
+            });
+          }
+          pushBatch<P>(std::move(batch));
+          return state->batch_promise.get_future();
+        }
+        else {
+          std::vector<std::future<return_type>> futures;
+          futures.reserve(count);
+          for (auto &&item: r) {
+            using ForwardType = std::conditional_t<std::is_lvalue_reference_v<R>,
+                decltype(item) &,
+                std::remove_reference_t<decltype(item)> &&>;
+            std::promise<return_type> p;
+            futures.push_back(p.get_future());
+            batch.emplace_back(
+                [f, ...args = args, arg = static_cast<ForwardType>(item), p = std::move(p)](int id) mutable {
+                  try { p.set_value(f(id, std::move(arg), args...)); }
+                  catch (...) { p.set_exception(std::current_exception()); }
+                });
+          }
+          pushBatch<P>(std::move(batch));
+          return futures;
         }
       }
-        // --- CASE 2: SHARED PAYLOAD (Payload zu groß, aber F + Args passen) ---
-        // Der klassische Fall für schwere Komponenten-Daten.
-      else if constexpr (SizeF + SharedArgsSize + 16 + MIN_OVERHEAD <= SFO_LIMIT) {
-        auto shared_payload = std::make_shared<std::decay_t<R>>(std::forward<R>(r));
-
-        for (size_t i = 0; i < count; ++i) {
-          std::promise<return_type> promise;
-          futures.push_back(promise.get_future());
-
-          batch.emplace_back([f, args..., shared_payload, i, p = std::move(promise)](int id) mutable {
-            try {
-              ArgType my_arg = std::move((*shared_payload)[i]);
-              if constexpr (std::is_void_v<return_type>) {
-                f(id, std::move(my_arg), args...);
-                p.set_value();
-              } else {
-                p.set_value(f(id, std::move(my_arg), args...));
-              }
-            } catch (...) {
-              p.set_exception(std::current_exception());
-            }
-          });
-        }
-      }
-        // --- CASE 3: FULL SHARED CONTEXT (Nichts passt ins SFO) ---
-        // Notfall-Plan: Alles in eine einzige Heap-Allokation auslagern.
+        // CASE 2: MERGED STORAGE (Too big for SFO or Void-optimized)
       else {
-        auto shared_ctx = std::make_shared<std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>, std::decay_t<R>>>(
-            std::forward<F>(f),
-            std::make_tuple(std::forward<Args>(args)...),
-            std::forward<R>(r)
-        );
+        if constexpr (is_void) {
+          // Capture everything in one shared allocation
+          struct MergedState : BatchState {
+            std::decay_t<R> payload;
+            std::tuple<std::decay_t<Args>...> saved_args;
 
-        for (size_t i = 0; i < count; ++i) {
-          std::promise<return_type> promise;
-          futures.push_back(promise.get_future());
+            MergedState(size_t n, R &&r, Args &&... a)
+                : BatchState(n), payload(std::forward<R>(r)), saved_args(std::forward<Args>(a)...) {}
+          };
 
-          batch.emplace_back([shared_ctx, i, p = std::move(promise)](int id) mutable {
-            try {
-              auto& func = std::get<0>(*shared_ctx);
-              auto& base_args = std::get<1>(*shared_ctx);
-              auto& payload_vec = std::get<2>(*shared_ctx);
-              ArgType my_arg = std::move(payload_vec[i]);
+          auto shared = std::make_shared<MergedState>(count, std::forward<R>(r), std::forward<Args>(args)...);
 
-              std::apply([&](auto&&... unpacked) {
-                if constexpr (std::is_void_v<return_type>) {
-                  func(id, std::move(my_arg), std::forward<decltype(unpacked)>(unpacked)...);
-                  p.set_value();
-                } else {
-                  p.set_value(func(id, std::move(my_arg), std::forward<decltype(unpacked)>(unpacked)...));
-                }
-              }, base_args);
-            } catch (...) {
-              p.set_exception(std::current_exception());
-            }
-          });
+          for (size_t i = 0; i < count; ++i) {
+            // Lambda now only captures one pointer (shared) and one index (i)
+            batch.emplace_back([f, shared, i](int id) {
+              try {
+                std::apply([&](auto &&... unpacked_args) {
+                  f(id, std::move(shared->payload[i]), unpacked_args...);
+                }, shared->saved_args);
+
+                if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                  shared->batch_promise.set_value();
+              } catch (...) {
+                shared->batch_promise.set_exception(std::current_exception());
+              }
+            });
+          }
+          pushBatch<P>(std::move(batch));
+          return shared->batch_promise.get_future();
+        }
+        else {
+          // Fallback for non-void remains mostly same, but keep in mind SFO pressure here too
+          struct MergedNonVoidState {
+            std::decay_t<R> payload;
+            std::tuple<std::decay_t<Args>...> saved_args;
+
+            MergedNonVoidState(R&& r, Args&&... a)
+                : payload(std::forward<R>(r)),
+                  saved_args(std::forward<Args>(a)...) {}
+          };
+          auto shared = std::make_shared<MergedNonVoidState>(
+              std::forward<R>(r),
+              std::forward<Args>(args)...
+          );
+          std::vector<std::future<return_type>> futures;
+          futures.reserve(count);
+          for (size_t i = 0; i < count; ++i) {
+            std::promise<return_type> p;
+            futures.push_back(p.get_future());
+            batch.emplace_back([f, shared, i, p = std::move(p)](int id) mutable {
+              try {
+                std::apply([&](auto &&... unpacked) {
+                  p.set_value(f(id, std::move(shared->payload[i]), unpacked...));
+                }, shared->saved_args);
+              } catch (...) { p.set_exception(std::current_exception()); }
+            });
+          }
+          pushBatch<P>(std::move(batch));
+          return futures;
         }
       }
-
-      pushBatch<P>(std::move(batch));
-      return futures;
     }
 
-    template<class F, class... Args>
+    static MoveOnlyFunction helpThread(int id);
+
+    template<typename F, typename... Args>
     static auto
     enqueueLong(std::string_view name, F &&f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...> > {
       using return_type = std::invoke_result_t<F, std::stop_token, Args...>;
 
-      auto promise = std::make_unique<std::promise<return_type> >();
+      auto promise = std::promise<return_type>();
       auto res = promise->get_future();
 
       auto boundTask = [promise = std::move(promise), f = std::forward<F>(f), ...args = std::forward<Args>(args)
@@ -259,7 +376,7 @@ namespace SC {
           promise->set_value();
         }
         else {
-          promise->set_value(f(st, std::move(args)...));
+          promise.set_value(f(st, std::move(args)...));
         }
       };
       pushLongTaskInternal(name, std::move(boundTask));
@@ -282,5 +399,7 @@ namespace SC {
 
     static void pushHelperTask(MoveOnlyFunction &&task);
     static void doWork();
+
+
   };
 } // SC
