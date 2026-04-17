@@ -20,8 +20,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(StructuredChaos STATIC
         src/hash/hash.cpp
         src/hash/hash.hpp
-        src/threading/chaos_future.cpp
-        src/threading/chaos_future.hpp)
+)
 
 if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(SAA_TARGETING_WINDOWS TRUE)
