@@ -51,7 +51,7 @@ namespace SC {
       pQueues[index].push(std::move(task));
     }
 
-    private:
+  private:
 
     template<size_t... Is>
     bool try_pop_impl(MoveOnlyFunction &task, std::index_sequence<Is...>) {
@@ -97,7 +97,7 @@ namespace SC {
   }
 
   size_t ChaosThreading::getNumThreads() {
-    return threads.size()+1; // +1 to include main Thread
+    return threads.size() + 1; // +1 to include main Thread
   }
 
   int32_t ChaosThreading::getThreadId() {
@@ -136,6 +136,7 @@ namespace SC {
         ActiveTask::record(1);
         QueueSize::record(-1);
         task(id);
+        pool_sema.acquire();
         ActiveTask::record(-1);
         CHAOS_RECORD(PoolThroughput, 1)
         continue;
@@ -146,18 +147,18 @@ namespace SC {
         continue;
       }
 
-      if(pool_sema.try_acquire()){
-        continue;
-      }
-      bool foundWork = false;
-      for (int i = 0; i < 5000; ++i) {
-        if (!queues.was_empty() || available.load(std::memory_order_acquire) != 0) {
-          foundWork = true;
-          break;
-        }
-        _mm_pause();
-      }
-      if (foundWork) continue;
+//      if (pool_sema.try_acquire()) {
+//        continue;
+//      }
+//      bool foundWork = false;
+//      for (int i = 0; i < 5000; ++i) {
+//        if (!queues.was_empty() || available.load(std::memory_order_acquire) != 0) {
+//          foundWork = true;
+//          break;
+//        }
+//        _mm_pause();
+//      }
+//      if (foundWork) continue;
       if (queues.was_empty() && ActiveTask::m_storage.value.load() == 0) {
         wait_cv.notify_all();
       }
@@ -170,9 +171,9 @@ namespace SC {
   }
 
   void shutdown() {
+
     {
       std::lock_guard lock(threadMutex);
-
       for (auto &t: threads) {
         t.request_stop();
       }
@@ -180,7 +181,7 @@ namespace SC {
         t.request_stop();
       }
     }
-    cv.notify_all();
+    signalWork(threads.size());
     threads.clear();
     longRunningThreads.clear();
   }
@@ -210,7 +211,9 @@ namespace SC {
   }
 
   template void ChaosThreading::pushTask<ChaosThreading::Priority::High>(MoveOnlyFunction &&task);
+
   template void ChaosThreading::pushTask<ChaosThreading::Priority::Normal>(MoveOnlyFunction &&task);
+
   template void ChaosThreading::pushTask<ChaosThreading::Priority::Low>(MoveOnlyFunction &&task);
 
 
@@ -224,7 +227,9 @@ namespace SC {
   }
 
   template void ChaosThreading::pushBatch<ChaosThreading::Priority::High>(std::vector<MoveOnlyFunction> &&);
+
   template void ChaosThreading::pushBatch<ChaosThreading::Priority::Normal>(std::vector<MoveOnlyFunction> &&);
+
   template void ChaosThreading::pushBatch<ChaosThreading::Priority::Low>(std::vector<MoveOnlyFunction> &&);
 
   void ChaosThreading::pushLongTaskInternal(std::string_view name, std::function<void(std::stop_token)> task) {
