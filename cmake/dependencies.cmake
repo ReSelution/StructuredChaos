@@ -47,6 +47,9 @@ FetchContent_Declare(
         GIT_REPOSITORY https://github.com/google/highway.git
         GIT_TAG        1.3.0
 )
+set(HWY_ENABLE_TESTS OFF CACHE BOOL "Disable Highway tests" FORCE)
+set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "Disable Highway examples" FORCE)
+
 FetchContent_MakeAvailable(hwy)
 
 FetchContent_Declare(
