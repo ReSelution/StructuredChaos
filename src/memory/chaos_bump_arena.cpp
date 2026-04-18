@@ -3,6 +3,7 @@
 //
 
 #include "chaos_bump_arena.hpp"
+#include "simdutf.h"
 
 namespace SC {
   ChaosBumpArena::ChaosBumpArena(const size_t size) : m_capacity(size),
@@ -13,26 +14,14 @@ namespace SC {
 
 
   std::string_view ChaosBumpArena::utf16ToUtf8(const std::span<const char16_t> input) {
-    if (input.empty()) return "";
+    if (input.empty())[[unlikely]] return "";
 
-    size_t maxLen = input.size() * 3;
-    char *target = static_cast<char *>(allocate(maxLen + 1, alignof(char)));
-    char *curr = target;
-
-    for (uint16_t cp: input) {
-      if (cp < 0x80) {
-        *curr++ = static_cast<char>(cp);
-      } else if (cp < 0x800) {
-        *curr++ = static_cast<char>(0xC0 | (cp >> 6));
-        *curr++ = static_cast<char>(0x80 | (cp & 0x3F));
-      } else {
-        *curr++ = static_cast<char>(0xE0 | (cp >> 12));
-        *curr++ = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        *curr++ = static_cast<char>(0x80 | (cp & 0x3F));
-      }
-    }
-    *curr = '\0';
-    return {target, static_cast<size_t>(curr - target)};
+    size_t requiredSize = simdutf::utf8_length_from_utf16(input.data(), input.size());
+    char* target = static_cast<char*>(allocate(requiredSize + 1, alignof(char)));
+    auto size = simdutf::convert_utf16_to_utf8(input.data(), input.size(), target);
+    assert(size == requiredSize);
+    target[requiredSize] = '\0';
+    return {target, requiredSize};
   }
 
   void ChaosBumpArena::reset() {

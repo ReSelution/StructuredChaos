@@ -140,6 +140,7 @@ target_link_libraries(StructuredChaos
         rapidHash
         unordered_dense::unordered_dense
         glm::glm
+        simdutf
         PRIVATE
         atomic_queue::atomic_queue
 

@@ -65,3 +65,10 @@ FetchContent_Declare(
         GIT_TAG       v4.8.1
 )
 FetchContent_MakeAvailable(unordered_dense)
+
+FetchContent_Declare(
+        simdutf
+        GIT_REPOSITORY https://github.com/simdutf/simdutf.git
+        GIT_TAG       v8.2.0
+)
+FetchContent_MakeAvailable(simdutf)
