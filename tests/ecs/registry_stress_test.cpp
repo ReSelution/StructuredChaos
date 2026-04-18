@@ -7,8 +7,8 @@
 #include "ecs/chaos_registry.hpp"
 #include "ecs/chaos_resource.hpp"
 #include "threading/chaos_threading.hpp"
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
+#include "glm/glm.hpp"
+#include "glm/gtc/matrix_transform.hpp"
 
 LOG_ALIAS(RegLog, "Chaos", "Registry");
 
@@ -62,7 +62,7 @@ struct MaterialComponent {
 void run_registry_stress_test() {
   constexpr int TOTAL_ENTITIES = 1000000;
   constexpr int BATCH_SIZE_SIZE = 5000; // Tasks pro Enqueue-Welle
-  RegLog::info("Starting High-Throughput Test: {} Entitäten...", TOTAL_ENTITIES);
+  RegLog::info("Starting High-Throughput Test: {} Entitäten... (Single Component)", TOTAL_ENTITIES);
   {
     auto t = RegLog::time("Registry-Processing of {1} took {0}", TOTAL_ENTITIES);
     SC::ChaosRegistry registry;
@@ -112,12 +112,12 @@ void run_registry_stress_test() {
   RegLog::stats<RegistryThroughput, RegisteryManipulate>("");
 }
 
-void run_registry_stress_testBATCH_SIZE() {
+void run_registry_stress_test_batch() {
   // Konfiguration
   constexpr size_t TOTAL_ENTITIES = 1000000;
   constexpr size_t BATCH_SIZE = 5000; // Tasks pro Enqueue-Welle
 
-  RegLog::info("Starting High-Throughput Test: {} Entitäten... (Move Vector)", TOTAL_ENTITIES);
+  RegLog::info("Starting High-Throughput Test: {} Entitäten... (Batch Insert)", TOTAL_ENTITIES);
   {
     auto t = RegLog::time("Registry-Processing of {1} Entitäten dauerte {0}", TOTAL_ENTITIES);
     SC::ChaosRegistry registry;
@@ -208,9 +208,8 @@ void run_registry_stress_testBATCH_SIZE() {
 
 int main() {
   SC::ChaosThreading::init();
-  run_registry_stress_testBATCH_SIZE();
-  //run_registry_stress_testBATCH_SIZE();
-  //run_registry_stress_test();
+  run_registry_stress_test_batch();
+  run_registry_stress_test();
 
   return 0;
 }
