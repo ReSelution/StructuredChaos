@@ -17,8 +17,32 @@ namespace SC {
   template<typename Func>
   class ChaosTimer {
   public:
-    explicit ChaosTimer(Func &&callback, const Unit unit = Unit::Auto) : m_unit(unit), m_callback(std::forward<Func>(callback)),
-                                                      m_start(std::chrono::high_resolution_clock::now()) {
+    explicit ChaosTimer(Func &&callback, const Unit unit = Unit::Auto) : m_unit(unit),
+                                                                         m_callback(std::forward<Func>(callback)),
+                                                                         m_start(
+                                                                           std::chrono::high_resolution_clock::now()) {
+    }
+
+    ChaosTimer(ChaosTimer &&other) noexcept
+      : m_unit(other.m_unit),
+        m_callback(std::move(other.m_callback)),
+        m_start(other.m_start),
+        m_stopped(other.m_stopped) {
+      other.m_stopped = true;
+    }
+
+    ChaosTimer &operator=(ChaosTimer &&other) noexcept {
+      if (this != &other) {
+        stop();
+
+        m_unit = other.m_unit;
+        m_callback = std::move(other.m_callback);
+        m_start = other.m_start;
+        m_stopped = other.m_stopped;
+
+        other.m_stopped = true;
+      }
+      return *this;
     }
 
     ~ChaosTimer() { stop(); }
@@ -34,7 +58,7 @@ namespace SC {
     }
 
   private:
-    TimeResult calculate(std::chrono::high_resolution_clock::duration diff) const {
+    [[nodiscard]] TimeResult calculate(std::chrono::high_resolution_clock::duration diff) const {
       switch (m_unit) {
         case Unit::Nano: return {std::chrono::duration<double, std::nano>(diff).count(), m_unit, "ns"};
         case Unit::Micro: return {std::chrono::duration<double, std::micro>(diff).count(), m_unit, "µs"};
