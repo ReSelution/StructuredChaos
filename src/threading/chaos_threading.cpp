@@ -135,14 +135,15 @@ namespace SC {
       if (queues.try_pop_any(task)) {
         ActiveTask::record(1);
         QueueSize::record(-1);
+        pool_sema.try_acquire();
         task(id);
-        pool_sema.acquire();
         ActiveTask::record(-1);
         CHAOS_RECORD(PoolThroughput, 1)
         continue;
       }
       task = ChaosThreading::helpThread(id);
       if (task) {
+        pool_sema.try_acquire();
         task(id);
         continue;
       }
@@ -272,6 +273,7 @@ namespace SC {
     auto &store = workerStores[id];
     MoveOnlyFunction task;
     while (store->queue.try_pop(task)) {
+      pool_sema.try_acquire();
       task(id);
     }
     available.fetch_and(~(1u << id), std::memory_order_release);

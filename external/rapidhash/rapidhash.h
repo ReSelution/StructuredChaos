@@ -354,7 +354,7 @@ RAPIDHASH_INLINE uint64_t rapid_read64_lowercase(const char *p) RAPIDHASH_NOEXCE
   std::memcpy(&chunk, p, sizeof(uint64_t));
 
   // The MSB (Most Significant Bit) of each byte in the 64-bit word.
-  const uint64_t msb_mask = 0x8080808080808080ULL;
+  constexpr uint64_t msb_mask = 0x8080808080808080ULL;
 
   // Trick: Check if a byte is in range ['A', 'Z'] by leveraging integer underflow/overflow.
   // 1. If byte >= 'A' (0x41), adding (0x80 - 0x41) will set the MSB to 1.
