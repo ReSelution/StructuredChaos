@@ -20,6 +20,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(StructuredChaos STATIC
         src/hash/hash.cpp
         src/hash/hash.hpp
+        src/localizations/magpie_translator.cpp
+        src/localizations/magpie_string.cpp
+        src/localizations/magpie_string.hpp
 )
 
 if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -55,14 +58,6 @@ if (NOT MSVC)
 endif ()
 
 if (NOT MSVC)
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT supported OUTPUT error)
-    if (supported)
-        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-    else ()
-        message(STATUS "IPO/LTO is not supported: ${error}")
-    endif ()
-
     if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(StructuredChaos PUBLIC -O3 -march=native -fno-rtti)
     else ()
@@ -78,11 +73,12 @@ option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
 
 
 include(CheckIPOSupported)
-check_ipo_supported(RESULT supported OUTPUT error)
-if (supported)
+check_ipo_supported(RESULT SAA_LTO_SUPPORTED OUTPUT error)
+if (SAA_LTO_SUPPORTED AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_target_properties(StructuredChaos PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    message(STATUS "[Chaos] LTO enabled")
 else ()
-    message(STATUS "IPO/LTO is not supported: ${error}")
+    message(STATUS "[Chaos] LTO skipped: ${error}")
 endif ()
 
 target_sources(StructuredChaos PRIVATE
