@@ -267,17 +267,17 @@ namespace SC {
       return res;
     }
 
-    template<std::ranges::input_range R, typename F, typename Finished, typename... Args>
+    template<std::ranges::input_range R, typename F, typename Finished , typename... Args>
       requires std::invocable<F, int, std::ranges::range_value_t<R>, Args...> && std::is_void_v<std::invoke_result_t<F,
                  int, std::ranges::range_value_t<R>, Args...> >
     static void detacheBatch(R &&r, F &&f, Finished &&finished, Args &&... args) {
-      detacheBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
+      detacheBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished) ,std::forward<Args>(args)...);
     }
 
     template<Priority P, std::ranges::input_range R, typename F, typename Finished, typename... Args>
       requires std::invocable<F, int, std::ranges::range_value_t<R>, Args...> && std::is_void_v<std::invoke_result_t<F,
                  int, std::ranges::range_value_t<R>, Args...> >
-    static void detacheBatch(R &&r, F &&f, Finished &&finished, Args &&... args) {
+    static void detacheBatch(R &&r, F &&f, Finished &&finished , Args &&... args) {
       const auto count = r.size();
       if (count == 0) { return; }
       using ArgType = std::ranges::range_value_t<R>;
@@ -320,41 +320,60 @@ namespace SC {
         }
         pushBatch<P>(std::move(batch));
       } else {
-        // Wir brauchen eine spezialisierte MergedState-Struktur, die den Callback hält
-        struct DetachedMergedState : Detail::MergedState<R, Args...> {
-          std::decay_t<Finished> on_finished;
+       if constexpr (is_null_type) {
+        // CASE: Kein Callback -> Nutze Standard MergedState
+        auto shared = std::make_shared<Detail::MergedState<R, Args...>>(
+            count, std::forward<R>(r), std::forward<Args>(args)...);
 
-          DetachedMergedState(size_t n, R &&r, Finished &&cb, Args &&... a)
-            : Detail::MergedState<R, Args...>(n, std::forward<R>(r), std::forward<Args>(a)...),
-              on_finished(std::forward<Finished>(cb)) {
-          }
+        for (size_t i = 0; i < count; ++i) {
+            batch.emplace_back([f, shared, i](int id) {
+                try {
+                    std::apply([&](auto &&... unpacked) {
+                        f(id, std::move(shared->payload[i]), unpacked...);
+                    }, shared->saved_args);
+
+                    if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        shared->batch_promise.set_value();
+                    }
+                } catch (...) {
+                    shared->batch_promise.set_exception(std::current_exception());
+                }
+            });
+        }
+    } else {
+        // CASE: Mit Callback -> Nutze spezialisierte Struktur
+        struct DetachedMergedState : Detail::MergedState<R, Args...> {
+            std::decay_t<Finished> on_finished;
+
+            DetachedMergedState(size_t n, R &&r, Finished &&cb, Args &&... a)
+                : Detail::MergedState<R, Args...>(n, std::forward<R>(r), std::forward<Args>(a)...),
+                  on_finished(std::forward<Finished>(cb)) {}
         };
 
         auto shared = std::make_shared<DetachedMergedState>(
-          count, std::forward<R>(r), std::forward<Finished>(finished), std::forward<Args>(args)...);
+            count, std::forward<R>(r), std::forward<Finished>(finished), std::forward<Args>(args)...);
 
         for (size_t i = 0; i < count; ++i) {
-          batch.emplace_back([f, shared, i](int id) {
-            try {
-              std::apply([&](auto &&... unpacked) {
-                f(id, std::move(shared->payload[i]), unpacked...);
-              }, shared->saved_args);
+            batch.emplace_back([f, shared, i](int id) {
+                try {
+                    std::apply([&](auto &&... unpacked) {
+                        f(id, std::move(shared->payload[i]), unpacked...);
+                    }, shared->saved_args);
 
-              if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                if (shared->on_finished) {
-                  shared->on_finished(id);
+                    if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        if (shared->on_finished) shared->on_finished(id);
+                        shared->batch_promise.set_value();
+                    }
+                } catch (...) {
+                    shared->batch_promise.set_exception(std::current_exception());
+                    if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        if (shared->on_finished) shared->on_finished(id);
+                    }
                 }
-                shared->batch_promise.set_value();
-              }
-            } catch (...) {
-              shared->batch_promise.set_exception(std::current_exception());
-              if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                if (shared->on_finished) shared->on_finished(id);
-              }
-            }
-          });
+            });
         }
-        pushBatch<P>(std::move(batch));
+    }
+    pushBatch<P>(std::move(batch));
       }
     }
 
@@ -386,9 +405,13 @@ namespace SC {
       if constexpr (CAPTURE_BASE + OVERHEAD <= SFO_LIMIT) {
         if constexpr (is_void) {
           auto state = std::make_shared<Detail::BatchState>(count);
-          for (auto &&item: r)
+          for (auto &&item: r) {
+            using ForwardType = std::conditional_t<std::is_lvalue_reference_v<R>,
+              decltype(item) &,
+              std::remove_reference_t<decltype(item)> &&>;
             batch.emplace_back(
-              make_void_individual(f, std::forward<decltype(item)>(item), arg_tuple, state));
+              make_void_individual(f, static_cast<ForwardType>(item), arg_tuple, state));
+          }
           pushBatch<P>(std::move(batch));
           return state->batch_promise.get_future();
         } else {
@@ -489,7 +512,7 @@ namespace SC {
     template<typename F, typename Arg, typename... Args>
     static auto make_void_individualWithCallback(F &&f, Arg &&item, const std::tuple<Args...> &args,
                                                  std::shared_ptr<Detail::DetachBatchState> &state) {
-      return [f, args, item = std::forward<Arg>(item), state](int id) mutable {
+      return [f, args , item = std::forward<Arg>(item), state](int id) mutable {
         try {
           std::apply([&](auto &&... extra) { f(id, std::move(item), extra...); }, args);
 

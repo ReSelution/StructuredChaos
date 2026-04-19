@@ -2,18 +2,15 @@
 #include <vector>
 #include <string>
 #include <cassert>
-#include <glm/glm.hpp>
 
 #include "threading/chaos_threading.hpp"
-#include "ecs/chaos_registry.hpp"
-#include "stats/chaos_counter.hpp"
+#include "stats/chaos_stats.hpp"
 
 // Logging Aliases
 LOG_ALIAS(StressLog, "Chaos", "StressTest");
 
 // Statistics Definitions
 DEFINE_CHAOS_CORE_STAT(BatchThroughput, "Batch Processing", SC::ChaosThroughput<SC::MetricUnits>);
-DEFINE_CHAOS_CORE_STAT(MoveEfficiency, "Move Operations", SC::ChaosCounter<>);
 
 // --- Test Components ---
 
@@ -21,86 +18,116 @@ struct SFOBreaker {
   std::array<std::byte, 100> weight;
 };
 
+// Für die Verifikation (langsam wegen atomics)
 struct TrackedTask {
   inline static std::atomic<int> copies{0};
   inline static std::atomic<int> moves{0};
 
   int id;
-  TrackedTask(int i) : id(i) {}
-  TrackedTask(const TrackedTask& o) : id(o.id) { copies++; }
-  TrackedTask(TrackedTask&& o) noexcept : id(o.id) { moves++; }
+
+  TrackedTask(int i) : id(i) {
+  }
+
+  TrackedTask(const TrackedTask &o) : id(o.id) { copies++; }
+  TrackedTask(TrackedTask &&o) noexcept : id(o.id) { moves++; }
 };
 
+// Für den echten Speed-Test (Maximum Warp)
+struct FastTask {
+  int id;
 
-void test_efficiency_full() {
-  StressLog::info("Starting Efficiency Test: SFO vs. Merged Storage...");
+  FastTask(int i) : id(i) {
+  }
 
-  auto run_test = [](std::string_view mode_name, bool use_move, bool force_no_sfo) {
-    TrackedTask::copies = 0;
-    TrackedTask::moves = 0;
+  // Keine Counter, keine Seiteneffekte -> Compiler-Himmel
+};
 
-    constexpr size_t TASKS = 200;
-    std::vector<TrackedTask> tasks;
-    tasks.reserve(TASKS);
-    for(int i = 0; i < TASKS; ++i) tasks.emplace_back(i);
+template<typename TaskType>
+void run_efficiency_block(bool track_stats) {
+  StressLog::info("--- Efficiency Test (Mode: {}) ---", track_stats ? "VERIFICATION" : "RAW_SPEED");
 
-    // Falls wir SFO umgehen wollen, capturen wir dieses Objekt
-    SFOBreaker breaker;
-
-    {
-      auto t = StressLog::time("Mode: {1} | Move: {2} | SFO: {3} took {0}" ,
-                               mode_name, use_move, !force_no_sfo);
-
-      if (force_no_sfo) {
-        // Lambda ist hier > 100 Bytes -> Merged Storage wird erzwungen
-        if (use_move) {
-          auto f = SC::ChaosThreading::enqueueBatch(std::move(tasks),
-                                                    [breaker](int id, TrackedTask t) { (void)breaker; });
-          t.stop();
-          f.get();
-        } else {
-          auto f = SC::ChaosThreading::enqueueBatch(tasks,
-                                                    [breaker](int id, TrackedTask t) { (void)breaker; });
-          t.stop();
-          f.get();
-        }
-      } else {
-        // Normaler Pfad (SFO falls möglich)
-        if (use_move) {
-          auto f = SC::ChaosThreading::enqueueBatch(std::move(tasks),
-                                                    [](int id, TrackedTask t) {});
-          t.stop();
-          f.get();
-        } else {
-          auto f = SC::ChaosThreading::enqueueBatch(tasks,
-                                                    [](int id, TrackedTask t) {});
-          t.stop();
-          f.get();
-        }
-      }
+  auto run_test = [track_stats](std::string_view mode_name, bool force_no_sfo, bool use_detach) {
+    if constexpr (std::is_same_v<TaskType, TrackedTask>) {
+      TrackedTask::copies = 0;
+      TrackedTask::moves = 0;
     }
 
-    StressLog::info("Result [{}]: Copies={}, Moves={}", mode_name, (int)TrackedTask::copies, (int)TrackedTask::moves);
+    constexpr size_t TASKS = 20000;
+    std::vector<TaskType> tasks;
+    tasks.reserve(TASKS);
+    for (int i = 0; i < TASKS; ++i) tasks.emplace_back(i);
+
+    SFOBreaker breaker;
+    std::string full_mode_name = std::string(mode_name) + (use_detach ? "_DETACH" : "_BATCH");
+
+    {
+      BatchThroughput::reset();
+      BatchThroughput::start();
+
+      SC::PoolThroughput::m_storage.value.store(0, std::memory_order_relaxed);
+      SC::PoolThroughput::m_storage.accumulated_ns.store(0, std::memory_order_relaxed);
+      SC::PoolThroughput::m_storage.running.store(false, std::memory_order_relaxed);
+      SC::PoolThroughput::start();
+      auto t = StressLog::time("Mode: {1} | SFO: {2} took {0}",
+                               full_mode_name, !force_no_sfo);
+
+      if (use_detach) {
+        if (force_no_sfo) {
+          SC::ChaosThreading::detacheBatch(std::move(tasks),
+                                           [breaker](int id, TaskType t) { (void) breaker; }, nullptr);
+        } else {
+          SC::ChaosThreading::detacheBatch(std::move(tasks),
+                                           [](int id, TaskType t) {
+                                           }, nullptr);
+        }
+      } else {
+        if (force_no_sfo) {
+          auto f = SC::ChaosThreading::enqueueBatch(std::move(tasks),
+                                                    [breaker](int id, TaskType t) { (void) breaker; });
+        } else {
+          auto f = SC::ChaosThreading::enqueueBatch(std::move(tasks),
+                                                    [](int id, TaskType t) {
+                                                    });
+        }
+      }
+      t.stop();
+
+      // Stats Update: Wir tracken, wie viele Tasks wir gerade "gefeuert" haben
+      BatchThroughput::record(TASKS);
+      BatchThroughput::stop();
+      SC::ChaosThreading::wait_until_finished();
+      StressLog::stats<BatchThroughput, SC::PoolThroughput>("");
+    }
+
+    if constexpr (std::is_same_v<TaskType, TrackedTask>) {
+      StressLog::info("  -> Results: Copies={}, Moves={}", (int) TrackedTask::copies, (int) TrackedTask::moves);
+    }
   };
 
-  // 1. SFO Pfad (Standard)
-  run_test("SFO_PATH", false, false);
-  run_test("SFO_PATH", true, false);
+  run_test("SFO_PATH", false, false); // BATCH
+  run_test("SFO_PATH", false, true); // DETACH
+  run_test("MERGED_PATH", true, false); // BATCH
+  run_test("MERGED_PATH", true, true); // DETACH
 
-  // 2. Merged Storage Pfad (Breaker erzwingt Case 2)
-  run_test("MERGED_STORAGE_PATH", false, true);
-  run_test("MERGED_STORAGE_PATH", true, true);
+  // Ausgabe der Chaos-Stats für diesen Block
+};
+
+void test_efficiency_full() {
+  // 1. Korrektheit prüfen (mit TrackedTask)
+  run_efficiency_block<TrackedTask>(true);
+
+  // 2. Rohe Performance messen (mit FastTask)
+  run_efficiency_block<FastTask>(false);
 }
 
 int main() {
   try {
     SC::ChaosThreading::init();
 
-    // Correctness & Efficiency Test
     test_efficiency_full();
 
     StressLog::info("All Stress Tests and Efficiency Checks completed.");
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     StressLog::err("Test failed with exception: {}", e.what());
     return 1;
   }
