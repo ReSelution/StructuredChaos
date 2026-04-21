@@ -12,7 +12,6 @@
 #include "rapidhash-constexpr.h"
 
 
-
 #if defined(_MSC_VER) // MSVC
 #define FORCE_INLINE __forceinline
 #elif defined(__GNUC__) || defined(__clang__) // GCC / Clang
@@ -23,110 +22,130 @@
 
 
 namespace SC {
-    using h64 = uint64_t;
+  using h64 = uint64_t;
 
-    template<typename ... Args>
-    FORCE_INLINE constexpr h64 hash(Args &&...args) {
-        if constexpr (sizeof...(Args) == 2) {
-            if consteval {
-                auto extract = [](auto &&first, auto &&second) constexpr {
-                    return rapid::constExpr::rapidhash(first, static_cast<size_t>(second));
-                };
-                return extract(std::forward<Args>(args)...);
-            }
-            else {
-                auto extract = [](auto &&first, auto &&second) {
-                    return rapidhash(reinterpret_cast<const uint8_t *>(first), static_cast<size_t>(second));
-                };
-                return extract(std::forward<Args>(args)...);
-            }
-        } else if constexpr (sizeof...(Args) == 1) {
-            auto &&arg = std::get<0>(std::forward_as_tuple(std::forward<Args>(args)...));
+  template<typename T>
+ concept SizedBuffer = requires(T a) {
+    // 1. Prüfe ob die Methoden überhaupt existieren
+    a.data();
+    a.size();
 
-            using ArgType = std::decay_t<decltype(arg)>;
+    { a.data() } -> std::same_as<decltype(a.data())>; // Validiert, dass es aufrufbar ist
+    requires std::is_pointer_v<decltype(a.data())>;  // Muss ein Pointer sein
+    { a.size() } -> std::convertible_to<std::size_t>; // Muss Größe liefern
+ };
 
-            if constexpr (std::is_integral_v<ArgType>) {
-                auto val = static_cast<uint64_t>(arg);
-                if consteval {
-                    return rapid::constExpr::rapidhash(reinterpret_cast<const uint8_t *>(&val), sizeof(val));
-                }
-                else {
-                    return rapidhash(reinterpret_cast<const uint8_t *>(&val), sizeof(val));
-                }
-            } else {
-                auto dispatch = [](auto &&a) constexpr {
-                    if constexpr (std::is_convertible_v<decltype(a), std::string_view>) {
-                        std::string_view sv = a;
-                        if consteval {
-                            return rapid::constExpr::rapidhash(sv.data(), sv.size());
-                        }
-                        else {
-                            return rapidhash(reinterpret_cast<const uint8_t *>(sv.data()), sv.size());
-                        }
-                    } else {
-                        if consteval {
-                            return rapid::constExpr::rapidhash(a.data(), a.size());
-                        }
-                        else {
-                            return rapidhash(reinterpret_cast<const uint8_t *>(a.data()), a.size());
-                        }
-                    }
-                };
+  template<typename... Args>
+  FORCE_INLINE constexpr h64 hash(Args &&... args) {
+    // Case 1 2x Integers or ptr + lenght
+    if constexpr (sizeof...(Args) == 2) {
+      auto [a1, a2] = std::forward_as_tuple(std::forward<Args>(args)...);
+      using T1 = std::decay_t<decltype(a1)>;
+      using T2 = std::decay_t<decltype(a2)>;
 
-                return dispatch(arg);
-            }
-        }
-    }
+      if constexpr (std::is_integral_v<T1> && std::is_integral_v<T2>) {
+        uint8_t buffer[16]{};
+        size_t len = 0;
 
-    FORCE_INLINE constexpr h64 hash_lowercase(std::string_view str) {
         if consteval {
-            constexpr size_t MAX_STR_LEN = 512;
-            uint8_t buffer[MAX_STR_LEN];
-            const size_t len = std::min<size_t>(str.length(), MAX_STR_LEN);
-
-            for (size_t i = 0; i < len; ++i) {
-                const auto c = static_cast<uint8_t>(str[i]);
-                buffer[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : static_cast<char>(c);
-            }
-            return rapid::constExpr::rapidhash(buffer, len);
+          auto copy = [&](auto val) {
+            for (size_t i = 0; i < sizeof(val); ++i)
+              buffer[len++] = static_cast<uint8_t>((val >> (i * 8)) & 0xFF);
+          };
+          copy(a1);
+          copy(a2);
+          return rapid::constExpr::rapidhash(buffer, len);
+        } else {
+          std::memcpy(buffer, &a1, sizeof(a1));
+          std::memcpy(buffer + sizeof(a1), &a2, sizeof(a2));
+          return rapidhash(buffer, sizeof(a1) + sizeof(a2));
         }
-        else {
-            return rapidhash_lowercase(str.data(), str.size());
+      } else if constexpr (std::is_pointer_v<T1> && std::is_integral_v<T2>) {
+        if consteval {
+          return rapid::constExpr::rapidhash(a1, static_cast<size_t>(a2));
+        } else {
+          return rapidhash(reinterpret_cast<const uint8_t *>(a1), static_cast<size_t>(a2));
         }
+      }
+      static_assert(
+        std::is_pointer_v<T1> && std::is_integral_v<T2> || (std::is_integral_v<T1> && std::is_integral_v<T2>));
     }
+    // 2. Fall: Ein Argument (String-like oder einzelner Integer)
+    // Case 2. str
+    else if constexpr (sizeof...(Args) == 1) {
+      auto &&arg = std::get<0>(std::forward_as_tuple(std::forward<Args>(args)...));
+      using T = std::decay_t<decltype(arg)>;
 
-
-    template<typename T, typename ... Args>
-    FORCE_INLINE constexpr T hash(Args &&...args) {
-        static_assert(std::is_enum_v<T>, "T must be an enum");
-        static_assert(std::is_same_v<h64, std::underlying_type_t<T>>, "Enum must underlie uint64_t");
-        return static_cast<T>(hash(std::forward<Args>(args)...));
+      if constexpr (std::is_integral_v<T>) {
+        static_assert(sizeof(T) <= sizeof(uint64_t), "T must be uint64_t or Lower");
+        if consteval {
+          uint8_t b[sizeof(T)];
+          for (size_t i = 0; i < sizeof(T); ++i) {
+            b[i] = static_cast<uint8_t>((arg >> (i * 8)) & 0xFF);
+          }
+          return rapid::constExpr::rapidhash(b, sizeof(T));
+        } else {
+          return rapidhash(reinterpret_cast<const uint8_t *>(&arg), sizeof(T));
+        }
+      } else if constexpr (SizedBuffer<T>) {
+        if consteval {
+          return rapid::constExpr::rapidhash(arg.data(), arg.size());
+        } else {
+          return rapidhash(reinterpret_cast<const uint8_t*>(arg.data()), arg.size());
+        }
+      }
     }
+    return 0;
+  }
 
-    struct IdentityHash {
-        using is_transparent = void;
-        using is_avalanching = void;
+FORCE_INLINE constexpr h64 hash_lowercase(std::string_view str) {
+  if consteval {
+    constexpr size_t MAX_STR_LEN = 512;
+    uint8_t buffer[MAX_STR_LEN];
+    const size_t len = std::min<size_t>(str.length(), MAX_STR_LEN);
 
-        [[nodiscard]] size_t operator()(uint32_t value) const noexcept {
-            return value;
-        }
+    for (size_t i = 0; i < len; ++i) {
+      const auto c = static_cast<uint8_t>(str[i]);
+      buffer[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : static_cast<char>(c);
+    }
+    return rapid::constExpr::rapidhash(buffer, len);
+  } else {
+    return rapidhash_lowercase(str.data(), str.size());
+  }
+}
 
-        size_t operator()(uint64_t v) const {
-            return v;
-        }
 
-        [[nodiscard]] size_t operator()(std::string_view v) const noexcept {
-            return hash(v);
-        }
+template<typename T, typename... Args>
+FORCE_INLINE constexpr T hash(Args &&... args) {
+  static_assert(std::is_enum_v<T>, "T must be an enum");
+  static_assert(std::is_same_v<h64, std::underlying_type_t<T> >, "Enum must underlie uint64_t");
+  return static_cast<T>(hash(std::forward<Args>(args)...));
+}
 
-        [[nodiscard]] size_t operator()(std::string v) const noexcept {
-            return hash(v);
-        }
-    };
+struct IdentityHash {
+  using is_transparent = void;
+  using is_avalanching = void;
+
+  [[nodiscard]] size_t operator()(uint32_t value) const noexcept {
+    return value;
+  }
+
+  size_t operator()(uint64_t v) const {
+    return v;
+  }
+
+  [[nodiscard]] size_t operator()(std::string_view v) const noexcept {
+    return SC::hash(v);
+  }
+
+  [[nodiscard]] size_t operator()(std::string v) const noexcept {
+    return SC::hash(v);
+  }
+};
 
 } // SC
 inline namespace literals {
-    constexpr SC::h64 operator ""_h(const char *s, size_t len) {
-        return SC::hash(s, len);
-    }
+  constexpr SC::h64 operator ""_h(const char *s, size_t len) {
+    return SC::hash(s, len);
+  }
 }

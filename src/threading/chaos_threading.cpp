@@ -97,7 +97,7 @@ namespace SC {
   }
 
   size_t ChaosThreading::getNumThreads() {
-    return threads.size() + 1; // +1 to include main Thread
+    return threads.size() +1 + longRunningThreads.size(); // +1 to include main Thread
   }
 
   int32_t ChaosThreading::getThreadId() {
@@ -148,19 +148,7 @@ namespace SC {
         continue;
       }
 
-//      if (pool_sema.try_acquire()) {
-//        continue;
-//      }
-//      bool foundWork = false;
-//      for (int i = 0; i < 5000; ++i) {
-//        if (!queues.was_empty() || available.load(std::memory_order_acquire) != 0) {
-//          foundWork = true;
-//          break;
-//        }
-//        _mm_pause();
-//      }
-//      if (foundWork) continue;
-      if (queues.was_empty() && ActiveTask::m_storage.value.load() == 0) {
+      if (queues.was_empty() && ActiveTask::m_storage.value.load() == 0) [[unlikely]]{
         wait_cv.notify_all();
       }
       pool_sema.try_acquire_for(std::chrono::milliseconds(10));
@@ -188,20 +176,26 @@ namespace SC {
   }
 
   void ChaosThreading::init(uint32_t numThreads) {
-    if (!threads.empty()) return;
-    auto maxThreads = std::thread::hardware_concurrency() - 1 - longRunningThreads.size();
-    auto threadCount = std::min(std::max<size_t>(numThreads, 1), maxThreads);
+    if (!threads.empty()) [[unlikely]] return;
 
-    workerStores.reserve(threadCount);
-    for (uint32_t i = 0; i < threadCount; ++i) {
-      workerStores.push_back(std::make_unique<WorkerData>(threadCount * HELPER_TASK_MULTIPLYER));
+    const size_t longCount = longRunningThreads.size();
+    const size_t maxHardware = std::thread::hardware_concurrency();
+    const size_t threadCount = std::min<size_t>(numThreads, maxHardware - 1 - longCount);
+
+    const size_t totalSlots = 1 + longCount + threadCount; // Main + Long + Worker
+
+
+    workerStores.reserve(totalSlots);
+    for (uint32_t i = 0; i < totalSlots; ++i) {
+      workerStores.push_back(std::make_unique<WorkerData>(QUEUE_CAP));
     }
 
     CHAOS_START(PoolThroughput)
     std::atexit(shutdown);
     for (uint32_t i = 0; i < threadCount; ++i) {
-      threads.emplace_back(workerThread, i + longRunningThreads.size());
+      threads.emplace_back(workerThread, i +1 + longRunningThreads.size());
     }
+    threadId = 0;
   }
 
   template<ChaosThreading::Priority P>

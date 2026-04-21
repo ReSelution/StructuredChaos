@@ -13,13 +13,20 @@ namespace SC {
   public:
     MagpieString() = default;
 
-    MagpieString(std::string_view ns, std::string_view key) : m_key(ns, key) {
+    MagpieString(std::string_view ns, std::string_view key) : m_key(ns, key), m_srcKey() {
     }
 
-    MagpieString(uint64_t ns, uint64_t key) : m_key(ns, key) {
+    MagpieString(std::string_view ns, std::string_view key, std::string_view src) : m_key(ns, key), m_srcKey(src) {
+      Magpie::get()->insert(m_srcKey, src, "", src);
     }
 
-    consteval MagpieString(const char *str, size_t len) {
+    MagpieString(uint64_t ns, uint64_t key) : m_key(ns, key), m_srcKey() {
+    }
+
+    explicit MagpieString(MagpieKey key) : m_key(key),m_srcKey() {
+    }
+
+    consteval MagpieString(const char *str, size_t len): m_srcKey() {
       std::string_view sv{str, len};
 #ifndef NDEBUG
       m_keyString = sv;
@@ -32,6 +39,12 @@ namespace SC {
         m_key = MagpieKey{hash(sv.data(), sep), hash(sv.data() + sep + 1, len - sep - 1)};
       }
     }
+
+    static MagpieString fromStr(std::string_view str) {
+      MagpieKey key{str};
+      Magpie::get()->insert(key, str, "", str);
+      return MagpieString(key);
+    };
 
     [[nodiscard]] std::string_view view() const noexcept {
       return Magpie::get()->translate(m_key);
@@ -48,6 +61,7 @@ namespace SC {
     std::string_view m_keyString;
 #endif
     MagpieKey m_key;
+    MagpieKey m_srcKey;
   };
 } // SC
 

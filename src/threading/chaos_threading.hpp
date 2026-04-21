@@ -87,9 +87,18 @@ namespace SC {
         : payload(std::forward<R>(r)), saved_args(std::forward<Args>(a)...) {
       }
     };
+
+    struct BatchContext {
+      alignas(64) std::atomic<uint32_t> remaining;
+
+      BatchContext(uint32_t count) : remaining(count) {
+      }
+    };
   }
 
   class ChaosThreading {
+    static constexpr size_t SFO_LIMIT = 64;
+
   public:
     enum class Priority : int32_t {
       High,
@@ -108,26 +117,16 @@ namespace SC {
 
     template<std::ranges::input_range R, typename Func>
     static void parralelFor(R &&range, Func &&func) {
+      using IteratorType = std::ranges::iterator_t<R>;
       auto totalSize = std::ranges::distance(range);
       if (totalSize <= 0) [[unlikely]] return;
 
 
       const size_t threadLimit = getNumThreads() * HELPER_TASK_MULTIPLYER;
       const size_t numTasksLimit = std::min<size_t>(totalSize, threadLimit);
-
       const size_t chunkSize = totalSize / numTasksLimit;
 
-
-      struct alignas(64) BatchContext {
-        std::atomic<uint32_t> remaining;
-        std::promise<void> promise;
-
-        BatchContext(uint32_t count) : remaining(count) {
-        }
-      };
-
-      BatchContext ctx(static_cast<uint32_t>(numTasksLimit));
-      auto ftr = ctx.promise.get_future();
+      Detail::BatchContext ctx{static_cast<uint32_t>(numTasksLimit)};
       auto rawCtx = &ctx;
 
       auto current = range.begin();
@@ -149,13 +148,17 @@ namespace SC {
             }
           }
           if (rawCtx->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            rawCtx->promise.set_value();
+            rawCtx->remaining.notify_one();
           }
         });
         current = next;
       }
       doWork();
-      ftr.wait();
+      uint32_t val = ctx.remaining.load(std::memory_order_acquire);
+      while (val > 0) {
+        ctx.remaining.wait(val, std::memory_order_relaxed);
+        val = ctx.remaining.load(std::memory_order_acquire);
+      }
     };
 
     template<typename F, typename... Args>
@@ -267,17 +270,18 @@ namespace SC {
       return res;
     }
 
-    template<std::ranges::input_range R, typename F, typename Finished , typename... Args>
+    template<std::ranges::input_range R, typename F, typename Finished, typename... Args>
       requires std::invocable<F, int, std::ranges::range_value_t<R>, Args...> && std::is_void_v<std::invoke_result_t<F,
                  int, std::ranges::range_value_t<R>, Args...> >
     static void detacheBatch(R &&r, F &&f, Finished &&finished, Args &&... args) {
-      detacheBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished) ,std::forward<Args>(args)...);
+      detacheBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
+                                     std::forward<Args>(args)...);
     }
 
     template<Priority P, std::ranges::input_range R, typename F, typename Finished, typename... Args>
       requires std::invocable<F, int, std::ranges::range_value_t<R>, Args...> && std::is_void_v<std::invoke_result_t<F,
                  int, std::ranges::range_value_t<R>, Args...> >
-    static void detacheBatch(R &&r, F &&f, Finished &&finished , Args &&... args) {
+    static void detacheBatch(R &&r, F &&f, Finished &&finished, Args &&... args) {
       const auto count = r.size();
       if (count == 0) { return; }
       using ArgType = std::ranges::range_value_t<R>;
@@ -294,86 +298,88 @@ namespace SC {
 
       if constexpr (CAPTURE_BASE + OVERHEAD <= SFO_LIMIT || (!is_null_type && CAPTURE_BASE <= SFO_LIMIT)) {
         if constexpr (is_null_type) {
-          for (auto &&item : r) {
+          for (auto &&item: r) {
             batch.emplace_back([f, args..., arg = std::move(item)](int id) mutable {
-                try {
-                    f(id, std::move(arg), args...);
-                } catch (...) { }
+              try {
+                f(id, std::move(arg), args...);
+              } catch (...) {
+              }
             });
           }
         } else {
           auto state = std::make_shared<Detail::DetachBatchState>(count, std::forward<Finished>(finished));
-          for (auto &&item : r) {
+          for (auto &&item: r) {
             batch.emplace_back([f, args..., arg = std::move(item), state](int id) mutable {
-                try {
-                    f(id, std::move(arg), args...);
-                    if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                        if (state->on_finished) state->on_finished(id);
-                    }
-                } catch (...) {
-                    if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                        if (state->on_finished) state->on_finished(id);
-                    }
+              try {
+                f(id, std::move(arg), args...);
+                if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                  if (state->on_finished) state->on_finished(id);
                 }
+              } catch (...) {
+                if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                  if (state->on_finished) state->on_finished(id);
+                }
+              }
             });
           }
         }
         pushBatch<P>(std::move(batch));
       } else {
-       if constexpr (is_null_type) {
-        // CASE: Kein Callback -> Nutze Standard MergedState
-        auto shared = std::make_shared<Detail::MergedState<R, Args...>>(
+        if constexpr (is_null_type) {
+          // CASE: Kein Callback -> Nutze Standard MergedState
+          auto shared = std::make_shared<Detail::MergedState<R, Args...> >(
             count, std::forward<R>(r), std::forward<Args>(args)...);
 
-        for (size_t i = 0; i < count; ++i) {
+          for (size_t i = 0; i < count; ++i) {
             batch.emplace_back([f, shared, i](int id) {
-                try {
-                    std::apply([&](auto &&... unpacked) {
-                        f(id, std::move(shared->payload[i]), unpacked...);
-                    }, shared->saved_args);
+              try {
+                std::apply([&](auto &&... unpacked) {
+                  f(id, std::move(shared->payload[i]), unpacked...);
+                }, shared->saved_args);
 
-                    if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                        shared->batch_promise.set_value();
-                    }
-                } catch (...) {
-                    shared->batch_promise.set_exception(std::current_exception());
+                if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                  shared->batch_promise.set_value();
                 }
+              } catch (...) {
+                shared->batch_promise.set_exception(std::current_exception());
+              }
             });
-        }
-    } else {
-        // CASE: Mit Callback -> Nutze spezialisierte Struktur
-        struct DetachedMergedState : Detail::MergedState<R, Args...> {
+          }
+        } else {
+          // CASE: Mit Callback -> Nutze spezialisierte Struktur
+          struct DetachedMergedState : Detail::MergedState<R, Args...> {
             std::decay_t<Finished> on_finished;
 
             DetachedMergedState(size_t n, R &&r, Finished &&cb, Args &&... a)
-                : Detail::MergedState<R, Args...>(n, std::forward<R>(r), std::forward<Args>(a)...),
-                  on_finished(std::forward<Finished>(cb)) {}
-        };
+              : Detail::MergedState<R, Args...>(n, std::forward<R>(r), std::forward<Args>(a)...),
+                on_finished(std::forward<Finished>(cb)) {
+            }
+          };
 
-        auto shared = std::make_shared<DetachedMergedState>(
+          auto shared = std::make_shared<DetachedMergedState>(
             count, std::forward<R>(r), std::forward<Finished>(finished), std::forward<Args>(args)...);
 
-        for (size_t i = 0; i < count; ++i) {
+          for (size_t i = 0; i < count; ++i) {
             batch.emplace_back([f, shared, i](int id) {
-                try {
-                    std::apply([&](auto &&... unpacked) {
-                        f(id, std::move(shared->payload[i]), unpacked...);
-                    }, shared->saved_args);
+              try {
+                std::apply([&](auto &&... unpacked) {
+                  f(id, std::move(shared->payload[i]), unpacked...);
+                }, shared->saved_args);
 
-                    if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                        if (shared->on_finished) shared->on_finished(id);
-                        shared->batch_promise.set_value();
-                    }
-                } catch (...) {
-                    shared->batch_promise.set_exception(std::current_exception());
-                    if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                        if (shared->on_finished) shared->on_finished(id);
-                    }
+                if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                  if (shared->on_finished) shared->on_finished(id);
+                  shared->batch_promise.set_value();
                 }
+              } catch (...) {
+                shared->batch_promise.set_exception(std::current_exception());
+                if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                  if (shared->on_finished) shared->on_finished(id);
+                }
+              }
             });
+          }
         }
-    }
-    pushBatch<P>(std::move(batch));
+        pushBatch<P>(std::move(batch));
       }
     }
 

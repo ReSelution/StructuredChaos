@@ -9,26 +9,32 @@
 #include "ankerl/unordered_dense.h"
 #include "hash/hash.hpp"
 #include "memory/chaos_bump_arena.hpp"
+#include "threading/chaos_spin_lock.hpp"
 
 namespace SC {
-
-  DEFINE_CHAOS_STAT(MagpieInsert, "Magpie Throughput",  SC::ChaosThroughput<SC::MetricUnits>);
-  DEFINE_CHAOS_STAT(MagpieMEM, "Magpie Memory",  SC::ChaosThroughput<>);
+  DEFINE_CHAOS_STAT(MagpieInsert, "Magpie Throughput", SC::ChaosThroughput<SC::MetricUnits>);
+  DEFINE_CHAOS_STAT(MagpieMEM, "Magpie Memory", SC::ChaosThroughput<>);
 
   struct MagpieKey {
-    uint64_t key;
+    uint64_t key = 0;
+#ifdef DUMP_MAGPIE
+    std::string_view ns_str{};
+    std::string_view key_str{};
+#endif
 
     MagpieKey() = default;
-    MagpieKey(uint64_t key) : key(key) {
+
+    constexpr  MagpieKey(uint64_t key) : key(key) {
     }
 
-    MagpieKey(std::string_view ns, std::string_view key) : MagpieKey(SC::hash(ns), SC::hash(key)) {
+    constexpr MagpieKey(std::string_view ns, std::string_view key) : MagpieKey(SC::hash(ns), SC::hash(key)) {
+    }
+
+    constexpr  MagpieKey(std::string_view key) : MagpieKey(0, SC::hash(key)) {
     }
 
 
-    MagpieKey(const uint64_t ns, uint64_t key)  {
-      const uint64_t data[2] = {ns, key};
-      this->key = SC::hash(reinterpret_cast<const uint8_t *>(data), sizeof(data));
+    constexpr  MagpieKey(const uint64_t ns, uint64_t k): key(SC::hash(ns, k)) {
     }
 
     bool operator==(const MagpieKey &other) const = default;
@@ -46,62 +52,41 @@ namespace SC {
 
   class Magpie {
   public:
-
-
-    static Magpie* get() {
+    static Magpie *get() {
       static Magpie magpie{};
       return &magpie;
     }
 
-    std::string_view translate(const MagpieKey key) noexcept {
-      if (auto it = entries.find(key); it != entries.end()) {
-        return it->second;
-      }
-      return "<Magpie missing String>";
-    };
-    void mt_reserve(size_t size) {
+    std::string_view translate(MagpieKey key) noexcept;
+
+    static void mt_reserve(size_t size) {
       tl_map.reserve(size);
     }
-    void mt_Insert(MagpieKey key, std::string_view str) {
 
-      auto s = m_storage.allocateSpan<char>(str.size());
-      memcpy(s.data(), str.data(), s.size());
-      tl_map.emplace(key, s);
-      MagpieMEM::record(str.size());
-    }
+    void insert(MagpieKey &key, std::string_view valueStr, std::string_view ns, std::string_view keyStr);
 
-    void mt_Merge(bool override) {
-      if (override) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        entries.reserve(entries.size() + tl_map.size());
-        for (auto [key, value] : tl_map) {
-          entries.insert_or_assign(key, value);
-        }
-      }
-      else {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        entries.reserve(entries.size() + tl_map.size());
-        entries.insert(tl_map.begin(), tl_map.end());
-      }
-      MagpieInsert::record(tl_map.size());
-      tl_map.clear();
-    }
 
-    size_t size() const noexcept {
+    void mt_Insert(MagpieKey key, std::string_view valueStr, std::string_view ns, std::string_view keyStr );
+
+
+    void mt_Merge(bool override);
+
+    [[nodiscard]] size_t size() const noexcept {
       return entries.size();
     }
 
-    void clear() noexcept {
-      CHAOS_RESET(MagpieInsert)
-      CHAOS_RESET(MagpieMEM)
-      entries.clear();
-      m_storage.reset();
-    }
+    void clear() noexcept;
+
+    void dump() noexcept;
+    void dumpToFile(std::string_view file) noexcept;
 
   private:
-    static inline  thread_local magpieMAP tl_map{};
-    std::mutex m_mutex;
+    std::string_view storeStr(std::string_view str);
+
+    static thread_local magpieMAP tl_map; // Because MINGW
+    // MINGWs problem: static inline thread_local magpieMAP tl_map{};
+    std::shared_mutex sh_mtx;
     magpieMAP entries{};
-    ChaosBumpArena m_storage{1024*1024};
+    ChaosBumpArena m_storage{1024 * 1024};
   };
 }

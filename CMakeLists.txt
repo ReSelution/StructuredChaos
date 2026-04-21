@@ -59,7 +59,12 @@ endif ()
 
 if (NOT MSVC)
     if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(StructuredChaos PUBLIC -O3 -march=native -fno-rtti)
+        if (MINGW)
+            target_compile_options(StructuredChaos PUBLIC -O3 -fno-rtti -march=x86-64-v2)
+            message(STATUS "[SAA] MinGW: Using x86-64-v2 instead of native")
+        else()
+            target_compile_options(StructuredChaos PUBLIC -O3 -march=native -fno-rtti)
+        endif()
     else ()
         target_compile_options(StructuredChaos PUBLIC -g -O0)
         message(STATUS "[SAA] Debug mode: Optimizations disabled")
@@ -70,11 +75,12 @@ endif ()
 include(cmake/dependencies.cmake)
 add_subdirectory(external/rapidhash)
 option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
+option(DUMP_MAGPIE "DUMP_MAGPIE" ON)
 
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT SAA_LTO_SUPPORTED OUTPUT error)
-if (SAA_LTO_SUPPORTED AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+if (SAA_LTO_SUPPORTED AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT MINGW)
     set_target_properties(StructuredChaos PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
     message(STATUS "[Chaos] LTO enabled")
 else ()
@@ -136,10 +142,9 @@ target_link_libraries(StructuredChaos
         rapidHash
         unordered_dense::unordered_dense
         glm::glm
-        simdutf
         PRIVATE
+        simdutf
         atomic_queue::atomic_queue
-
 )
 
 target_include_directories(StructuredChaos
@@ -149,6 +154,10 @@ target_include_directories(StructuredChaos
 
 if (ENABLE_CHAOS_STATS)
     target_compile_definitions(StructuredChaos PUBLIC CHAOS_STATS_ENABLED)
+endif ()
+
+if (DUMP_MAGPIE)
+    target_compile_definitions(StructuredChaos PUBLIC DUMP_MAGPIE)
 endif ()
 
 
