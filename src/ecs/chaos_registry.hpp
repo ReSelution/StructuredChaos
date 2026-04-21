@@ -183,18 +183,21 @@ namespace SC {
     static void cleanupResources(entt::registry &reg, entt::entity e);
 
     alignas(64) mutable std::shared_mutex m_regMutex;
+    alignas(64) std::mutex eCreationLock;
+    alignas(64) std::atomic<uint32_t> mEntityIdx{ENTITY_BLOCK_SIZE};
     entt::registry m_reg;
-
     std::array<ChaosEntity, ENTITY_BLOCK_SIZE> mEntities{};
-    alignas(64)std::atomic<uint32_t> mEntityIdx{ENTITY_BLOCK_SIZE};
   };
 
 
   template<typename It>
   requires IsChaosEntity<typename std::iterator_traits<It>::value_type>
   void ChaosRegistry::create(It begin, It end) {
-    std::unique_lock guard{m_regMutex};
-    m_reg.create(begin, end);
+    std::lock_guard lock{eCreationLock};
+    {
+      std::shared_lock guard{m_regMutex};
+      m_reg.create(begin, end);
+    }
     for (auto iter = begin; iter != end; ++iter) {
       iter->registry = this;
     }

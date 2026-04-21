@@ -19,17 +19,18 @@ namespace SC {
   }
 
   void ChaosRegistry::createEntities() {
-    std::unique_lock guard{m_regMutex};
+    std::lock_guard lock{eCreationLock};
     auto idx = mEntityIdx.load(std::memory_order_relaxed);
     if (idx < ENTITY_BLOCK_SIZE) {
       return;
     }
-    m_reg.create(mEntities.begin(), mEntities.end());
-    for (auto &e : mEntities) {
+    {
+      std::shared_lock guard{m_regMutex};
+      m_reg.create(mEntities.begin(), mEntities.end());
+    }
+    for (auto &e: mEntities) {
       e.registry = this;
     }
     mEntityIdx.store(0, std::memory_order_relaxed);
   }
-
-
 } // SC
