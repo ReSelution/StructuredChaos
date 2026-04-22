@@ -57,7 +57,13 @@ namespace SC {
       return &magpie;
     }
 
-    std::string_view translate(MagpieKey key) noexcept;
+    std::string_view translate(const MagpieKey key) noexcept {
+      std::shared_lock lock(sh_mtx);
+      if (auto it = entries.find(key); it != entries.end())[[likely]] {
+        return it->second;
+      }
+      return "<Magpie missing String>";
+    }
 
     static void mt_reserve(size_t size) {
       tl_map.reserve(size);
@@ -76,16 +82,15 @@ namespace SC {
     }
 
     void clear() noexcept;
-
     void dump() noexcept;
     void dumpToFile(std::string_view file) noexcept;
 
   private:
-    std::string_view storeStr(std::string_view str);
 
+    std::string_view storeStr(std::string_view str);
     static thread_local magpieMAP tl_map; // Because MINGW
     // MINGWs problem: static inline thread_local magpieMAP tl_map{};
-    std::shared_mutex sh_mtx;
+    alignas(64) std::shared_mutex sh_mtx;
     magpieMAP entries{};
     ChaosBumpArena m_storage{1024 * 1024};
   };

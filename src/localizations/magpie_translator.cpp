@@ -189,13 +189,7 @@ namespace SC {
 
   thread_local magpieMAP Magpie::tl_map{};
 
-  std::string_view Magpie::translate(const MagpieKey key) noexcept {
-    std::shared_lock lock(sh_mtx);
-    if (auto it = entries.find(key); it != entries.end()) {
-      return it->second;
-    }
-    return "<Magpie missing String>";
-  }
+
 
   void Magpie::insert(MagpieKey &key, std::string_view valueStr, std::string_view ns, std::string_view keyStr) {
     {

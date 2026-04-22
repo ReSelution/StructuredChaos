@@ -2,6 +2,7 @@
 
 #include <array>
 #include <unordered_map>
+#include <ankerl/unordered_dense.h>
 
 #include "threading/chaos_spin_lock.hpp"
 
@@ -21,6 +22,8 @@ namespace SC {
     requires std::integral<K>
   class ChaosShardedCache {
     struct IdentityHash {
+      using is_transparent = void;
+      using is_avalanching = void;
       size_t operator()(size_t key) const noexcept { return key; }
     };
 
@@ -30,7 +33,7 @@ namespace SC {
      */
     struct alignas(64) Shard {
       ChaosSpinLock lock;
-      std::unordered_map<K, V, IdentityHash> data;
+      ankerl::unordered_dense::map<K, V, IdentityHash> data;
 
       void acquire() {
         lock.lock();
