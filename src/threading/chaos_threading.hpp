@@ -163,13 +163,13 @@ namespace SC {
 
     template<typename F, typename... Args>
       requires std::invocable<F, int, Args...> && std::is_void_v<std::invoke_result_t<F, int, Args...> >
-    void detach(F &&f, Args &&... args) {
+    static void detach(F &&f, Args &&... args) {
       detach<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args)...);
     }
 
     template<Priority P, typename F, typename... Args>
       requires std::invocable<F, int, Args...> && std::is_void_v<std::invoke_result_t<F, int, Args...> >
-    void detach(F &&f, Args &&... args) {
+    static void detach(F &&f, Args &&... args) {
       constexpr size_t SFO_LIMIT = 64;
       constexpr size_t SizeF = sizeof(std::decay_t<F>);
       constexpr size_t SizeArgs = (sizeof(std::decay_t<Args>) + ... + 0);
@@ -182,8 +182,8 @@ namespace SC {
           [f = std::forward<F>(f), ...args = std::forward<Args>(args)](int id) mutable {
             try {
               f(id, std::forward<Args>(args)...);
-            } catch (...) {
-              ThreadLog::err("Exception: {}", std::current_exception());
+            } catch (const std::exception& e) {
+              ThreadLog::err("Exception: {}", e.what());
             }
           });
       } else {
@@ -302,8 +302,9 @@ namespace SC {
             batch.emplace_back([f, args..., arg = std::move(item)](int id) mutable {
               try {
                 f(id, std::move(arg), args...);
-              } catch (...) {
-              }
+              } catch (const std::exception& e) {
+              ThreadLog::err("Exception: {}", e.what());
+            }
             });
           }
         } else {

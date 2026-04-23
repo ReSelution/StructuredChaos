@@ -135,11 +135,11 @@ struct IdentityHash {
   }
 
   [[nodiscard]] size_t operator()(std::string_view v) const noexcept {
-    return SC::hash(v);
+    return hash(v);
   }
 
   [[nodiscard]] size_t operator()(std::string v) const noexcept {
-    return SC::hash(v);
+    return hash(v);
   }
 };
 
