@@ -72,7 +72,6 @@ include(cmake/dependencies.cmake)
 add_subdirectory(external/rapidhash)
 option(ENABLE_CHAOS_STATS "Enable Chaos Stats" ON)
 option(DUMP_MAGPIE "DUMP_MAGPIE" OFF)
-
 include(CheckIPOSupported)
 check_ipo_supported(RESULT SAA_LTO_SUPPORTED OUTPUT error)
 if(SAA_LTO_SUPPORTED
@@ -162,4 +161,3 @@ if(SC_IS_MAIN_PROJECT)
 else()
   message(STATUS "[SC] Building as subdirectory - skipping tests")
 endif()
-

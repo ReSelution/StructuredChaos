@@ -1,0 +1,24 @@
+# ==========================================
+# StructuredChaos - Git Ignore Configuration
+# ==========================================
+
+# --- Build-Verzeichnisse & Caching ---
+build/
+.cache/
+compile_commands.json
+
+# --- IDEs & Editores (CLion / IntelliJ / VS Code) ---
+.idea/
+.vscode/
+*.user
+*.suo
+*.sln
+
+# --- Logs & Test-Artefakte ---
+logs/
+stress_test_logs/
+*.log
+
+# --- Betriebssystem-Spezifisches ---
+.DS_Store
+Thumbs.db
