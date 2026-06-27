@@ -55,16 +55,39 @@ FetchContent_Declare(
   GIT_TAG 1.4.0)
 set(HWY_ENABLE_INSTALL
     OFF
-    CACHE BOOL "Disable Highway installation")
+    CACHE BOOL "Disable Highway installation" FORCE)
 set(HWY_ENABLE_TESTS
     OFF
     CACHE BOOL "Disable Highway tests" FORCE)
 set(HWY_ENABLE_EXAMPLES
     OFF
     CACHE BOOL "Disable Highway examples" FORCE)
+
+# --- NEU: Benchmarks und Contrib-Code abschalten ---
+set(HWY_ENABLE_BENCHMARKS
+    OFF
+    CACHE BOOL "Disable Highway benchmarks" FORCE)
+set(HWY_ENABLE_CONTRIB
+    OFF
+    CACHE BOOL "Disable Highway contrib library" FORCE)
+
+# --- NEU: Dokumentation und RPATH-Müll verhindern ---
+set(HWY_BUILD_DOCS
+    OFF
+    CACHE BOOL "Disable Highway documentation" FORCE)
+set(CMAKE_SKIP_INSTALL_RPATH
+    ON
+    CACHE BOOL "Skip RPATH generation for dependencies" FORCE)
+
+# --- Architektur-Spezifisches (AVX10/SVE) ---
 set(HWY_DISABLE_AVX10
     ON
     CACHE BOOL "Disable AVX10" FORCE)
+# Falls du nicht für ARM-Server cross-compilst, schalte das hier auch ab, da
+# Clang sonst im Hintergrund versucht, SVE-Vektoren zu parsen:
+set(HWY_DISABLE_SVE2
+    ON
+    CACHE BOOL "Disable SVE2" FORCE)
 FetchContent_MakeAvailable(hwy)
 
 FetchContent_Declare(
