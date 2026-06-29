@@ -7,3 +7,4 @@ export import :Units;
 export import :Core;
 export import :Impl;
 export import :Throughput;
+export import :Counter;

@@ -20,3 +20,10 @@ target_link_libraries(HashTest PRIVATE StructuredChaos)
 set_target_properties(HashTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY
                                           "${OLD_OUTPUT_DIR}/tests")
 add_test(NAME HashTest COMMAND HashTest)
+
+
+add_executable(ThreadingTest threading/threading_test.cpp)
+target_link_libraries(ThreadingTest PRIVATE StructuredChaos)
+set_target_properties(ThreadingTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+                                          "${OLD_OUTPUT_DIR}/tests")
+add_test(NAME ThreadingTest COMMAND ThreadingTest)

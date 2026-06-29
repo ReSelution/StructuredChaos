@@ -17,14 +17,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPERIMENTAL_EXPORT_BUILD_DATABASE
     "73194a1d-c0b5-41b9-9190-a4512925e192")
 set(CMAKE_EXPORT_BUILD_DATABASE ON)
-
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Qunused-arguments")
+endif()
 add_library(chaos_compiler_flags INTERFACE)
 
 if(NOT MSVC)
   target_compile_options(
     chaos_compiler_flags INTERFACE -fno-rtti $<$<CONFIG:Debug>:-g -O0>
                                    $<$<NOT:$<CONFIG:Debug>>:-O3>)
-
   if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     if(MINGW)
       target_compile_options(chaos_compiler_flags INTERFACE -march=x86-64-v2)
@@ -53,7 +54,7 @@ target_sources(
                          ${CMAKE_CURRENT_SOURCE_DIR}/src FILES src/sc.cppm)
 
 target_link_libraries(StructuredChaos PUBLIC chaos_compiler_flags chaos_logger
-                                             chaos_stats chaos_hash)
+                                             chaos_stats chaos_hash chaos_memory chaos_threading mimalloc-static)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   set(SAA_TARGETING_WINDOWS TRUE)

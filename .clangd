@@ -5,7 +5,7 @@ CompileFlags:
 
 Diagnostics:
   UnusedIncludes: Strict
-  MissingIncludes: Strict
+  MissingIncludes: None
 
 Index:
   Background: Build

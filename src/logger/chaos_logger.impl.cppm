@@ -1,7 +1,5 @@
 module;
 
-#include "spdlog/common.h"
-#include "spdlog/logger.h"
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -9,10 +7,11 @@ module;
 #include <format>
 #include <memory>
 #include <mutex>
-#include <string>
 
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <string>
+
 #include <spdlog/spdlog.h>
 #include <string_view>
 #include <system_error>
@@ -21,6 +20,8 @@ module;
 
 export module SC.Logger:Impl;
 import SC.Util;
+import SC.Stats;
+
 namespace SC {
 
 export constexpr FixedString NoCat = "";
@@ -86,6 +87,21 @@ public:
     std::string user_msg = fmt::format(fmt, std::forward<Args>(args)...);
 
     log_stats_impl(level, user_msg, collected);
+  }
+
+  // Timer
+  template <typename... Args>
+  [[nodiscard]] static auto time(std::string_view fmt_str, Args &&...args) {
+    return time(spdlog::level::info, fmt_str, std::forward<Args>(args)...);
+  }
+
+  template <typename... Args>
+  [[nodiscard]] static auto time(spdlog::level::level_enum level,
+                                 std::string_view fmt_str, Args &&...args) {
+    return ChaosTimer([level, fmt_str, &args...](TimeResult res) mutable {
+      std::string timeStr = fmt::format("{:.2f}{}", res.value, res.suffix);
+      get()->log(level, fmt::runtime(fmt_str), timeStr, args...);
+    });
   }
 
 private:
