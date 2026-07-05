@@ -2,7 +2,6 @@ module;
 
 #include <array>
 #include <cassert>
-#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -14,6 +13,7 @@ module;
 #include <thread>
 #include <utility>
 #include <vector>
+
 
 #ifdef _WIN32
 #include <processthreadsapi.h>
@@ -362,24 +362,19 @@ namespace SC {
       return res;
     }
 
+
     template<std::ranges::input_range R, typename F, typename Finished, typename... Args>
+      requires std::invocable<F, int, std::ranges::range_value_t<R>, Args...> &&
+               std::is_void_v<std::invoke_result_t<F, int, std::ranges::range_value_t<R>, Args...>>
     static void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
       detachBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
                                     std::forward<Args>(args)...);
     }
 
-    template<std::ranges::input_range R, typename F, typename Finished, typename... Args>
-      requires std::invocable<F, int, std::ranges::range_value_t<R>, Args...> &&
-               std::is_void_v<std::invoke_result_t<F, int, std::ranges::range_value_t<R>, Args...>>
-    static void detacheBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
-      detacheBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
-                                     std::forward<Args>(args)...);
-    }
-
     template<Priority P, std::ranges::input_range R, typename F, typename Finished, typename... Args>
       requires std::invocable<F, int, std::ranges::range_value_t<R>, Args...> &&
                std::is_void_v<std::invoke_result_t<F, int, std::ranges::range_value_t<R>, Args...>>
-    static void detacheBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
+    static void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
       const auto count = r.size();
       if (count == 0) {
         return;

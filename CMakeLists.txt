@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 4.3)
-project(StructuredChaos LANGUAGES CXX)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto=thin")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto=thin")
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -flto=thin")
 
+set(CMAKE_EXPERIMENTAL_EXPORT_BUILD_DATABASE "73194a1d-c0b5-41b9-9190-a4512925e192")
+project(StructuredChaos LANGUAGES CXX)
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
   set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
@@ -9,18 +13,20 @@ endif()
 include(CheckCXXCompilerFlag)
 
 set(CMAKE_CXX_STANDARD 26)
-set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(CMAKE_EXPERIMENTAL_EXPORT_BUILD_DATABASE
-    "73194a1d-c0b5-41b9-9190-a4512925e192")
 set(CMAKE_EXPORT_BUILD_DATABASE ON)
+
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Qunused-arguments")
 endif()
 add_library(chaos_compiler_flags INTERFACE)
+
 
 if(NOT MSVC)
   target_compile_options(
@@ -48,13 +54,23 @@ add_subdirectory(external/rapidhash)
 add_subdirectory(src)
 
 add_library(StructuredChaos STATIC)
-
 target_sources(
   StructuredChaos PUBLIC FILE_SET CXX_MODULES BASE_DIRS
                          ${CMAKE_CURRENT_SOURCE_DIR}/src FILES src/sc.cppm)
 
-target_link_libraries(StructuredChaos PUBLIC chaos_compiler_flags chaos_logger
-                                             chaos_stats chaos_hash chaos_memory chaos_threading mimalloc-static)
+
+
+target_link_libraries(StructuredChaos PUBLIC
+  chaos_compiler_flags
+  chaos_logger
+  chaos_stats
+  chaos_hash
+  chaos_memory
+  chaos_threading
+  mimalloc-static)
+
+
+
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   set(SAA_TARGETING_WINDOWS TRUE)
@@ -86,19 +102,7 @@ if(NOT MSVC AND NOT SAA_TARGETING_WINDOWS)
   message(STATUS "[CHAOS] Using Linker: ${SAA_LINKER}")
 endif()
 
-include(CheckIPOSupported)
-check_ipo_supported(RESULT SAA_LTO_SUPPORTED OUTPUT SAA_LTO_ERROR)
 
-if(SAA_LTO_SUPPORTED AND NOT MINGW)
-  set_target_properties(
-    StructuredChaos PROPERTIES INTERPROCEDURAL_OPTIMIZATION
-                               $<$<NOT:$<CONFIG:Debug>>:TRUE>)
-  message(
-    STATUS "[Chaos] LTO supported (Active in Release/MinSizeRel/RelWithDebInfo)"
-  )
-else()
-  message(STATUS "[Chaos] LTO skipped: ${SAA_LTO_ERROR}")
-endif()
 
 if(PROJECT_IS_TOP_LEVEL)
   message(

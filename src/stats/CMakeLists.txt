@@ -16,4 +16,3 @@ target_sources(
   chaos_stats PUBLIC FILE_SET CXX_MODULES FILES chaos_stats.impl.cppm
                      chaos_throughput.cppm chaos_counter.cppm)
 
-target_sources(chaos_stats PUBLIC FILE_SET CXX_MODULES FILES chaos_counter.cppm)
