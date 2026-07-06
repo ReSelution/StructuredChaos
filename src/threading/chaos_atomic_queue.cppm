@@ -3,6 +3,8 @@ module;
 #include <atomic>
 #include <bit>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <utility>
 
 #if defined(_WIN32)
@@ -30,7 +32,7 @@ namespace SC {
   public:
     AtomicQueue() {
       size_t total_bytes = Capacity * sizeof(Slot);
-
+      m_release_counters = std::make_unique<std::atomic<uint16_t>[]>(NUM_BLOCKS);
 #if defined(_WIN32)
       m_rawMem = VirtualAlloc(nullptr, total_bytes, MEM_RESERVE, PAGE_READWRITE);
 #else
@@ -112,16 +114,20 @@ namespace SC {
       release(pos);
       return true;
     }
+    static size_t num_blocks() { return NUM_BLOCKS; }
+
+    static size_t slots_per_block() { return SLOTS_PER_BLOCK; }
 
   private:
     void acquire(size_t global_idx) {
+
       if constexpr (SLOTS_PER_BLOCK == 0)
         return;
 
       size_t block_id = get_block_id(global_idx);
 
       if ((global_idx & BLOCK_SLOT_MASK) == 0) {
-        m_release_counters[block_id].value.fetch_add(SLOTS_PER_BLOCK, std::memory_order_relaxed);
+        m_release_counters[block_id].fetch_add(SLOTS_PER_BLOCK, std::memory_order_relaxed);
       }
 
 #if defined(_WIN32)
@@ -137,7 +143,7 @@ namespace SC {
       size_t block_id = get_block_id(global_idx);
 
       // Fällt der Zähler auf 0 (fetch_sub liefert 1), ist der Block physisch leer verarbeitet.
-      if (m_release_counters[block_id].value.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      if (m_release_counters[block_id].fetch_sub(1, std::memory_order_acq_rel) == 1) {
         size_t target_start_slot  = (global_idx & ~BLOCK_SLOT_MASK) & SLOT_MASK;
         void *const block_address = static_cast<void *>(m_slots + target_start_slot);
 
@@ -177,11 +183,7 @@ namespace SC {
     alignas(64) std::atomic<size_t> m_head{0};
     alignas(64) std::atomic<size_t> m_tail{0};
 
-    // Cache-Line Isolation für die Counter, damit Threads sich nicht gegenseitig blockieren
-    struct AlignedCounter {
-      alignas(64) std::atomic<size_t> value{0};
-    };
-    alignas(64) AlignedCounter m_release_counters[NUM_BLOCKS];
+    std::unique_ptr<std::atomic<uint16_t>[]> m_release_counters;
   };
 
 } // namespace SC

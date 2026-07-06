@@ -25,7 +25,7 @@ import SC.Logger;
 
 using StressLog       = SC::ChaosLogger<"Chaos", "MPMC_Stress">;
 using TotalThroughput = SC::ChaosStat<"MPMC Sync Processing", SC::ChaosThroughput<SC::MetricUnits>>;
-
+using namespace std::literals::chrono_literals;
 constexpr size_t OperationsPerThread = 100'000;
 constexpr size_t QueueCapacity       = 1'048'576; // 2^20 Slots
 
@@ -166,7 +166,8 @@ void run_mpmc_test(const std::string &queueName, unsigned int producerCount, uns
 
   // --- 3. START UND ZEITMESSUNG ---
   size_t initialRam = get_current_rss_mb();
-  StressLog::info("RAM vor dem Startschuss: {} MB", initialRam);
+  StressLog::info("RAM vor dem Startschuss: {} MB Stack: {} B", initialRam, sizeof(QueueType));
+
 
   TotalThroughput::reset();
   TotalThroughput::start();
@@ -185,7 +186,7 @@ void run_mpmc_test(const std::string &queueName, unsigned int producerCount, uns
 
   TotalThroughput::record(totalExpectedElements);
   TotalThroughput::stop();
-
+  std::this_thread::sleep_for(10ms);
   size_t finalRam = get_current_rss_mb();
 
   // --- 4. BEWERTUNG ---
