@@ -1,4 +1,4 @@
-export module SC.Hash;
+export module sc.hash;
 
-export import :Impl;
+export import :impl;
 ;

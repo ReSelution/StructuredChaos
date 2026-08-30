@@ -15,13 +15,13 @@ module;
 #include <x86intrin.h>
 #endif
 
-export module SC.Threading:AtomicQueue;
+export module sc.threading:atomic_queue;
 
-namespace SC {
+namespace sc {
 
   export template<typename T, size_t Capacity = 4096>
   class AtomicQueue {
-    static_assert((Capacity & (Capacity - 1)) == 0, "Capacity muss eine Zweierpotenz sein!");
+
 
     struct Slot {
       // 0 = EMPTY, 1 = STORED
@@ -31,7 +31,7 @@ namespace SC {
 
   public:
     AtomicQueue() {
-      size_t total_bytes = Capacity * sizeof(Slot);
+      size_t total_bytes = REAL_CAP * sizeof(Slot);
       m_release_counters = std::make_unique<std::atomic<uint16_t>[]>(NUM_BLOCKS);
 #if defined(_WIN32)
       m_rawMem = VirtualAlloc(nullptr, total_bytes, MEM_RESERVE, PAGE_READWRITE);
@@ -56,7 +56,7 @@ namespace SC {
 #if defined(_WIN32)
       VirtualFree(m_rawMem, 0, MEM_RELEASE);
 #else
-      munmap(m_rawMem, Capacity * sizeof(Slot));
+      munmap(m_rawMem, REAL_CAP * sizeof(Slot));
 #endif
     }
 
@@ -83,7 +83,8 @@ namespace SC {
 
     void push(T &&t) { emplace(std::move(t)); }
 
-    bool try_pop(T &t) {
+    bool try_pop(T &t, int worker_id) {
+
       size_t pos = m_head.load(std::memory_order_relaxed);
       Slot *slot = nullptr;
 
@@ -99,9 +100,15 @@ namespace SC {
           break;
         }
 
+
+        const int spins = 2 + (worker_id & 3); // Ergibt 2, 3, 4 oder 5 Spins
+        for (int i = 0; i < spins; ++i) {
 #if defined(__x86_64__) || defined(_M_X64)
-        _mm_pause();
+          _mm_pause();
+#elif defined(__ARM_ARCH) || defined(__aarch64__)
+          asm volatile("yield" ::: "memory");
 #endif
+        }
       }
 
       auto *item_ptr = reinterpret_cast<T *>(&slot->storage);
@@ -109,11 +116,20 @@ namespace SC {
       item_ptr->~T();
 
       slot->state.store(0, std::memory_order_release);
-
-      // Strikte Freigabe ohne teuren m_head-Load
       release(pos);
       return true;
     }
+
+
+    size_t size() const {
+      const auto h    = m_head.load(std::memory_order_relaxed);
+      const auto t    = m_tail.load(std::memory_order_relaxed);
+      const auto diff = static_cast<ptrdiff_t>(t - h);
+      return static_cast<size_t>(std::max<ptrdiff_t>(0, diff));
+    }
+
+    bool empty() const { return !size(); }
+
     static size_t num_blocks() { return NUM_BLOCKS; }
 
     static size_t slots_per_block() { return SLOTS_PER_BLOCK; }
@@ -166,7 +182,8 @@ namespace SC {
     void *m_rawMem = nullptr;
     Slot *m_slots  = nullptr;
 
-    static constexpr size_t SLOT_MASK = Capacity - 1;
+    static constexpr size_t REAL_CAP  = std::bit_ceil(Capacity);
+    static constexpr size_t SLOT_MASK = REAL_CAP - 1;
     static constexpr size_t PAGE_SIZE = 4096;
 
     // Stellschraube: Erhöhe BATCH_PAGES auf z.B. 64 oder 128, um die OS-Kosten zu strecken!
@@ -177,7 +194,7 @@ namespace SC {
     static constexpr size_t BLOCK_SHIFT     = std::countr_zero(SLOTS_PER_BLOCK);
     static constexpr size_t BLOCK_SLOT_MASK = SLOTS_PER_BLOCK - 1;
 
-    static constexpr size_t NUM_BLOCKS = Capacity / (SLOTS_PER_BLOCK > 0 ? SLOTS_PER_BLOCK : 1);
+    static constexpr size_t NUM_BLOCKS = REAL_CAP / (SLOTS_PER_BLOCK > 0 ? SLOTS_PER_BLOCK : 1);
     static constexpr size_t BLOCK_MASK = NUM_BLOCKS - 1;
 
     alignas(64) std::atomic<size_t> m_head{0};
@@ -186,4 +203,4 @@ namespace SC {
     std::unique_ptr<std::atomic<uint16_t>[]> m_release_counters;
   };
 
-} // namespace SC
+} // namespace sc

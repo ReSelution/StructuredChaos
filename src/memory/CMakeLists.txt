@@ -7,7 +7,7 @@ target_sources(
   PUBLIC FILE_SET
          CXX_MODULES
          FILES
-         chaos_memory.cppm
-         chaos_monotonic_res.cppm
-         chaos_arena.cppm
-         chaos_arena_pool.cppm)
+         memory.cppm
+         monotonic_res.cppm
+         arena.cppm
+         arena_pool.cppm)

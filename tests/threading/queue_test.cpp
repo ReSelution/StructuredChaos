@@ -1,7 +1,7 @@
 #include <atomic>
 #include <cassert>
-#include <chrono>
 #include <cstddef>
+#include <functional>
 #include <iostream>
 #include <memory> // Für std::unique_ptr
 #include <thread>
@@ -19,13 +19,16 @@
 #include "atomic_queue/atomic_queue.h"
 
 // Eigene Module importieren
-import SC.Threading;
-import SC.Stats;
-import SC.Logger;
+import sc.threading;
+import sc.stats;
+import sc.logger;
 
-using StressLog       = SC::ChaosLogger<"Chaos", "MPMC_Stress">;
-using TotalThroughput = SC::ChaosStat<"MPMC Sync Processing", SC::ChaosThroughput<SC::MetricUnits>>;
+using StressLog       = sc::Logger<"Chaos", "MPMC_Stress">;
+using TotalThroughput = sc::stats::Stat<"MPMC Sync Processing", sc::stats::Throughput<sc::stats::MetricUnits>>;
 using namespace std::literals::chrono_literals;
+
+using MoveOnlyFunction = std::move_only_function<void(int)>;
+
 constexpr size_t OperationsPerThread = 100'000;
 constexpr size_t QueueCapacity       = 1'048'576; // 2^20 Slots
 
@@ -204,12 +207,12 @@ int main() {
   const unsigned int consumerCount = producerCount;
 
   // BENCHMARK 1: Deine eigene Implementierung (Größe im Template)
-  using MyQueueType = SC::AtomicQueue<SC::MoveOnlyFunction, QueueCapacity>;
-  run_mpmc_test<MyQueueType, SC::MoveOnlyFunction>("SC::AtomicQueue (Deine Queue)", producerCount, consumerCount);
+  using MyQueueType = sc::AtomicQueue<MoveOnlyFunction, QueueCapacity>;
+  run_mpmc_test<MyQueueType, MoveOnlyFunction>("SC::AtomicQueue", producerCount, consumerCount);
 
   // BENCHMARK 2: Die externe atomic_queue (Größe im Konstruktor via B2-Variante)
-  using ExternalQueueType = atomic_queue::AtomicQueueB2<SC::MoveOnlyFunction, std::allocator<SC::MoveOnlyFunction>>;
-  run_mpmc_test<ExternalQueueType, SC::MoveOnlyFunction>("atomic_queue::AtomicQueueB2", producerCount, consumerCount);
+  using ExternalQueueType = atomic_queue::AtomicQueueB2<MoveOnlyFunction, std::allocator<MoveOnlyFunction>>;
+  run_mpmc_test<ExternalQueueType, MoveOnlyFunction>("atomic_queue::AtomicQueueB2", producerCount, consumerCount);
 
   return 0;
 }

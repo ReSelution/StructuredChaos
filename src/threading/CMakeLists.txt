@@ -9,7 +9,15 @@ target_sources(
   PUBLIC FILE_SET
          CXX_MODULES
          FILES
-         chaos_threading.cppm
-         chaos_threading.impl.cppm
-         chaos_spinlock.cppm
-         chaos_atomic_queue.cppm)
+         threading.cppm
+         spinlock.cppm
+         atomic_queue.cppm
+         thrd_types.cppm
+         thrd_backend.cppm
+         thrd_dispatcher.cppm
+         thrd_internal.cppm
+         thrd_enqueue.cppm
+         thrd_detach.cppm)
+
+target_sources(chaos_threading PUBLIC FILE_SET CXX_MODULES FILES
+                                      thrd_interface.cppm future_group.cppm)

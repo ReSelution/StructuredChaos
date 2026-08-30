@@ -7,9 +7,9 @@ module;
 #include <string>
 #include <string_view>
 
-export module SC.Stats:Units;
+export module sc.stats:units;
 
-namespace SC {
+namespace sc::stats {
 
   export struct DataUnits {
     static constexpr double base = 1024.0;
@@ -37,4 +37,4 @@ namespace SC {
     }
   };
 
-} // namespace SC
+} // namespace sc::stats

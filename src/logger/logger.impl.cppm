@@ -1,10 +1,7 @@
 module;
 
-#include <array>
 #include <atomic>
-#include <cstddef>
 #include <filesystem>
-#include <format>
 #include <memory>
 #include <mutex>
 
@@ -14,22 +11,22 @@ module;
 
 #include <spdlog/spdlog.h>
 #include <string_view>
-#include <system_error>
 #include <utility>
-#include <vector>
 
-export module SC.Logger:Impl;
-import SC.Util;
-import SC.Stats;
+export module sc.logger:impl;
+import sc.util;
+import sc.stats;
 
-namespace SC {
+namespace sc {
 
   export constexpr FixedString NoCat = "";
-  export using LogLevel              = spdlog::level::level_enum;
-
   export template<FixedString M, FixedString C = NoCat>
-  class ChaosLogger {
+  class Logger {
+
   public:
+    using LogLevel = spdlog::level::level_enum;
+
+
     static void init(LogLevel level = spdlog::level::info);
     static void shutdown() { spdlog::shutdown(); }
     // Logging
@@ -96,7 +93,7 @@ namespace SC {
 
     template<typename... Args>
     [[nodiscard]] static auto time(spdlog::level::level_enum level, std::string_view fmt_str, Args &&...args) {
-      return ChaosTimer([level, fmt_str, &args...](TimeResult res) mutable {
+      return sc::stats::Timer([level, fmt_str, &args...](sc::stats::TimeResult res) mutable {
         std::string timeStr = fmt::format("{:.2f}{}", res.value, res.suffix);
         get()->log(level, fmt::runtime(fmt_str), timeStr, args...);
       });
@@ -139,7 +136,7 @@ namespace SC {
   };
 
   template<FixedString M, FixedString C>
-  spdlog::logger *ChaosLogger<M, C>::get() {
+  spdlog::logger *Logger<M, C>::get() {
     auto *ptr = rawLogger.load(std::memory_order_acquire);
     if (!ptr) [[unlikely]] {
       init();
@@ -149,7 +146,7 @@ namespace SC {
   }
 
   template<FixedString M, FixedString C>
-  void ChaosLogger<M, C>::init(spdlog::level::level_enum level) {
+  void Logger<M, C>::init(spdlog::level::level_enum level) {
     if (rawLogger.load(std::memory_order_acquire))
       return;
 
@@ -231,4 +228,4 @@ namespace SC {
     logger->flush_on(spdlog::level::warn);
   }
 
-} // namespace SC
+} // namespace sc

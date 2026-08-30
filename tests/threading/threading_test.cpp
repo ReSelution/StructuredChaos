@@ -8,15 +8,14 @@
 #include <vector>
 
 // Die neuen C++20 Module importieren
-import SC.Threading;
-import SC.Stats;
-import SC.Logger;
-using StressLog = SC::ChaosLogger<"Chaos", "StressTest">;
-
+import sc.threading;
+import sc.stats;
+import sc.logger;
+using StressLog = sc::Logger<"Chaos", "StressTest">;
 // ============================================================================
 // C++20 Stats Definition
 // ============================================================================
-using BatchThroughput = SC::ChaosStat<"Batch Processing", SC::ChaosThroughput<SC::MetricUnits>>;
+using BatchThroughput = sc::stats::Stat<"Batch Processing", sc::stats::Throughput<sc::stats::MetricUnits>>;
 
 // --- Test Components ---
 
@@ -64,24 +63,23 @@ void run_efficiency_block(bool track_stats) {
       BatchThroughput::reset();
       BatchThroughput::start();
 
-      SC::PoolThroughput::m_storage.value.store(0, std::memory_order_relaxed);
-      SC::PoolThroughput::m_storage.accumulated_ns.store(0, std::memory_order_relaxed);
-      SC::PoolThroughput::m_storage.running.store(false, std::memory_order_relaxed);
-      SC::PoolThroughput::start();
-      auto t = StressLog::time("Mode: {1} | SFO: {2} took {0}", full_mode_name, !force_no_sfo);
+      sc::threading::PoolThroughput::m_storage.value.store(0, std::memory_order_relaxed);
+      sc::threading::PoolThroughput::m_storage.accumulated_ns.store(0, std::memory_order_relaxed);
+      sc::threading::PoolThroughput::m_storage.running.store(false, std::memory_order_relaxed);
+      sc::threading::PoolThroughput::start();
+      auto t = StressLog::time("Mode: {1} | SFO: {2} took {0}", full_mode_name, force_no_sfo);
 
       if (use_detach) {
         if (force_no_sfo) {
-          SC::ChaosThreading::detachBatch(std::move(tasks), [breaker](int id, TaskType t) { (void) breaker; }, nullptr);
+          sc::threading::detachBatch(std::move(tasks), [breaker](int id, TaskType t) { (void) breaker; }, nullptr);
         } else {
-          SC::ChaosThreading::detachBatch(std::move(tasks), [](int id, TaskType t) {}, nullptr);
+          sc::threading::detachBatch(std::move(tasks), [](int id, TaskType t) {}, nullptr);
         }
       } else {
         if (force_no_sfo) {
-          auto f =
-              SC::ChaosThreading::enqueueBatch(std::move(tasks), [breaker](int id, TaskType t) { (void) breaker; });
+          auto f = sc::threading::enqueueBatch(std::move(tasks), [breaker](int id, TaskType t) { (void) breaker; });
         } else {
-          auto f = SC::ChaosThreading::enqueueBatch(std::move(tasks), [](int id, TaskType t) {});
+          auto f = sc::threading::enqueueBatch(std::move(tasks), [](int id, TaskType t) {});
         }
       }
       // RAII-Timer stoppt hier (oder implizit am Scope-Ende durch Destruktor)
@@ -90,11 +88,11 @@ void run_efficiency_block(bool track_stats) {
     BatchThroughput::record(TASKS);
 
     BatchThroughput::stop();
-    SC::ChaosThreading::wait_until_finished();
+    sc::threading::wait_until_finished();
 
     // Nutzt deine neue, variadische Template-Variante für formatierte
     // Statistik-Ausgaben
-    StressLog::stats<BatchThroughput, SC::PoolThroughput>("Block finished");
+    StressLog::stats<BatchThroughput, sc::threading::PoolThroughput>("Block finished");
 
     if constexpr (std::is_same_v<TaskType, TrackedTask>) {
       StressLog::info("  -> Results: Copies={}, Moves={}", TrackedTask::copies.load(std::memory_order_relaxed),
@@ -116,8 +114,8 @@ void test_efficiency_full() {
 int main() {
   try {
     // Initialisierung beider Subsysteme
-    StressLog::init(SC::LogLevel::info);
-    SC::ChaosThreading::init();
+    StressLog::init();
+    sc::threading::init();
 
     test_efficiency_full();
 

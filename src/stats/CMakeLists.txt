@@ -5,14 +5,16 @@ target_sources(
   PUBLIC FILE_SET
          CXX_MODULES
          FILES
-         chaos_timer.cppm
-         chaos_stats.cppm
-         chaos_units.cppm
-         chaos_stats_core.cppm)
+         timer.cppm
+         stats.cppm
+         units.cppm
+         stats_core.cppm
+         stats.impl.cppm
+         throughput.cppm
+         counter.cppm
+
+)
 
 target_link_libraries(chaos_stats PUBLIC chaos_compiler_flags chaos_util)
 
-target_sources(
-  chaos_stats PUBLIC FILE_SET CXX_MODULES FILES chaos_stats.impl.cppm
-                     chaos_throughput.cppm chaos_counter.cppm)
 

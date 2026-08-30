@@ -1,4 +1,4 @@
 export module SC;
 
-export import SC.Logger;
-export import SC.Stats;
+export import sc.logger;
+export import sc.stats;

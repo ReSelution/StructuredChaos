@@ -1,6 +1,6 @@
-import SC.Logger;
+import sc.logger;
 
-using Logger = SC::ChaosLogger<"Test">;
+using Logger = sc::Logger<"Test">;
 int main(int argc, char *argv[]) {
   Logger::info("String {}", 1);
   Logger::shutdown();

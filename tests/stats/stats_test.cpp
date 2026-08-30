@@ -1,20 +1,18 @@
 #include <cassert>
 #include <iostream>
 
-import SC.Logger; // Dein normaler Logger
-import SC.Stats;  // Dein Stats-System
+import sc.logger; // Dein normaler Logger
+import sc.stats; // Dein Stats-System
 
-using GlobalStatsLog = SC::ChaosLogger<"Stats">;
+using GlobalStatsLog = sc::Logger<"Stats">;
 // Eine konkrete Test-Statistik, um das System zu füttern
-class VulkanFrameTime : public SC::IChaosStat {
+class VulkanFrameTime : public sc::stats::IStat {
   std::string value_{"16.6ms"};
 
 public:
   void internal_reset() override { value_ = "0ms"; }
-  std::string internal_str() override { return value_; }
-  std::string_view internal_name() override {
-    return "engine.vulkan.frame_time";
-  }
+  std::string internal_str() const override { return value_; }
+  std::string_view internal_name() const override { return "engine.vulkan.frame_time"; }
 
   // Statische Helfer für deinen neuen Template-Logger-Ansatz
   static std::string_view name() { return "engine.vulkan.frame_time"; }
@@ -24,30 +22,26 @@ public:
 int main(int argc, char *argv[]) {
   std::cout << "[TEST] Starte SC.Stats Validierung mit spdlog...\n";
 
-  if constexpr (!SC::ChaosStatsEnabled) {
-    std::cout
-        << "[WARNING] CHAOS_STATS_ENABLED ist deaktiviert. Test abgebrochen.\n";
+  if constexpr (!sc::stats::StatsEnabled) {
+    std::cout << "[WARNING] CHAOS_STATS_ENABLED ist deaktiviert. Test abgebrochen.\n";
     return 0;
   }
 
   // 1. Instanziieren und Registrieren für die Laufzeit-Registry
   VulkanFrameTime frame_stat;
-  SC::ChaosStats::register_stat(&frame_stat);
+  sc::stats::register_stat(&frame_stat);
 
   // 2. Test: Einzelne Statistik per Name aus dem System fischen (get_stat)
-  auto found_stat = SC::ChaosStats::get_stat("engine.vulkan.frame_time");
-  assert(found_stat.has_value() &&
-         "Fehler: Stat wurde per Name nicht gefunden!");
-  assert((*found_stat)->internal_str() == "16.6ms" &&
-         "Fehler: Falscher Wert in der Stat!");
+  auto found_stat = sc::stats::get_stat("engine.vulkan.frame_time");
+  assert(found_stat.has_value() && "Fehler: Stat wurde per Name nicht gefunden!");
+  assert((*found_stat)->internal_str() == "16.6ms" && "Fehler: Falscher Wert in der Stat!");
 
   // 3. Test: Fehlerfall bei get_stat
-  auto missing_stat = SC::ChaosStats::get_stat("engine.vulkan.non_existent");
-  assert(!missing_stat.has_value() &&
-         "Fehler: System hat eine Geister-Statistik gefunden!");
+  auto missing_stat = sc::stats::get_stat("engine.vulkan.non_existent");
+  assert(!missing_stat.has_value() && "Fehler: System hat eine Geister-Statistik gefunden!");
 
   std::cout << "\n--- spdlog Ausgabe (report_all) ---\n";
-  SC::ChaosStats::report_all<GlobalStatsLog>(SC::LogLevel::info);
+  sc::stats::report_all<GlobalStatsLog>(GlobalStatsLog::LogLevel::info);
   std::cout << "-----------------------------------\n";
 
   // 5. Test: Der compile-time Variadic-Template Aufruf deines Loggers
@@ -57,9 +51,8 @@ int main(int argc, char *argv[]) {
   std::cout << "------------------------------------------------\n";
 
   // 6. Test: Reset-Logik prüfen
-  SC::ChaosStats::reset_all();
-  assert((*found_stat)->internal_str() == "0ms" &&
-         "Fehler: Reset hat nicht gegriffen!");
+  sc::stats::reset_all();
+  assert((*found_stat)->internal_str() == "0ms" && "Fehler: Reset hat nicht gegriffen!");
 
   std::cout << "\n[SUCCESS] Alle Tests für SC.Stats und den Logger "
                "erfolgreich! 🏎️💨\n";
