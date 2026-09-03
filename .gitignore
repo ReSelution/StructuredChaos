@@ -4,6 +4,7 @@
 
 # --- Build-Verzeichnisse & Caching ---
 build/
+bin/
 .cache/
 compile_commands.json
 

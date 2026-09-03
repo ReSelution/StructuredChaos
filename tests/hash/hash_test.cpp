@@ -1,24 +1,25 @@
-//
-// Created by oleub on 11.04.26.
-//
-
-
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include "threading/chaos_threading.hpp"
-#include "hash/hash.hpp"
-#include "city_inline.hpp"
-#include "../../cmake-build-debug/_deps/simdutf-src/src/simdutf/fallback/bitmanipulation.h"
+#include <string>
+#include <string_view>
+#include <vector>
 
-LOG_ALIAS(HashLog, "Chaos", "Hash");
+// Importiere deine Module
+import sc.logger;
 
-DEFINE_CHAOS_CORE_STAT(HashThroughput, "Hash throughput", SC::ChaosThroughput<SC::MetricUnits>);
+import sc.hash;
+import sc.stats;
+
+using Log            = sc::Logger<"Hash">;
+using HashThroughout = sc::stats::Stat<"Hash throughput", sc::stats::Throughput<sc::stats::MetricUnits>>;
 
 void setWorkingDirectory(const char *argv0) {
-  namespace fs = std::filesystem;
-  fs::path exePath = std::filesystem::canonical(argv0);
+  namespace fs         = std::filesystem;
+  fs::path exePath     = std::filesystem::canonical(argv0);
   fs::path projectRoot = exePath.parent_path().parent_path().parent_path();
-  HashLog::info("{}", projectRoot.string());
+  Log::info("Project Root Path: {}", projectRoot.string());
   fs::current_path(projectRoot);
 }
 
@@ -32,76 +33,63 @@ StringBlock loadStringsPacked(const std::string &path) {
   StringBlock block;
 
   if (!file.is_open()) {
-    HashLog::err("Failed to open {}", path);
+    Log::err("Failed to open {}", path);
     return block;
   }
 
   std::string line;
-  while (std::getline(file, line)) {
-    if (line.empty()) continue;
+  std::vector<size_t> offsets;
+  std::vector<size_t> lengths;
 
-    const size_t offset = block.data.size();
+  while (std::getline(file, line)) {
+    if (line.empty())
+      continue;
+
+    offsets.push_back(block.data.size());
+    lengths.push_back(line.size());
 
     block.data.insert(block.data.end(), line.begin(), line.end());
-
-    block.views.emplace_back(
-      block.data.data() + offset,
-      line.size()
-    );
   }
 
-  HashLog::info("Loaded {} strings (packed)", block.views.size());
+  // Zweiter Schritt: Jetzt, wo block.data stabil im Speicher liegt
+  // und sich nie wieder bewegt, weisen wir die string_views zu.
+  block.views.reserve(offsets.size());
+  for (size_t i = 0; i < offsets.size(); ++i) {
+    block.views.emplace_back(block.data.data() + offsets[i], lengths[i]);
+  }
+
+  Log::info("Loaded {} strings (packed without invalidation)", block.views.size());
   return block;
 }
 
-FORCE_INLINE constexpr uint64_t hash_lowercaseOld(std::string_view str) {
+constexpr uint64_t hash_lowercaseOld(std::string_view str) {
   constexpr size_t MAX_STR_LEN = 512;
   uint8_t buffer[MAX_STR_LEN];
   const size_t len = std::min<size_t>(str.length(), MAX_STR_LEN);
 
   for (size_t i = 0; i < len; ++i) {
     const auto c = static_cast<uint8_t>(str[i]);
-    buffer[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : static_cast<char>(c);
+    buffer[i]    = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : static_cast<char>(c);
   }
-  if consteval {
-    return rapid::constExpr::rapidhash(buffer, len);
-  } else {
-    return rapidhash(buffer, len);
-  }
+  return sc::hash(buffer, len);
 }
-
-static uint64_t cityLowerOld(const std::string_view name) {
-  char16_t buffer[512];
-  auto len = std::min<size_t>(name.size(), 512);
-
-  for (size_t i = 0; i <len; ++i) {
-    const auto uc = static_cast<uint8_t>(name[i]);
-    uint8_t lc = (uc >= 'A' && uc <= 'Z') ? (uc + 32) : uc;
-    buffer[i] = static_cast<char16_t>(lc);
-  }
-
-  return CityHash64_inline(reinterpret_cast<char *>(buffer), len * sizeof(char16_t));
-}
-
-
-
 
 template<typename HashFn>
-std::vector<uint64_t>
-runHashStressTest(const StringBlock &block, HashFn &&hashFn, std::string_view name, int iterations = 100) {
-  auto &strings = block.views;
+std::vector<uint64_t> runHashStressTest(const StringBlock &block, HashFn &&hashFn, std::string_view name,
+                                        int iterations = 100) {
+  auto &strings               = block.views;
   const size_t stringsPerIter = strings.size();
-  const size_t totalOps = stringsPerIter * iterations;
+  const size_t totalOps       = stringsPerIter * iterations;
 
-  if (stringsPerIter == 0) return {};
-
+  if (stringsPerIter == 0)
+    return {};
 
   std::vector<uint64_t> results(stringsPerIter);
   uint64_t dummySum = 0;
-  HashLog::info("Benchmarking {}: {} iterations ({} total hashes)...", name, iterations, totalOps);
-  HashThroughput::reset();
+  Log::info("Benchmarking {}: {} iterations ({} total hashes)...", name, iterations, totalOps);
+
+  HashThroughout::reset();
   {
-    auto t = HashLog::time("{1}: {0} for {2} hashes", name, totalOps);
 
     for (int i = 0; i < iterations; ++i) {
       for (size_t j = 0; j < stringsPerIter; ++j) {
@@ -109,18 +97,20 @@ runHashStressTest(const StringBlock &block, HashFn &&hashFn, std::string_view na
         results[j] = h;
         dummySum ^= h;
       }
-
-      HashThroughput::record(stringsPerIter);
+      HashThroughout::record(stringsPerIter);
     }
   }
-  if (dummySum == 0x1) HashLog::info("Sum: {:x}", dummySum);
-  HashLog::stats<HashThroughput>("{}", name);
+
+  if (dummySum == 0x1)
+    Log::info("Sum: {:x}", dummySum);
+
+  Log::stats<HashThroughout>("{}", name);
   return results;
 }
 
 void verifyHashes(const std::vector<uint64_t> &reference, const std::vector<uint64_t> &current, std::string_view name) {
   if (reference.size() != current.size()) {
-    HashLog::err("Verification FAILED for {}: Size mismatch! ({} vs {})\n", name, reference.size(), current.size());
+    Log::err("Verification FAILED for {}: Size mismatch! ({} vs {})\n", name, reference.size(), current.size());
     return;
   }
 
@@ -128,36 +118,47 @@ void verifyHashes(const std::vector<uint64_t> &reference, const std::vector<uint
   for (size_t i = 0; i < reference.size(); ++i) {
     if (reference[i] != current[i]) {
       if (errors < 5) {
-        // Nur die ersten 5 Fehler zeigen, um den Log nicht zu fluten
-        HashLog::err("Hash mismatch at index {}: Ref {:x} != Current {:x}", i, reference[i], current[i]);
+        Log::err("Hash mismatch at index {}: Ref {:x} != Current {:x}", i, reference[i], current[i]);
       }
       errors++;
     }
   }
 
   if (errors == 0) {
-    HashLog::info("Verification PASSED for {}: All {} hashes match.\n", name, current.size());
+    Log::info("Verification PASSED for {}: All {} hashes match.\n", name, current.size());
   } else {
-    HashLog::err("Verification FAILED for {}: {} mismatches found!\n", name, errors);
+    Log::err("Verification FAILED for {}: {} mismatches found!\n", name, errors);
   }
 }
-
+constexpr std::string_view ConstStr = "Engine/Config/Base.ini";
 void testFileHash() {
   auto block = loadStringsPacked("tests/hash/files.txt");
-  HashLog::info("Starting Hash Test with {} strings", block.views.size());
+  if (block.views.empty())
+    return;
 
+  Log::info("Starting Hash Test with {} strings", block.views.size());
 
-  auto rapid = runHashStressTest(block, SC::hash_lowercase, "rapidLower", 500);
-  auto rapidold = runHashStressTest(block, hash_lowercaseOld, "rapidLowerOld", 500);
+  auto rapid    = runHashStressTest(block, sc::hash_lowercase, "rapidLower (SWAR)", 500);
+  auto rapidold = runHashStressTest(block, hash_lowercaseOld, "rapidLowerOld (Byte)", 500);
 
-  verifyHashes(rapid, rapidold, "rapid");
+  verifyHashes(rapid, rapidold, "rapid SWAR vs Old");
 
+  constexpr auto hash = sc::hash(ConstStr);
+  auto runtimeHash    = sc::hash(block.views[0]);
+  if (hash == runtimeHash) {
+    Log::info("CompileTime Hash Matches Runtime Hash");
+  } else {
+    Log::err("Runtime mismatches CompileTime Hash");
+  }
 }
 
 void testSSHash() {
   auto block = loadStringsPacked("tests/hash/smallString.txt");
-  HashLog::info("Starting Hash Test with {} strings", block.views.size());
-  runHashStressTest(block, [](auto &&s) { return SC::hash(s); }, "rapid", 500);
+  if (block.views.empty())
+    return;
+
+  Log::info("Starting Hash Test with {} strings", block.views.size());
+  runHashStressTest(block, [](auto &&s) { return sc::hash(s); }, "rapid-generic", 500);
 }
 
 int main(int argc, char **argv) {
@@ -165,7 +166,8 @@ int main(int argc, char **argv) {
     setWorkingDirectory(argv[0]);
   }
 
-  SC::ChaosThreading::init();
   testFileHash();
   testSSHash();
+
+  return 0;
 }
