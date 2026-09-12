@@ -5,7 +5,7 @@ module;
 
 export module sc.threading:interface;
 
-import :backend;
+export import :backend;
 
 namespace sc::threading {
 

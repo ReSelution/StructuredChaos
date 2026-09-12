@@ -7,8 +7,8 @@ export module sc.threading:dispatcher;
 
 import :types;
 
-import :detach;
-import :enqueue;
+export import :detach;
+export import :enqueue;
 
 
 namespace sc::threading {

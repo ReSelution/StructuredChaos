@@ -17,7 +17,7 @@ module;
 export module sc.threading:backend;
 import :types;
 export import :atomic_queue;
-import :internal;
+export import :internal;
 
 
 namespace sc::threading::impl {

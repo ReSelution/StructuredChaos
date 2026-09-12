@@ -12,16 +12,16 @@ import :m_res;
 
 namespace sc {
 
-  export template<typename T, typename = void>
+  template<typename T, typename = void>
   struct is_pmr_container : std::false_type {};
 
-  export template<typename T>
+  template<typename T>
   struct is_pmr_container<T, std::void_t<typename T::allocator_type>> {
     static constexpr bool value =
         std::is_same_v<typename T::allocator_type, std::pmr::polymorphic_allocator<typename T::value_type>>;
   };
 
-  export template<typename T>
+  template<typename T>
   inline constexpr bool is_pmr_container_v = is_pmr_container<T>::value;
 
   export class ChaosArena {

@@ -1,7 +1,4 @@
 cmake_minimum_required(VERSION 4.3)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto=thin")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto=thin")
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -flto=thin")
 
 set(CMAKE_EXPERIMENTAL_EXPORT_BUILD_DATABASE
     "73194a1d-c0b5-41b9-9190-a4512925e192")
@@ -69,29 +66,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_link_options(StructuredChaos PUBLIC "-static" "-static-libgcc"
                         "-static-libstdc++")
   endif()
-else()
-  set(SAA_TARGETING_WINDOWS FALSE)
+
 endif()
 
-if(NOT MSVC AND NOT SAA_TARGETING_WINDOWS)
-  set(SAA_LINKER "Default")
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-fuse-ld=mold" SAA_HAS_MOLD)
-    check_cxx_compiler_flag("-fuse-ld=lld" SAA_HAS_LLD)
-
-    if(SAA_HAS_MOLD)
-      set(SAA_LINKER "mold")
-    elseif(SAA_HAS_LLD)
-      set(SAA_LINKER "lld")
-    endif()
-
-    if(NOT SAA_LINKER STREQUAL "Default")
-      target_link_options(StructuredChaos PUBLIC "-fuse-ld=${SAA_LINKER}")
-    endif()
-  endif()
-  message(STATUS "[CHAOS] Using Linker: ${SAA_LINKER}")
-endif()
 
 if(PROJECT_IS_TOP_LEVEL)
   message(

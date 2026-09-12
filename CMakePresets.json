@@ -6,41 +6,53 @@
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/linux-toolchain.cmake",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "CMAKE_RUNTIME_OUTPUT_DIRECTORY": "${sourceDir}/bin"
       }
     },
     {
       "name": "clang-debug",
-      "displayName": "Clang Debug (Linux)",
-      "description": "Lokales Debugging mit scharfen Sanitizern",
+      "displayName": "Clang Debug (Linux Host)",
       "inherits": "base-linux-clang",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_FLAGS_DEBUG": "-g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer"
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
       "name": "clang-release",
-      "displayName": "Clang Release (Linux)",
-      "description": "Maximale Performance mit O3 und lld Linker",
+      "displayName": "Clang Release (Linux Host)",
       "inherits": "base-linux-clang",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG"
+        "CMAKE_BUILD_TYPE": "Release"
       }
     },
     {
-      "name": "clang-relwithdebinfo",
-      "displayName": "Clang RelWithDebInfo (Linux)",
-      "description": "Optimierte Performance mit Debug-Symbolen für Core Dumps",
-      "inherits": "base-linux-clang",
+      "name": "base-cross-win64",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/windows-toolchain.cmake",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_RUNTIME_OUTPUT_DIRECTORY": "${sourceDir}/bin/win64"
+      }
+    },
+    {
+      "name": "cross-win64-debug",
+      "displayName": "GCC Debug (Win64 Cross)",
+      "inherits": "base-cross-win64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "cross-win64-release",
+      "displayName": "GCC Release (Win64 Cross)",
+      "inherits": "base-cross-win64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
       }
     }
   ],
@@ -54,8 +66,12 @@
       "configurePreset": "clang-release"
     },
     {
-      "name": "clang-relwithdebinfo",
-      "configurePreset": "clang-relwithdebinfo"
+      "name": "cross-win64-debug",
+      "configurePreset": "cross-win64-debug"
+    },
+    {
+      "name": "cross-win64-release",
+      "configurePreset": "cross-win64-release"
     }
   ]
 }
