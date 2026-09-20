@@ -50,3 +50,10 @@ set(SIMDUTF_TESTS OFF CACHE BOOL "Disable simdutf tests" FORCE)
 set(SIMDUTF_BENCHMARKS OFF CACHE BOOL "Disable simdutf benchmarks" FORCE)
 
 CPMAddPackage("gh:simdutf/simdutf@9.0.0")
+
+CPMAddPackage(
+    NAME pfr
+    GIT_REPOSITORY "https://github.com/apolukhin/pfr_non_boost.git"
+    GIT_TAG "2.3.2"
+)
+
