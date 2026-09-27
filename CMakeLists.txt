@@ -22,8 +22,7 @@ add_library(chaos_compiler_flags INTERFACE)
 
 if(NOT MSVC)
   target_compile_options(
-    chaos_compiler_flags INTERFACE -fno-rtti $<$<CONFIG:Debug>:-g -O0>
-                                   $<$<NOT:$<CONFIG:Debug>>:-O3>)
+    chaos_compiler_flags INTERFACE -fno-rtti)
   if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     if(MINGW)
       target_compile_options(chaos_compiler_flags INTERFACE -march=x86-64-v2)
@@ -63,8 +62,7 @@ target_link_libraries(
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   set(SAA_TARGETING_WINDOWS TRUE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_link_options(StructuredChaos PUBLIC "-static" "-static-libgcc"
-                        "-static-libstdc++")
+    target_link_options(StructuredChaos PUBLIC "-static")
   endif()
 
 endif()

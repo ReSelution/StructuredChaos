@@ -10,7 +10,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/CPM.cmake")
 # ==========================================
 # 2. EnTT & spdlog & unordered_dense & atomic_queue
 # ==========================================
-CPMAddPackage("gh:skypjack/entt@3.16.0")
+CPMAddPackage("gh:skypjack/entt@4.0.0")
 CPMAddPackage("gh:gabime/spdlog@1.17.0")
 CPMAddPackage("gh:martinus/unordered_dense@4.8.1")
 CPMAddPackage("gh:max0x7ba/atomic_queue@1.7.3")

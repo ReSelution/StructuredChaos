@@ -16,6 +16,7 @@ export module sc.ecs:registery;
 import :entity;
 import :anchor;
 import :resource;
+import :view;
 import sc.stats;
 
 
@@ -87,7 +88,8 @@ namespace sc::ecs {
     decltype(auto) cget(entt::entity e) const;
 
     template<typename... Components>
-    decltype(auto) view();
+
+    auto view();
 
   private:
     void createEntities();
@@ -113,7 +115,7 @@ namespace sc::ecs {
     template<typename Component>
     static void cleanupResources(entt::registry &reg, entt::entity e);
 
-    alignas(64) mutable std::shared_mutex m_regMutex;
+    alignas(64) mutable std::mutex m_contextMutex;
     alignas(64) std::mutex eCreationLock;
     alignas(64) std::atomic<uint32_t> mEntityIdx{ENTITY_BLOCK_SIZE};
     entt::registry m_reg;
@@ -136,10 +138,7 @@ namespace sc::ecs {
     if (idx < ENTITY_BLOCK_SIZE) {
       return;
     }
-    {
-      std::shared_lock guard{m_regMutex};
-      m_reg.create(mEntities.begin(), mEntities.end());
-    }
+    m_reg.create(mEntities.begin(), mEntities.end());
     Entities::record(ENTITY_BLOCK_SIZE);
     for (auto &e: mEntities) {
       e.registry = this;
@@ -150,9 +149,8 @@ namespace sc::ecs {
   template<typename It>
     requires IsChaosEntity<typename std::iterator_traits<It>::value_type>
   void ChaosRegistry::create(It begin, It end) {
-    std::lock_guard lock{eCreationLock};
     {
-      std::shared_lock guard{m_regMutex};
+      std::lock_guard lock{eCreationLock};
       m_reg.create(begin, end);
     }
     for (auto iter = begin; iter != end; ++iter) {
@@ -172,21 +170,20 @@ namespace sc::ecs {
   }
 
   template<typename... Components>
-  decltype(auto) ChaosRegistry::view() {
-    return executeRead<Components...>([&]() -> decltype(auto) { return m_reg.view<Components...>(); });
+  auto ChaosRegistry::view() {
+    return ChaosView{executeRead<Components...>([&]() { return m_reg.view<Components...>(); })};
   }
 
   template<typename Component>
   auto *ChaosRegistry::getComponentAccess() {
     using AccessType = ComponentAccess<Component>;
     {
-      std::shared_lock lock(m_regMutex);
       if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
         return uptr->get();
       }
     }
 
-    std::unique_lock lock(m_regMutex);
+    std::lock_guard lock(m_contextMutex);
     if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
       return uptr->get();
     }
@@ -202,15 +199,11 @@ namespace sc::ecs {
   auto *ChaosRegistry::getComponentAccess() const {
     using AccessType = ComponentAccess<Component>;
 
-    {
-      std::shared_lock lock(m_regMutex);
-      if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
-        return uptr->get();
-      }
+    if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
+      return uptr->get();
     }
 
-    std::unique_lock lock(m_regMutex);
-
+    std::lock_guard lock(m_contextMutex);
     if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
       return uptr->get();
     }
@@ -269,7 +262,6 @@ namespace sc::ecs {
     PoolAnchor::current = &acc->pool;
     std::unique_lock lock(acc->mutex);
     if (!acc->created) [[unlikely]] {
-      std::unique_lock regLock(m_regMutex);
       if (!acc->created) {
         connectOnDestroy<Component>();
         if constexpr (std::is_void_v<std::invoke_result_t<Func>>) {
@@ -286,11 +278,11 @@ namespace sc::ecs {
         }
       }
     }
-    std::shared_lock regLock{m_regMutex};
     if constexpr (std::is_void_v<std::invoke_result_t<Func>>) {
       func();
       acc->created        = true;
       PoolAnchor::current = nullptr;
+      return;
     } else {
       decltype(auto) ret  = func();
       PoolAnchor::current = nullptr;

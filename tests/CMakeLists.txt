@@ -24,4 +24,7 @@ sc_add_test_executable(HashTest hash/hash_test.cpp)
 sc_add_test_executable(ThreadingTest threading/threading_test.cpp)
 sc_add_test_executable(QueueTest threading/queue_test.cpp)
 
+sc_add_test_executable(ECSTest ecs/ecs_test.cpp)
+
 target_link_libraries(QueueTest PRIVATE atomic_queue)
+

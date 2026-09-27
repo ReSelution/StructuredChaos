@@ -7,6 +7,7 @@ build/
 bin/
 .cache/
 compile_commands.json
+.fetch_cache/
 
 # --- IDEs & Editores (CLion / IntelliJ / VS Code) ---
 .idea/
