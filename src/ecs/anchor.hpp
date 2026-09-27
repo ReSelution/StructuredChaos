@@ -4,12 +4,9 @@
 
 #pragma once
 
-namespace std::pmr {
-  class memory_resource;
-}
-
-namespace SC {
-  struct PoolAnchor {
-    static inline thread_local std::pmr::memory_resource *current = nullptr;
-  };
-}
+#include <memory_resource>
+namespace sc::ecs {
+struct PoolAnchor {
+  static inline thread_local std::pmr::memory_resource *current = nullptr;
+};
+} // namespace sc::ecs

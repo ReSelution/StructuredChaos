@@ -12,3 +12,6 @@ add_executable(ThreadingTest threading/threading_test.cpp)
 target_link_libraries(ThreadingTest PRIVATE StructuredChaos)
 add_test(NAME ThreadingTest COMMAND ThreadingTest)
 
+add_executable(StatsTest stats/stats_test.cpp)
+target_link_libraries(StatsTest PRIVATE StructuredChaos)
+add_test(NAME StatsTest COMMAND StatsTest)

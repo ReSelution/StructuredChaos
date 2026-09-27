@@ -17,8 +17,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(
   StructuredChaos STATIC
-  src/hash/hash.cpp src/hash/hash.hpp src/localizations/magpie_translator.cpp
-  src/localizations/magpie_string.cpp src/localizations/magpie_string.hpp)
+  src/hash/hash.hpp src/localizations/magpie_translator.cpp
+  src/localizations/magpie_string.hpp)
 
 if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
   set(SAA_TARGETING_WINDOWS TRUE)
@@ -86,32 +86,33 @@ endif()
 
 target_sources(
   StructuredChaos
-  PRIVATE src/memory/chaos_bump_arena.cpp
-          src/memory/chaos_arena_pool.cpp
-          src/threading/chaos_threading.cpp
-          src/ecs/chaos_registry.cpp
-          src/ecs/chaos_entity.cpp
-          src/memory/chaos_monotonic_resource.cpp
-          src/threading/chaos_spin_lock.cpp)
+  PRIVATE src/memory/arena.cpp
+          src/memory/arena_pool.cpp
+          src/threading/atomic_queue.cpp
+          src/threading/backend.cpp
+          src/ecs/registry.cpp
+          src/ecs/entity.cpp
+          src/memory/monotonic_resource.cpp
+          src/stats/core.cpp)
+          
 
 target_sources(
   StructuredChaos
-  PUBLIC src/logger/chaos_logger.hpp
-         src/memory/chaos_monotonic_resource.hpp
-         src/memory/chaos_tls_arena.hpp
-         src/memory/chaos_sharded_cache.hpp
-         src/memory/chaos_bump_arena.hpp
-         src/memory/chaos_arena_pool.hpp
-         src/ecs/chaos_registry.hpp
-         src/stats/chaos_timer.hpp
-         src/stats/chaos_stats.hpp
-         src/stats/chaos_throughput.hpp
-         src/stats/chaos_units.hpp
-         src/stats/chaos_counter.hpp
-         src/stats/chaos_global.hpp
-         src/stats/chaos_map_counter.hpp
-         src/threading/chaos_threading.hpp
-         src/threading/chaos_spin_lock.hpp)
+  PUBLIC src/logger/logger.hpp
+         src/memory/monotonic_resource.hpp
+         src/memory/arena.hpp
+         src/memory/arena_pool.hpp
+         src/ecs/registry.hpp
+         src/stats/timer.hpp
+         src/stats/stats.hpp
+         src/stats/throughput.hpp
+         src/stats/units.hpp
+         src/stats/counter.hpp
+         src/threading/threading.hpp
+         src/threading/threading.cpp
+         src/threading/spin_lock.hpp
+        src/stats/core.hpp
+         src/util/fixed_string.hpp)
 # set_source_files_properties(src/hash/hash.cpp PROPERTIES COMPILE_FLAGS "-O3
 # -march=native")
 if(NOT MSVC)
@@ -124,12 +125,10 @@ target_link_libraries(
   StructuredChaos
   PUBLIC spdlog::spdlog
          $<$<BOOL:${MINGW}>:ws2_32>
-         TracyClient
          mimalloc-static
          atomic
          EnTT
          pfr
-         hwy
          rapidHash
          unordered_dense::unordered_dense
          glm::glm
@@ -156,8 +155,8 @@ if(SC_IS_MAIN_PROJECT)
   enable_testing()
   add_subdirectory(tests)
 
-  add_executable(StructuredChaosSandbox src/main.cpp)
-  target_link_libraries(StructuredChaosSandbox PRIVATE StructuredChaos)
 else()
   message(STATUS "[SC] Building as subdirectory - skipping tests")
 endif()
+
+
