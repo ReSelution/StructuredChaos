@@ -1,7 +1,0 @@
-[wrap-git]
-url = https://github.com/max0x7ba/atomic_queue.git
-revision = v1.7.3
-depth = 1
-
-[provide]
-atomic_queue = atomic_queue_dep
