@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/skypjack/entt.git
+revision = v4.0.0
+depth = 1
+patch_directory = entt
+
+[provide]
+entt = entt_dep

@@ -1,0 +1,2 @@
+option('enable_chaos_stats', type: 'boolean', value: false, description: 'Enable Chaos Stats')
+option('dump_magpie', type: 'boolean', value: false, description: 'Enable Magpie Dumping')

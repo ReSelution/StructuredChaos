@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/gabime/spdlog.git
+revision = v1.17.0
+depth = 1
+method = cmake
+
+[provide]
+spdlog = spdlog_dep

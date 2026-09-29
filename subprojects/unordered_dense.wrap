@@ -1,0 +1,10 @@
+[wrap-git]
+url = https://github.com/martinus/unordered_dense.git
+revision = v4.8.1
+depth = 1
+
+directory = unordered_dense
+patch_directory = unordered_dense
+
+[provide]
+unordered_dense = unordered_dense_dep

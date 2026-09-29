@@ -1,0 +1,7 @@
+[wrap-git]
+url = https://github.com/simdutf/simdutf.git
+revision = v9.0.0
+depth = 1
+method = cmake
+[provide]
+simdutf = simdutf_dep

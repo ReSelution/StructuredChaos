@@ -1,0 +1,5 @@
+#pragma once
+
+#mesondefine CHAOS_STATS_ENABLED
+#mesondefine DUMP_MAGPIE
+#mesondefine PROJECT_VERSION

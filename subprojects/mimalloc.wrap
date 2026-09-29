@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/microsoft/mimalloc.git
+revision = v3.2.8
+depth = 1
+method=cmake
+
+[provide]
+mimalloc = mimalloc_dep
