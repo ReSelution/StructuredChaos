@@ -15,11 +15,6 @@ unordered_dense_dep = dependency(
   'unordered_dense',
   fallback: ['unordered_dense', 'unordered_dense_dep'],
 )
-atomic_queue_dep = dependency(
-  'atomic_queue',
-  fallback: ['atomic_queue', 'atomic_queue_dep'],
-  default_options: ['tests=false'],
-)
 
 mi_opts = cmake.subproject_options()
 mi_opts.add_cmake_defines(
@@ -49,7 +44,6 @@ all_deps = [
   entt_dep,
   spdlog_dep,
   unordered_dense_dep,
-  atomic_queue_dep,
   mimalloc_dep,
   glm_dep,
   xsimd_dep,
