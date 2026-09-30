@@ -1,4 +1,16 @@
-# Ignore downloaded Meson subprojects
-/subprojects/*
-!/subprojects/*.wrap
-!/subprojects/packagefiles/
+# Ignore everything in subprojects/
+*
+
+# Keep wrap files and locks
+!*.wrap
+
+# Keep packagefiles folder and its contents
+!packagefiles/
+!packagefiles/**
+
+# Keep this .gitignore file
+!.gitignore
+
+#Keep non wrap
+!rapidHash/
+!rapidHash/**
