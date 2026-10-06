@@ -57,6 +57,7 @@ mi_sources = files(
 )
 
 mi_cflags = []
+
 mi_cflags_static = [] # zusätzliche Flags für die statische Bibliothek
 mi_cflags_dynamic = [] # zusätzliche Flags für die Shared Library
 mi_link_args = []

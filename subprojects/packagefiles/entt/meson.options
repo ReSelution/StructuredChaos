@@ -1,0 +1,77 @@
+# Toolchain
+option(
+  'use_libcpp',
+  type: 'boolean',
+  value: false,
+  description: 'Use libc++ by adding the -stdlib=libc++ flag if available',
+)
+option(
+  'include_natvis',
+  type: 'boolean',
+  value: false,
+  description: 'Embed the EnTT natvis files into the debug information of consumers (MSVC only)',
+)
+
+# Configuration macros, see src/entt/config/config.h
+option(
+  'use_atomic',
+  type: 'boolean',
+  value: false,
+  description: 'Use atomic counters for the internal type identifiers (ENTT_USE_ATOMIC)',
+)
+option(
+  'no_exception',
+  type: 'boolean',
+  value: false,
+  description: 'Disable exception handling inside EnTT (ENTT_NO_EXCEPTION)',
+)
+option(
+  'disable_assert',
+  type: 'boolean',
+  value: false,
+  description: 'Disable all EnTT assertions, also in debug builds (ENTT_DISABLE_ASSERT)',
+)
+option(
+  'no_eto',
+  type: 'boolean',
+  value: false,
+  description: 'Disable the empty type optimization (ENTT_NO_ETO)',
+)
+option(
+  'no_mixin',
+  type: 'boolean',
+  value: false,
+  description: 'Disable the default storage mixins, e.g. signal support (ENTT_NO_MIXIN)',
+)
+option(
+  'standard_cpp',
+  type: 'boolean',
+  value: false,
+  description: 'Use only standard C++ features, no compiler specific type names (ENTT_STANDARD_CPP)',
+)
+option(
+  'use_stl',
+  type: 'boolean',
+  value: false,
+  description: 'Force the standard library implementations of the stl wrappers (ENTT_USE_STL)',
+)
+option(
+  'id_type',
+  type: 'string',
+  value: '',
+  description: 'Type of the internal identifiers, e.g. std::uint64_t (empty: std::uint32_t)',
+)
+option(
+  'sparse_page',
+  type: 'integer',
+  min: 1,
+  value: 4096,
+  description: 'Number of elements per page of a sparse array, must be a power of two (ENTT_SPARSE_PAGE)',
+)
+option(
+  'packed_page',
+  type: 'integer',
+  min: 1,
+  value: 1024,
+  description: 'Number of elements per page of a packed array, must be a power of two (ENTT_PACKED_PAGE)',
+)

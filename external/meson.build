@@ -1,5 +1,9 @@
 # Dependency
-entt_dep = dependency('entt', fallback: ['entt', 'entt_dep'])
+entt_dep = dependency(
+  'entt',
+  fallback: ['entt', 'entt_dep'],
+  default_options: ['use_atomic=true'],
+)
 spdlog_dep = dependency(
   'spdlog',
   fallback: ['spdlog', 'spdlog_dep'],
