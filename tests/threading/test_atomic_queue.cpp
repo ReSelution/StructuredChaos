@@ -215,4 +215,63 @@ TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
       REQUIRE(queue.empty());
     }
   }
+
+  SECTION("Multi-Threaded Stress Test Across Reclaimed Blocks") {
+    // Small enough to wrap around many times, large enough to span several
+    // blocks, so that blocks are reclaimed while producers and consumers run.
+    using SmallQueue = AtomicQueue<int64_t, 4096>;
+    STATIC_REQUIRE(SmallQueue::num_blocks() > 1);
+    SmallQueue queue;
+
+    constexpr int num_producers = 4;
+    constexpr int num_consumers = 4;
+    constexpr int items_per_producer = 100'000;
+    constexpr int total_items = num_producers * items_per_producer;
+
+    std::atomic<int> consumed_count{0};
+    std::atomic<int64_t> sum_consumed{0};
+    std::atomic<bool> order_ok{true};
+
+    std::vector<std::thread> threads;
+
+    for (int p = 0; p < num_producers; ++p) {
+      threads.emplace_back([&queue, p]() {
+        for (int i = 0; i < items_per_producer; ++i) {
+          queue.push(static_cast<int64_t>(p) * items_per_producer + i);
+        }
+      });
+    }
+
+    for (int c = 0; c < num_consumers; ++c) {
+      threads.emplace_back([&, c]() {
+        // Items of one producer must reach a single consumer in push order.
+        std::vector<int64_t> last_seen(num_producers, -1);
+        int64_t item = 0;
+        while (consumed_count.load(std::memory_order_relaxed) < total_items) {
+          if (queue.try_pop(item, c)) {
+            const auto producer = static_cast<size_t>(item / items_per_producer);
+            if (item <= last_seen[producer]) {
+              order_ok.store(false, std::memory_order_relaxed);
+            }
+            last_seen[producer] = item;
+            sum_consumed.fetch_add(item, std::memory_order_relaxed);
+            consumed_count.fetch_add(1, std::memory_order_relaxed);
+          } else {
+            std::this_thread::yield();
+          }
+        }
+      });
+    }
+
+    for (auto &t : threads) {
+      t.join();
+    }
+
+    const int64_t expected_sum =
+        static_cast<int64_t>(total_items) * (total_items - 1) / 2;
+    REQUIRE(consumed_count.load() == total_items);
+    REQUIRE(sum_consumed.load() == expected_sum);
+    REQUIRE(order_ok.load());
+    REQUIRE(queue.empty());
+  }
 }
