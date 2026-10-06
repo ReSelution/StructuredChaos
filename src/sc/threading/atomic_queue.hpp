@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cstddef>
@@ -153,9 +154,9 @@ private:
           static_cast<void *>(m_slots + target_start_slot);
 
 #if defined(_WIN32)
-      DiscardVirtualMemory(block_address, BLOCK_SIZE);
+      DiscardVirtualMemory(block_address, DISCARD_SIZE);
 #else
-      madvise(block_address, BLOCK_SIZE, MADV_DONTNEED);
+      madvise(block_address, DISCARD_SIZE, MADV_DONTNEED);
 #endif
     }
   }
@@ -181,8 +182,13 @@ private:
   static constexpr size_t BLOCK_SHIFT = std::countr_zero(SLOTS_PER_BLOCK);
   static constexpr size_t BLOCK_SLOT_MASK = SLOTS_PER_BLOCK - 1;
 
+  // A queue smaller than one block still needs a single release counter.
   static constexpr size_t NUM_BLOCKS =
-      REAL_CAP / (SLOTS_PER_BLOCK > 0 ? SLOTS_PER_BLOCK : 1);
+      (SLOTS_PER_BLOCK > 0 && REAL_CAP > SLOTS_PER_BLOCK)
+          ? REAL_CAP / SLOTS_PER_BLOCK
+          : 1;
+  static constexpr size_t DISCARD_SIZE =
+      std::min<size_t>(BLOCK_SIZE, REAL_CAP * sizeof(Slot));
   static constexpr size_t BLOCK_MASK = NUM_BLOCKS - 1;
 
   alignas(64) std::atomic<size_t> m_head{0};
