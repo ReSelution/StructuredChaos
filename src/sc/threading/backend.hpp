@@ -66,11 +66,15 @@ inline std::vector<std::unique_ptr<aQueue>> workerStores;
 inline std::atomic<uint64_t> available{0};
 inline thread_local int32_t threadId = 0;
 
-inline std::atomic<size_t> pending_tasks{0};
-inline std::atomic<size_t> active_tasks{0};
+// Tasks that were enqueued and have not finished yet.
+inline std::atomic<size_t> outstanding_tasks{0};
+// Threads currently blocked in wait_until_finished.
+inline std::atomic<size_t> idle_waiters{0};
 
+// Has to be called before the tasks are pushed: a worker may pop and finish a
+// task right away, and it must not find the counter without that task.
 inline void on_task_enqueued(size_t count = 1) {
-  pending_tasks.fetch_add(count, std::memory_order_relaxed);
+  outstanding_tasks.fetch_add(count, std::memory_order_relaxed);
   QueueSize::record(count); // Stat existiert oder ist No-Op
 }
 

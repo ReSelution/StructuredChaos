@@ -5,24 +5,31 @@
 namespace sc::threading::impl {
 
 inline void on_task_started() {
-  pending_tasks.fetch_sub(1, std::memory_order_relaxed);
-  active_tasks.fetch_add(1, std::memory_order_relaxed);
   pool_sema.try_acquire();
   ActiveTask::record(1);
   QueueSize::record(-1);
 }
 
+// The counter and the waiter count are read and written with the default
+// sequentially consistent ordering on purpose: either the waiter sees the
+// counter at zero, or the finishing thread sees the waiter and wakes it.
 inline void on_task_finished() {
-  active_tasks.fetch_sub(1, std::memory_order_release);
   ActiveTask::record(-1);
+  if (outstanding_tasks.fetch_sub(1) == 1 && idle_waiters.load() != 0) {
+    // Taking the mutex keeps the notification from slipping in between the
+    // waiter's check of the counter and its going to sleep.
+    { std::lock_guard lock(queueMutex); }
+    wait_cv.notify_all();
+  }
 }
 
 void wait_until_finished() {
-  std::unique_lock lock(queueMutex);
-  wait_cv.wait(lock, [] {
-    return pending_tasks.load(std::memory_order_relaxed) == 0 &&
-           active_tasks.load(std::memory_order_relaxed) == 0;
-  });
+  idle_waiters.fetch_add(1);
+  {
+    std::unique_lock lock(queueMutex);
+    wait_cv.wait(lock, [] { return outstanding_tasks.load() == 0; });
+  }
+  idle_waiters.fetch_sub(1);
 }
 
 void init_impl(uint32_t numThreads) {
@@ -79,11 +86,6 @@ void workerThread(const std::stop_token &st, int id) {
       continue;
     }
 
-    if (queues.was_empty() &&
-        ActiveTask::m_storage.value.load(std::memory_order_relaxed) == 0)
-        [[unlikely]] {
-      wait_cv.notify_all();
-    }
     pool_sema.try_acquire_for(std::chrono::milliseconds(10));
   }
 }

@@ -25,9 +25,11 @@ auto enqueue(F &&f, Args &&...args)
   constexpr size_t SizeArgs = (sizeof(std::decay_t<Args>) + ... + 0);
   constexpr size_t MIN_OVERHEAD = sizeof(std::promise<return_type>);
 
+  on_task_enqueued();
   if constexpr (SizeF + SizeArgs + MIN_OVERHEAD <= SFO_LIMIT) {
-    pushTask<P>([f = std::forward<F>(f), ... args = std::forward<Args>(args),
-                 p = std::move(promise)](int id) mutable {
+    queues.emplace<P>([f = std::forward<F>(f),
+                       ... args = std::forward<Args>(args),
+                       p = std::move(promise)](int id) mutable {
       try {
 
         if constexpr (std::is_void_v<return_type>) {
@@ -44,7 +46,8 @@ auto enqueue(F &&f, Args &&...args)
     auto ctx = std::make_unique<
         std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>>>(
         std::forward<F>(f), std::make_tuple(std::forward<Args>(args)...));
-    pushTask<P>([ctx = std::move(ctx), p = std::move(promise)](int id) mutable {
+    queues.emplace<P>([ctx = std::move(ctx),
+                       p = std::move(promise)](int id) mutable {
       try {
         auto &func = std::get<0>(*ctx);
         auto &base_args = std::get<1>(*ctx);
@@ -64,6 +67,7 @@ auto enqueue(F &&f, Args &&...args)
       }
     });
   }
+  signalWork(1);
   return res;
 }
 
@@ -318,8 +322,8 @@ auto enqueueBatch(R &&r, F &&f, Args &&...args) {
     }
   };
 
-  auto futures = dispatch();
   on_task_enqueued(count);
+  auto futures = dispatch();
   signalWork(count);
   return futures;
 }

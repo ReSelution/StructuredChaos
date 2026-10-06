@@ -18,9 +18,10 @@ void detach(F &&f, Args &&...args) {
   constexpr size_t SizeArgs = (sizeof(std::decay_t<Args>) + ... + 0);
   constexpr size_t MIN_OVERHEAD = 8;
 
+  on_task_enqueued();
   if constexpr (SizeF + SizeArgs + MIN_OVERHEAD <= SFO_LIMIT) {
-    pushTask<P>([f = std::forward<F>(f),
-                 ... args = std::forward<Args>(args)](int id) mutable {
+    queues.emplace<P>([f = std::forward<F>(f),
+                       ... args = std::forward<Args>(args)](int id) mutable {
       try {
         f(id, std::forward<Args>(args)...);
       } catch (...) {
@@ -30,16 +31,20 @@ void detach(F &&f, Args &&...args) {
     auto ctx = std::make_unique<
         std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>>>(
         std::forward<F>(f), std::make_tuple(std::forward<Args>(args)...));
-    pushTask<P>([ctx = std::move(ctx)](int id) mutable {
+    queues.emplace<P>([ctx = std::move(ctx)](int id) mutable {
       auto &func = std::get<0>(*ctx);
       auto &base_args = std::get<1>(*ctx);
-      std::apply(
-          [&](auto &&...unpacked) {
-            func(id, std::forward<decltype(unpacked)>(unpacked)...);
-          },
-          base_args);
+      try {
+        std::apply(
+            [&](auto &&...unpacked) {
+              func(id, std::forward<decltype(unpacked)>(unpacked)...);
+            },
+            base_args);
+      } catch (...) {
+      }
     });
   }
+  signalWork(1);
 }
 
 // Case 1: Fast Path OHNE Callback (Finished == nullptr_t)
@@ -168,6 +173,7 @@ void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
   constexpr bool fits_sfo = CAPTURE_BASE + OVERHEAD <= SFO_LIMIT ||
                             (!is_null_type && CAPTURE_BASE <= SFO_LIMIT);
 
+  on_task_enqueued(count);
   if constexpr (fits_sfo) {
     if constexpr (is_null_type) {
       detachBatchSfoNoCallback<P>(std::forward<R>(r), std::forward<F>(f),
@@ -187,7 +193,6 @@ void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
                                      std::forward<Args>(args)...);
     }
   }
-  on_task_enqueued(count);
   signalWork(count);
 }
 

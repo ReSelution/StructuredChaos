@@ -15,18 +15,18 @@ void init(uint32_t threads = std::thread::hardware_concurrency() - 1);
 void wait_until_finished();
 
 // detach
-template <typename F, typename... Args>
-  requires std::invocable<F, int, Args...> &&
-           std::is_void_v<std::invoke_result_t<F, int, Args...>>
-void detach(F &&f, Args &&...args) {
-  detach<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args)...);
-}
-
 template <Priority P, typename F, typename... Args>
   requires std::invocable<F, int, Args...> &&
            std::is_void_v<std::invoke_result_t<F, int, Args...>>
 void detach(F &&f, Args &&...args) {
   impl::detach<P>(std::forward<F>(f), std::forward<Args>(args)...);
+}
+
+template <typename F, typename... Args>
+  requires std::invocable<F, int, Args...> &&
+           std::is_void_v<std::invoke_result_t<F, int, Args...>>
+void detach(F &&f, Args &&...args) {
+  detach<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args)...);
 }
 
 template <Priority P, std::ranges::input_range R, typename F, typename Finished,
@@ -55,7 +55,9 @@ void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
 template <Priority P, typename F, typename... Args>
   requires std::invocable<F, int, Args...>
 auto enqueue(F &&f, Args &&...args)
-    -> std::future<std::invoke_result_t<F, int, Args...>> {}
+    -> std::future<std::invoke_result_t<F, int, Args...>> {
+  return impl::enqueue<P>(std::forward<F>(f), std::forward<Args>(args)...);
+}
 
 template <typename F, typename... Args>
   requires std::invocable<F, int, Args...>
