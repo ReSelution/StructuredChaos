@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstddef>
+#include <shared_mutex>
 #include <string_view>
 
 #include "ankerl/unordered_dense.h"
