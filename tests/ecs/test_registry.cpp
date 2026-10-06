@@ -1,10 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_vector.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <memory>
 #include <span>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -90,6 +92,20 @@ struct MoveCopySpy {
     ctorCount = 0;
   }
 };
+
+// Index of the first entity that is not the one expected at its position, or
+// the size if there is none. A fresh registry numbers its entities from zero
+// and create() prepares them in blocks, so the entities handed out must be
+// exactly 0 .. n-1: a duplicate or an entity that was prepared but skipped
+// both show up as a gap.
+size_t first_unexpected_entity(const std::vector<entt::entity> &sorted) {
+  for (size_t i = 0; i < sorted.size(); ++i) {
+    if (entt::to_integral(sorted[i]) != i) {
+      return i;
+    }
+  }
+  return sorted.size();
+}
 
 } // namespace
 
@@ -210,6 +226,45 @@ TEST_CASE("Registry Access Cache", "[ecs][registry]") {
     }
   }
 
+  SECTION("First Use Of A Component From Many Threads") {
+    // Not used anywhere else, so the threads race for creating its access
+    // object in this registry.
+    struct FirstUseComponent {
+      int value{0};
+    };
+
+    constexpr int thread_count = 8;
+    constexpr int per_thread = 200;
+
+    sc::ecs::Registry registry;
+    std::vector<sc::ecs::Entity> entities(thread_count * per_thread);
+    registry.create(entities.begin(), entities.end());
+
+    std::atomic<bool> start{false};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < thread_count; ++t) {
+      threads.emplace_back([&, t]() {
+        while (!start.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
+        for (int i = 0; i < per_thread; ++i) {
+          const int index = t * per_thread + i;
+          registry.emplace<FirstUseComponent>(entities[index], index);
+        }
+      });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto &thread : threads) {
+      thread.join();
+    }
+
+    auto view = registry.view<FirstUseComponent>();
+    REQUIRE(view.size() == entities.size());
+
+    auto [lock, last] = registry.get<FirstUseComponent>(entities.back());
+    REQUIRE(last.value == thread_count * per_thread - 1);
+  }
+
   SECTION("Two Registries Used Alternately") {
     sc::ecs::Registry first;
     sc::ecs::Registry second;
@@ -229,6 +284,100 @@ TEST_CASE("Registry Access Cache", "[ecs][registry]") {
         REQUIRE(pos.x == 2.0f);
       }
     }
+  }
+}
+
+TEST_CASE("Registry Parallel Entity Creation", "[ecs][registry]") {
+  constexpr int thread_count = 8;
+  // Not a multiple of the block size, so the threads run out of prepared
+  // entities at different points.
+  constexpr int per_thread = 5003;
+
+  sc::ecs::Registry registry;
+  std::vector<std::vector<entt::entity>> created(thread_count);
+
+  std::atomic<bool> start{false};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < thread_count; ++t) {
+    threads.emplace_back([&, t]() {
+      created[t].reserve(per_thread);
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (int i = 0; i < per_thread; ++i) {
+        created[t].push_back(registry.create());
+      }
+    });
+  }
+  start.store(true, std::memory_order_release);
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  std::vector<entt::entity> all;
+  for (const auto &part : created) {
+    all.insert(all.end(), part.begin(), part.end());
+  }
+  std::sort(all.begin(), all.end());
+
+  REQUIRE(all.size() == static_cast<size_t>(thread_count) * per_thread);
+  // No entity handed out twice ...
+  REQUIRE(std::adjacent_find(all.begin(), all.end()) == all.end());
+  // ... and none left out in between.
+  REQUIRE(first_unexpected_entity(all) == all.size());
+  REQUIRE(std::none_of(all.begin(), all.end(), [](entt::entity e) {
+    return e == entt::entity{entt::null};
+  }));
+}
+
+TEST_CASE("Registry Entity Creation From Many Threads", "[ecs][registry]") {
+  // Far more threads than cores, so threads are often interrupted between
+  // taking an index and reading the entity that belongs to it. Handing out an
+  // entity twice in that situation is rare, hence the volume: several rounds,
+  // each close to the 2^20 entities a registry can hold.
+  constexpr int rounds = 8;
+  constexpr int thread_count = 64;
+  constexpr int per_thread = 14'000;
+
+  for (int round = 0; round < rounds; ++round) {
+    sc::ecs::Registry registry;
+    std::vector<std::vector<entt::entity>> created(thread_count);
+
+    std::atomic<int> ready{0};
+    std::atomic<bool> start{false};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < thread_count; ++t) {
+      threads.emplace_back([&, t]() {
+        created[t].reserve(per_thread);
+        ready.fetch_add(1);
+        while (!start.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
+        for (int i = 0; i < per_thread; ++i) {
+          created[t].push_back(registry.create());
+        }
+      });
+    }
+    while (ready.load() != thread_count) {
+      std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    for (auto &thread : threads) {
+      thread.join();
+    }
+
+    std::vector<entt::entity> all;
+    all.reserve(static_cast<size_t>(thread_count) * per_thread);
+    for (const auto &part : created) {
+      all.insert(all.end(), part.begin(), part.end());
+    }
+    std::sort(all.begin(), all.end());
+
+    REQUIRE(all.size() == static_cast<size_t>(thread_count) * per_thread);
+    // No entity handed out twice ...
+    REQUIRE(std::adjacent_find(all.begin(), all.end()) == all.end());
+    // ... and none left out in between.
+    REQUIRE(first_unexpected_entity(all) == all.size());
   }
 }
 

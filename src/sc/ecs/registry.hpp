@@ -4,9 +4,12 @@
 #include "resource.hpp"
 
 #include <entt/entity/fwd.hpp>
+#include <array>
+#include <cstddef>
 #include <memory>
 #include <mimalloc.h>
 #include <mutex>
+#include <stdexcept>
 
 #include <atomic>
 #include <shared_mutex>
@@ -55,6 +58,27 @@ struct EntityOutputIterator {
     return !(*this == other);
   }
 };
+
+// Upper bound for the number of distinct component types in the program.
+inline constexpr size_t MAX_COMPONENT_TYPES = 1024;
+
+inline std::atomic<size_t> nextComponentIndex{0};
+
+// Index of a component type, the same in every registry. Assigned on first
+// use, counted over all component types of the program. Not stable across
+// shared library boundaries, where every module would count on its own.
+template <typename Component> size_t componentIndex() {
+  static const size_t index = [] {
+    const size_t next =
+        nextComponentIndex.fetch_add(1, std::memory_order_relaxed);
+    if (next >= MAX_COMPONENT_TYPES) {
+      throw std::length_error(
+          "sc::ecs: more component types than MAX_COMPONENT_TYPES");
+    }
+    return next;
+  }();
+  return index;
+}
 
 } // namespace sc::ecs::internal
 
@@ -105,6 +129,7 @@ class Registry {
   };
 
   static constexpr uint32_t ENTITY_BLOCK_SIZE = 512;
+
   using entity = entt::entity;
 
 public:
@@ -151,7 +176,7 @@ public:
   auto view();
 
 private:
-  void createEntities();
+  void refillEntities();
 
   template <typename Component> auto *getComponentAccess();
 
@@ -175,18 +200,29 @@ private:
   static void cleanupResources(StorageFor<Component> &storage,
                                entt::registry &reg, entt::entity e);
 
-  static inline std::atomic<uint64_t> s_nextId{1};
-  // Unique among all registries ever created, unlike the address, which a
-  // later registry may reuse. Zero is never handed out.
-  const uint64_t m_id = s_nextId.fetch_add(1, std::memory_order_relaxed);
+  // The access object of every component type used with this registry, at
+  // internal::componentIndex<Component>(). Read without a lock by all threads;
+  // an entry is written once, under m_contextMutex, and never changes after.
+  mutable std::array<std::atomic<void *>, internal::MAX_COMPONENT_TYPES>
+      m_access{};
 
-  alignas(64) mutable std::shared_mutex m_contextMutex;
-  // Guards entity creation: exclusive while m_reg creates entities and
-  // mEntities is refilled, shared while an entity is handed out.
-  alignas(64) mutable std::shared_mutex m_entityMutex;
-  alignas(64) std::atomic<uint32_t> mEntityIdx{ENTITY_BLOCK_SIZE};
+  // Serializes the creation of access objects.
+  alignas(64) mutable std::mutex m_contextMutex;
+  // Guards m_reg's entity storage and the refilling of m_entities.
+  alignas(64) std::mutex m_entityMutex;
+
+  // Entities created in advance for create(), handed out one index at a time
+  // and refilled in place once all of them are gone.
+  //
+  // m_entityNext is the next index to hand out. m_entityRead counts the
+  // entities of the current round that were copied out: a thread takes its
+  // index first and reads the entity after, so the buffer may only be
+  // overwritten once every index that was handed out has also been read.
+  alignas(64) std::atomic<uint32_t> m_entityNext{ENTITY_BLOCK_SIZE};
+  alignas(64) std::atomic<uint32_t> m_entityRead{ENTITY_BLOCK_SIZE};
+  alignas(64) std::array<Entity, ENTITY_BLOCK_SIZE> m_entities{};
+
   mutable entt::registry m_reg;
-  std::array<Entity, ENTITY_BLOCK_SIZE> mEntities{};
 };
 
 template <typename It>
@@ -194,7 +230,7 @@ template <typename It>
 void Registry::create(It begin, It end) {
 
   {
-    std::unique_lock lock{m_entityMutex};
+    std::lock_guard lock{m_entityMutex};
     m_reg.create(internal::EntityOutputIterator{begin, this},
                  internal::EntityOutputIterator{end, this});
   }
@@ -234,40 +270,31 @@ template <typename Component> auto *Registry::getComponentAccess() {
 }
 
 template <typename Component> auto *Registry::getComponentAccess() const {
+  // A const-qualified component would get an access object, and with it a
+  // mutex, of its own for the same storage.
+  static_assert(!std::is_const_v<Component>);
   using AccessType = ComponentAccess<Component>;
 
-  // Every thread remembers, per component type, the access object of the
-  // registry it used last. Without this each operation would lock
-  // m_contextMutex, which all threads share even when they work on different
-  // components. An access object lives as long as its registry, so a cached
-  // pointer stays valid for as long as the id matches.
-  thread_local uint64_t cachedId = 0;
-  thread_local AccessType *cachedAccess = nullptr;
-
-  if (cachedId != m_id) [[unlikely]] {
-    cachedAccess = findOrCreateComponentAccess<Component>();
-    cachedId = m_id;
+  void *access = m_access[internal::componentIndex<Component>()].load(
+      std::memory_order_acquire);
+  if (access == nullptr) [[unlikely]] {
+    return findOrCreateComponentAccess<Component>();
   }
-  return cachedAccess;
+  return static_cast<AccessType *>(access);
 }
 
 template <typename Component>
 auto *Registry::findOrCreateComponentAccess() const {
   using AccessType = ComponentAccess<Component>;
-  {
-    std::shared_lock shared_lock(m_contextMutex);
-    if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
-      return uptr->get();
-    }
-  }
+  std::atomic<void *> &slot = m_access[internal::componentIndex<Component>()];
 
-  std::unique_lock unique_lock(m_contextMutex);
-  if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
-    return uptr->get();
+  std::lock_guard lock(m_contextMutex);
+  if (void *access = slot.load(std::memory_order_relaxed)) {
+    return static_cast<AccessType *>(access);
   }
 
   // The only place that touches the pool table of m_reg, serialized by the
-  // exclusive context lock. EnTT keeps a storage at a stable address.
+  // context lock. EnTT keeps a storage at a stable address.
   auto &storage = m_reg.storage<std::remove_const_t<Component>>();
   connectOnDestroy<Component>(storage);
 
@@ -277,7 +304,9 @@ auto *Registry::findOrCreateComponentAccess() const {
   if constexpr (hasResource<std::remove_const_t<Component>>) {
     ptr->heap = mi_heap_new();
   }
+  // m_reg owns the access object; the slot makes it visible to all threads.
   m_reg.ctx().emplace<std::unique_ptr<AccessType>>(std::move(uptr));
+  slot.store(ptr, std::memory_order_release);
 
   return ptr;
 }

@@ -300,6 +300,30 @@ TEST_CASE("Registry Benchmarks: Parallel Writes",
     }
   };
 
+  // Entity creation alone, without any component.
+  BENCHMARK("sc: create only, 10 pool tasks") {
+    sc::ecs::Registry registry;
+
+    std::vector<int> batches(BATCH_COUNT);
+    sc::threading::detachBatch(
+        std::move(batches),
+        [&registry](int thread_id, int batch) {
+          for (size_t i = 0; i < BATCH_SIZE; ++i) {
+            registry.create();
+          }
+        },
+        nullptr);
+    sc::threading::wait_until_finished();
+  };
+
+  BENCHMARK("sc: create only, 1 thread") {
+    sc::ecs::Registry registry;
+
+    for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+      registry.create();
+    }
+  };
+
   // The same work as above, but written in batches: a task creates its
   // entities with one call and adds each component with one insert, so it
   // takes every mutex once instead of once per entity.
