@@ -1,0 +1,246 @@
+# Optionen 1:1 aus der CMakeLists.txt übernommen (MI_FOO -> mi_foo)
+# Aufruf z.B.:  meson setup build -Dmi_secure=true -Dbuildtype=debug
+
+option(
+  'mi_secure',
+  type: 'boolean',
+  value: false,
+  description: 'Use full security mitigations (like guard pages, allocation randomization, double-free mitigation, and free-list corruption detection)',
+)
+option(
+  'mi_override',
+  type: 'boolean',
+  value: true,
+  description: 'Override the standard malloc interface (i.e. define entry points for malloc, free, etc)',
+)
+option(
+  'mi_xmalloc',
+  type: 'boolean',
+  value: false,
+  description: 'Enable abort() call on memory allocation failure by default',
+)
+option(
+  'mi_show_errors',
+  type: 'boolean',
+  value: false,
+  description: 'Show error and warning messages by default (only enabled by default in DEBUG mode)',
+)
+option(
+  'mi_guarded',
+  type: 'boolean',
+  value: false,
+  description: 'Build with guard pages behind certain object allocations (implies mi_no_padding=true)',
+)
+option(
+  'mi_use_cxx',
+  type: 'boolean',
+  value: false,
+  description: 'Use the C++ compiler to compile the library (instead of the C compiler)',
+)
+option(
+  'mi_opt_arch',
+  type: 'boolean',
+  value: false,
+  description: 'Only for optimized builds: turn on architecture specific optimizations (x64: -march=haswell -mavx2, arm64: -march=armv8.1-a)',
+)
+option(
+  'mi_opt_simd',
+  type: 'boolean',
+  value: false,
+  description: 'Use SIMD instructions (requires mi_opt_arch to be enabled)',
+)
+
+option(
+  'mi_debug',
+  type: 'boolean',
+  value: false,
+  description: 'Enable assertion checks (enabled by default in a debug build)',
+)
+option(
+  'mi_debug_internal',
+  type: 'boolean',
+  value: false,
+  description: 'Enable assertion and internal invariant checks (enabled by default in a debug build)',
+)
+option(
+  'mi_debug_full',
+  type: 'boolean',
+  value: false,
+  description: 'Enable assertion checks and expensive internal heap invariant checking',
+)
+
+option(
+  'mi_debug_tsan',
+  type: 'boolean',
+  value: false,
+  description: 'Build with thread sanitizer (needs clang)',
+)
+option(
+  'mi_debug_ubsan',
+  type: 'boolean',
+  value: false,
+  description: 'Build with undefined-behavior sanitizer (needs clang++)',
+)
+option(
+  'mi_track_valgrind',
+  type: 'boolean',
+  value: false,
+  description: 'Compile with Valgrind support (adds a small overhead)',
+)
+option(
+  'mi_track_asan',
+  type: 'boolean',
+  value: false,
+  description: 'Compile with address sanitizer support (adds a small overhead)',
+)
+option(
+  'mi_track_etw',
+  type: 'boolean',
+  value: false,
+  description: 'Compile with Windows event tracing (ETW) support (adds a small overhead)',
+)
+
+option(
+  'mi_build_shared',
+  type: 'boolean',
+  value: true,
+  description: 'Build shared library',
+)
+option(
+  'mi_build_static',
+  type: 'boolean',
+  value: true,
+  description: 'Build static library',
+)
+option(
+  'mi_build_object',
+  type: 'boolean',
+  value: true,
+  description: 'Build object library',
+)
+option(
+  'mi_build_tests',
+  type: 'boolean',
+  value: true,
+  description: 'Build test executables',
+)
+
+option(
+  'mi_osx_interpose',
+  type: 'boolean',
+  value: true,
+  description: 'Use interpose to override standard malloc on macOS',
+)
+option(
+  'mi_osx_zone',
+  type: 'boolean',
+  value: true,
+  description: 'Use malloc zone to override standard malloc on macOS',
+)
+option(
+  'mi_win_redirect',
+  type: 'boolean',
+  value: true,
+  description: 'Use redirection module (mimalloc-redirect) on Windows if compiling mimalloc as a DLL',
+)
+option(
+  'mi_win_redirect_arm64ec',
+  type: 'boolean',
+  value: false,
+  description: 'Windows: link mimalloc-redirect-arm64ec (replaces CMAKE_GENERATOR_PLATFORM=arm64ec)',
+)
+option(
+  'mi_win_direct_tls',
+  type: 'boolean',
+  value: false,
+  description: 'Use only direct TLS slots on Windows (only works if the program uses less than 64 TlsAlloc slots in total)',
+)
+option(
+  'mi_local_dynamic_tls',
+  type: 'boolean',
+  value: false,
+  description: 'Use local-dynamic-tls, a slightly slower but dlopen-compatible thread local storage mechanism (Unix)',
+)
+option(
+  'mi_libc_musl',
+  type: 'boolean',
+  value: false,
+  description: 'Enable this when linking with musl libc',
+)
+
+option(
+  'mi_padding',
+  type: 'boolean',
+  value: false,
+  description: 'Enable padding to detect heap block overflow (always on in DEBUG or SECURE mode, or with Valgrind/ASAN)',
+)
+option(
+  'mi_skip_collect_on_exit',
+  type: 'boolean',
+  value: false,
+  description: 'Skip collecting memory on program exit',
+)
+option(
+  'mi_no_padding',
+  type: 'boolean',
+  value: false,
+  description: 'Force no use of padding even in DEBUG mode etc.',
+)
+option(
+  'mi_install_toplevel',
+  type: 'boolean',
+  value: false,
+  description: 'Install directly into prefix instead of PREFIX/lib/mimalloc-version',
+)
+option(
+  'mi_no_thp',
+  type: 'boolean',
+  value: false,
+  description: 'Disable transparent huge pages support on Linux/Android for the mimalloc process only',
+)
+option(
+  'mi_extra_cppdefs',
+  type: 'array',
+  value: [],
+  description: 'Extra pre-processor definitions (e.g. -Dmi_extra_cppdefs=opt1=val1,opt2=val2)',
+)
+option(
+  'mi_see_asm',
+  type: 'boolean',
+  value: false,
+  description: 'Generate assembly files',
+)
+
+# negierte Optionen (vcpkg)
+option(
+  'mi_no_use_cxx',
+  type: 'boolean',
+  value: false,
+  description: 'Use plain C compilation (has priority over mi_use_cxx)',
+)
+option(
+  'mi_no_opt_arch',
+  type: 'boolean',
+  value: false,
+  description: 'Do not use architecture specific optimizations (has priority over mi_opt_arch)',
+)
+
+# veraltete Optionen
+option(
+  'mi_win_use_fls',
+  type: 'boolean',
+  value: false,
+  description: 'Use Fiber local storage on Windows to detect thread termination (deprecated)',
+)
+option(
+  'mi_check_full',
+  type: 'boolean',
+  value: false,
+  description: 'Deprecated, use mi_debug_full instead',
+)
+option(
+  'mi_use_libatomic',
+  type: 'boolean',
+  value: false,
+  description: 'Deprecated, libatomic is detected automatically',
+)

@@ -1,0 +1,12 @@
+option(
+  'enable_xtl_complex',
+  type: 'boolean',
+  value: false,
+  description: 'Enable support for xcomplex defined in xtl',
+)
+option(
+  'default_arch',
+  type: 'string',
+  value: '',
+  description: 'Architecture used as xsimd::default_arch, e.g. avx2 (empty: best architecture enabled by the compiler flags)',
+)

@@ -2,6 +2,6 @@
 url = https://github.com/xtensor-stack/xsimd.git
 revision = 14.2.0
 depth = 1
-method = cmake
+patch_directory = xsimd
 [provide]
 xsimd = xsimd_dep

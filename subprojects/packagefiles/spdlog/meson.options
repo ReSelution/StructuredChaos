@@ -1,0 +1,102 @@
+# General
+option(
+  'compile_library',
+  type: 'boolean',
+  value: true,
+  description: 'Build spdlog as a compiled library (false: the spdlog dependency is header-only)',
+)
+option(
+  'fmt',
+  type: 'combo',
+  choices: ['bundled', 'external', 'external_header_only', 'std'],
+  value: 'bundled',
+  description: 'Formatting backend: bundled fmt, external fmt (compiled or header-only) or std::format (requires C++20)',
+)
+option(
+  'system_includes',
+  type: 'boolean',
+  value: false,
+  description: 'Include as system headers',
+)
+option(
+  'no_exceptions',
+  type: 'boolean',
+  value: false,
+  description: 'Compile without exceptions. Call abort() on any spdlog exceptions',
+)
+option(
+  'no_tz_offset',
+  type: 'boolean',
+  value: false,
+  description: 'Omit %z timezone offset (use on platforms without tm_gmtoff)',
+)
+
+# Platform specific
+option(
+  'wchar_support',
+  type: 'boolean',
+  value: false,
+  description: 'Support wchar api (Windows only)',
+)
+option(
+  'wchar_filenames',
+  type: 'boolean',
+  value: false,
+  description: 'Support wchar filenames (Windows only)',
+)
+option(
+  'wchar_console',
+  type: 'boolean',
+  value: false,
+  description: 'Support wchar output to console (Windows only)',
+)
+option(
+  'msvc_utf8',
+  type: 'boolean',
+  value: true,
+  description: 'Enable the /utf-8 flag required by fmt (MSVC only)',
+)
+option(
+  'clock_coarse',
+  type: 'boolean',
+  value: false,
+  description: 'Use CLOCK_REALTIME_COARSE instead of the regular clock (Linux only)',
+)
+
+# Tweaks
+option(
+  'prevent_child_fd',
+  type: 'boolean',
+  value: false,
+  description: 'Prevent child processes from inheriting log file descriptors',
+)
+option(
+  'no_thread_id',
+  type: 'boolean',
+  value: false,
+  description: 'Prevent spdlog from querying the thread id on each log call if thread id is not needed',
+)
+option(
+  'no_tls',
+  type: 'boolean',
+  value: false,
+  description: 'Prevent spdlog from using thread local storage',
+)
+option(
+  'no_atomic_levels',
+  type: 'boolean',
+  value: false,
+  description: 'Prevent spdlog from using std::atomic log levels (use only if your code never modifies log levels concurrently)',
+)
+option(
+  'disable_default_logger',
+  type: 'boolean',
+  value: false,
+  description: 'Disable default logger creation',
+)
+option(
+  'fwrite_unlocked',
+  type: 'boolean',
+  value: true,
+  description: 'Use the unlocked variant of fwrite. Leave this on unless your libc does not have it',
+)

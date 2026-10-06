@@ -1,0 +1,129 @@
+# General
+option(
+  'logging',
+  type: 'boolean',
+  value: false,
+  description: 'Enable logging (should never be used in binary releases)',
+)
+option(
+  'static_initialization',
+  type: 'boolean',
+  value: false,
+  description: 'Use translation-unit-scope statics for the implementation singletons (faster, but unsafe before main())',
+)
+option(
+  'nostdlibcxx',
+  type: 'boolean',
+  value: false,
+  description: 'Additionally build simdutf-nostdlibcxx, a static variant without C++ runtime dependency (C interface, GCC/Clang only)',
+)
+
+# Features: disabled features are dropped from both the library and the headers
+option(
+  'feature_utf8',
+  type: 'boolean',
+  value: true,
+  description: 'Enable UTF-8 support',
+)
+option(
+  'feature_utf16',
+  type: 'boolean',
+  value: true,
+  description: 'Enable UTF-16 support',
+)
+option(
+  'feature_utf32',
+  type: 'boolean',
+  value: true,
+  description: 'Enable UTF-32 support',
+)
+option(
+  'feature_ascii',
+  type: 'boolean',
+  value: true,
+  description: 'Enable ASCII support',
+)
+option(
+  'feature_latin1',
+  type: 'boolean',
+  value: true,
+  description: 'Enable Latin-1 support',
+)
+option(
+  'feature_base64',
+  type: 'boolean',
+  value: true,
+  description: 'Enable base64 support',
+)
+option(
+  'feature_detect_encoding',
+  type: 'boolean',
+  value: true,
+  description: 'Enable encoding detection',
+)
+
+# Implementations (kernels): 'auto' lets simdutf decide based on the target
+# architecture; runtime dispatch is unaffected
+option(
+  'impl_icelake',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: 'x86-64 AVX-512 (VBMI2) kernel',
+)
+option(
+  'impl_haswell',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: 'x86-64 AVX2 kernel',
+)
+option(
+  'impl_westmere',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: 'x86-64 SSE4.2 kernel',
+)
+option(
+  'impl_arm64',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: 'ARM64 NEON kernel',
+)
+option(
+  'impl_ppc64',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: 'PPC64 AltiVec/VSX kernel',
+)
+option(
+  'impl_rvv',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: 'RISC-V Vector kernel',
+)
+option(
+  'impl_lsx',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: 'LoongArch LSX kernel',
+)
+option(
+  'impl_lasx',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: 'LoongArch LASX kernel',
+)
+option(
+  'impl_fallback',
+  type: 'combo',
+  choices: ['auto', 'enabled', 'disabled'],
+  value: 'auto',
+  description: 'Scalar fallback kernel (auto: only when no SIMD kernel is guaranteed to run)',
+)

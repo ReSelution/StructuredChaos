@@ -1,0 +1,88 @@
+option(
+  'build_library',
+  type: 'boolean',
+  value: false,
+  description: 'Build dynamic/static library',
+)
+option(
+  'build_tests',
+  type: 'boolean',
+  value: false,
+  description: 'Build test programs',
+)
+
+# SIMD options
+option(
+  'simd_sse2',
+  type: 'boolean',
+  value: false,
+  description: 'Enable SSE2 optimizations',
+)
+option(
+  'simd_sse3',
+  type: 'boolean',
+  value: false,
+  description: 'Enable SSE3 optimizations',
+)
+option(
+  'simd_ssse3',
+  type: 'boolean',
+  value: false,
+  description: 'Enable SSSE3 optimizations',
+)
+option(
+  'simd_sse4_1',
+  type: 'boolean',
+  value: false,
+  description: 'Enable SSE 4.1 optimizations',
+)
+option(
+  'simd_sse4_2',
+  type: 'boolean',
+  value: false,
+  description: 'Enable SSE 4.2 optimizations',
+)
+option(
+  'simd_avx',
+  type: 'boolean',
+  value: false,
+  description: 'Enable AVX optimizations',
+)
+option(
+  'simd_avx2',
+  type: 'boolean',
+  value: false,
+  description: 'Enable AVX2 optimizations',
+)
+option(
+  'simd_neon',
+  type: 'boolean',
+  value: false,
+  description: 'Enable ARM NEON optimizations',
+)
+option(
+  'force_pure',
+  type: 'boolean',
+  value: false,
+  description: 'Force pure instructions without SIMD',
+)
+
+# Additional options
+option(
+  'fast_math',
+  type: 'boolean',
+  value: false,
+  description: 'Enable fast math optimizations',
+)
+option(
+  'lang_extensions',
+  type: 'boolean',
+  value: false,
+  description: 'Enable language extensions',
+)
+option(
+  'disable_auto_detection',
+  type: 'boolean',
+  value: false,
+  description: 'Disable platform/compiler/arch auto detection',
+)

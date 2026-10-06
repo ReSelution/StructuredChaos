@@ -2,7 +2,7 @@
 url = https://github.com/g-truc/glm.git
 revision = 1.0.3
 depth = 1
-method = cmake
+patch_directory = glm
 
 [provide]
 glm = glm_dep
