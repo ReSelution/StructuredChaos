@@ -4,7 +4,8 @@
 #include "resource.hpp"
 
 #include <entt/entity/fwd.hpp>
-#include <memory_resource>
+#include <memory>
+#include <mimalloc.h>
 #include <mutex>
 
 #include <atomic>
@@ -67,28 +68,46 @@ class Registry {
   template <typename Component>
   using StorageFor = entt::storage_for_t<std::remove_const_t<Component>>;
 
+  // Whether a component has Resource fields, which own memory outside of the
+  // component storage.
+  template <typename Component>
+  static constexpr bool hasResource = []() {
+    if constexpr (!pfr::is_implicitly_reflectable_v<Component, void>) {
+      return false;
+    } else {
+      bool found = false;
+      pfr::for_each_field(Component{}, [&](auto &&field) {
+        using FieldType = std::remove_cvref_t<decltype(field)>;
+        if constexpr (IsResource<FieldType>) {
+          found = true;
+        }
+      });
+      return found;
+    }
+  }();
+
   template <typename Component> struct alignas(64) ComponentAccess {
     mutable std::shared_mutex mutex;
-    std::pmr::synchronized_pool_resource pool;
+    // Heap the Resource fields of the component allocate from, null for a
+    // component without any. Components are trivially destructible, so their
+    // buffers are not freed one by one: destroying the heap frees them all.
+    mi_heap_t *heap = nullptr;
     // Set once on creation. All component operations go through this pointer
     // instead of m_reg, which would look up the pool table shared by all
     // components on every call.
     StorageFor<Component> *storage = nullptr;
+
+    ~ComponentAccess() {
+      if (heap != nullptr) {
+        mi_heap_destroy(heap);
+      }
+    }
   };
 
   static constexpr uint32_t ENTITY_BLOCK_SIZE = 512;
   using entity = entt::entity;
 
-  mutable std::vector<std::pmr::synchronized_pool_resource *> m_pools{};
-
 public:
-  ~Registry() {
-    // m_reg.clear();
-    for (auto pool : m_pools) {
-      pool->release();
-    }
-  }
-
   Entity create();
 
   template <typename Component> void reserve(size_t count) {
@@ -109,7 +128,7 @@ public:
 
   template <typename Component> void setStorageAnchor() {
     auto *acc = getComponentAccess<Component>();
-    PoolAnchor::current = &acc->pool;
+    HeapAnchor::current = acc->heap;
   }
 
   template <typename Component, typename It, typename DataIt>
@@ -138,6 +157,8 @@ private:
 
   template <typename Component> auto *getComponentAccess() const;
 
+  template <typename Component> auto *findOrCreateComponentAccess() const;
+
   template <typename Component>
   static void connectOnDestroy(StorageFor<Component> &storage);
 
@@ -153,6 +174,11 @@ private:
   template <typename Component>
   static void cleanupResources(StorageFor<Component> &storage,
                                entt::registry &reg, entt::entity e);
+
+  static inline std::atomic<uint64_t> s_nextId{1};
+  // Unique among all registries ever created, unlike the address, which a
+  // later registry may reuse. Zero is never handed out.
+  const uint64_t m_id = s_nextId.fetch_add(1, std::memory_order_relaxed);
 
   alignas(64) mutable std::shared_mutex m_contextMutex;
   // Guards entity creation: exclusive while m_reg creates entities and
@@ -209,6 +235,25 @@ template <typename Component> auto *Registry::getComponentAccess() {
 
 template <typename Component> auto *Registry::getComponentAccess() const {
   using AccessType = ComponentAccess<Component>;
+
+  // Every thread remembers, per component type, the access object of the
+  // registry it used last. Without this each operation would lock
+  // m_contextMutex, which all threads share even when they work on different
+  // components. An access object lives as long as its registry, so a cached
+  // pointer stays valid for as long as the id matches.
+  thread_local uint64_t cachedId = 0;
+  thread_local AccessType *cachedAccess = nullptr;
+
+  if (cachedId != m_id) [[unlikely]] {
+    cachedAccess = findOrCreateComponentAccess<Component>();
+    cachedId = m_id;
+  }
+  return cachedAccess;
+}
+
+template <typename Component>
+auto *Registry::findOrCreateComponentAccess() const {
+  using AccessType = ComponentAccess<Component>;
   {
     std::shared_lock shared_lock(m_contextMutex);
     if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
@@ -229,31 +274,17 @@ template <typename Component> auto *Registry::getComponentAccess() const {
   auto uptr = std::make_unique<AccessType>();
   auto *ptr = uptr.get();
   ptr->storage = &storage;
+  if constexpr (hasResource<std::remove_const_t<Component>>) {
+    ptr->heap = mi_heap_new();
+  }
   m_reg.ctx().emplace<std::unique_ptr<AccessType>>(std::move(uptr));
-
-  m_pools.emplace_back(&ptr->pool);
 
   return ptr;
 }
 
 template <typename Component>
 void Registry::connectOnDestroy(StorageFor<Component> &storage) {
-  constexpr bool has_resource = []() {
-    if constexpr (!pfr::is_implicitly_reflectable_v<Component, void>) {
-      return false;
-    } else {
-      bool found = false;
-      pfr::for_each_field(Component{}, [&](auto &&field) {
-        using FieldType = std::remove_cvref_t<decltype(field)>;
-        if constexpr (IsResource<FieldType>) {
-          found = true;
-        }
-      });
-      return found;
-    }
-  }();
-
-  if constexpr (has_resource) {
+  if constexpr (hasResource<std::remove_const_t<Component>>) {
     storage.on_destroy()
         .template connect<&Registry::cleanupResources<Component>>(storage);
   }
@@ -280,16 +311,16 @@ decltype(auto) Registry::executeWrite(Func &&func) {
                 "Move must be no-throw for EnTT performance");
   static_assert(std::is_trivially_destructible_v<Component>);
 
-  PoolAnchor::current = &acc->pool;
+  HeapAnchor::current = acc->heap;
   std::unique_lock lock(acc->mutex);
   if constexpr (std::is_void_v<
                     std::invoke_result_t<Func, StorageFor<Component> &>>) {
     func(*acc->storage);
-    PoolAnchor::current = nullptr;
+    HeapAnchor::current = nullptr;
     return;
   } else {
     decltype(auto) ret = func(*acc->storage);
-    PoolAnchor::current = nullptr;
+    HeapAnchor::current = nullptr;
     return ret;
   }
 }

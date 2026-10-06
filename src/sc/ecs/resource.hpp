@@ -3,7 +3,7 @@
 #include <cassert>
 #include <concepts>
 #include <cstring>
-#include <memory_resource>
+#include <mimalloc.h>
 #include <type_traits>
 namespace sc::ecs {
 
@@ -16,7 +16,8 @@ concept IsContiguousResource = requires(T t) {
 
 template <IsContiguousResource ResourceType> struct Resource {
   static constexpr bool is_resource = true;
-  std::pmr::memory_resource *pool = PoolAnchor::current;
+  // Only needed to allocate; a buffer is freed without it.
+  mi_heap_t *heap = HeapAnchor::current;
   ResourceType view{};
 
   template <typename T>
@@ -27,19 +28,17 @@ template <IsContiguousResource ResourceType> struct Resource {
   Resource(const T &initialVal) {
     *this = initialVal;
   }
-  constexpr Resource() noexcept : pool(nullptr) {}
+  constexpr Resource() noexcept : heap(nullptr) {}
   Resource &operator=(const Resource &) = delete;
   Resource &operator=(Resource &&) = delete;
   Resource(Resource &other) = delete;
-  Resource(Resource &&other) noexcept : view(other.view) { other.view = {}; }
+  Resource(Resource &&other) noexcept : heap(other.heap), view(other.view) {
+    other.view = {};
+  }
 
   void clear() {
     if (view.data()) {
-      size_t oldByteSize =
-          view.size() * sizeof(typename ResourceType::value_type);
-      pool->deallocate(
-          const_cast<void *>(static_cast<const void *>(view.data())),
-          oldByteSize);
+      mi_free(const_cast<void *>(static_cast<const void *>(view.data())));
     }
   }
   template <typename T>
@@ -48,17 +47,13 @@ template <IsContiguousResource ResourceType> struct Resource {
       { t.size() };
     }
   Resource &operator=(const T &newVal) {
-    assert(pool != nullptr);
+    assert(heap != nullptr);
 
     if (view.data() == newVal.data()) {
       return *this;
     }
     if (view.data()) {
-      size_t oldByteSize =
-          view.size() * sizeof(typename ResourceType::value_type);
-      pool->deallocate(
-          const_cast<void *>(static_cast<const void *>(view.data())),
-          oldByteSize);
+      mi_free(const_cast<void *>(static_cast<const void *>(view.data())));
     }
 
     if (newVal.empty()) {
@@ -68,7 +63,8 @@ template <IsContiguousResource ResourceType> struct Resource {
 
     const size_t byteSize =
         newVal.size() * sizeof(typename ResourceType::value_type);
-    void *buf = pool->allocate(byteSize);
+    void *buf = mi_heap_malloc_aligned(
+        heap, byteSize, alignof(typename ResourceType::value_type));
     std::memcpy(buf, newVal.data(), byteSize);
 
     view = ResourceType{static_cast<typename ResourceType::value_type *>(buf),

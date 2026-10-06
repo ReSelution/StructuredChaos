@@ -5,6 +5,7 @@ catch2_dep = dependency('catch2-with-main', fallback: ['catch2', 'catch2_with_ma
 test_registry = executable(
   'test_registry',
   sources: [
+    'ecs/bench_registry.cpp',
     'ecs/test_registry.cpp',
   ],
   dependencies: [
@@ -14,6 +15,12 @@ test_registry = executable(
 )
 
 test('ECS Registry Tests', test_registry)
+benchmark(
+  'ECS Registry Benchmarks',
+  test_registry,
+  args: ['[!benchmark]'],
+  timeout: 300,
+)
 
 test_threading = executable(
   'test_threading',

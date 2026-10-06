@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <memory>
 #include <span>
 #include <type_traits>
 #include <vector>
@@ -143,6 +144,91 @@ TEST_CASE("Registry Basic Entity and Component Operations", "[ecs][registry]") {
 
     registry.emplace<Position>(ent_id, 5.0f, 5.0f);
     registry.erase<Position>(ent_id);
+  }
+}
+
+TEST_CASE("Registry Resource Components", "[ecs][registry][resource]") {
+  constexpr size_t count = 2000;
+  constexpr size_t vertex_count = 16;
+
+  SECTION("Buffers Survive Storage Growth And Erase") {
+    sc::ecs::Registry registry;
+    std::vector<sc::ecs::Entity> entities(count);
+    registry.create(entities.begin(), entities.end());
+
+    // No reserve: the storage grows several times and moves the components.
+    for (size_t i = 0; i < count; ++i) {
+      std::array<float, vertex_count> vertices{};
+      vertices.fill(static_cast<float>(i));
+      registry.emplace<MeshComponent>(
+          entities[i], std::span<const float>(vertices),
+          static_cast<uint32_t>(i));
+    }
+
+    // Erasing moves the last component into the freed slot.
+    for (size_t i = 0; i < count; i += 2) {
+      registry.erase<MeshComponent>(entities[i]);
+    }
+
+    for (size_t i = 1; i < count; i += 2) {
+      auto [lock, mesh] = registry.get<MeshComponent>(entities[i]);
+      REQUIRE(mesh.meshId == i);
+      REQUIRE(mesh.vertices.size() == vertex_count);
+      REQUIRE(mesh.vertices[0] == static_cast<float>(i));
+      REQUIRE(mesh.vertices[vertex_count - 1] == static_cast<float>(i));
+    }
+  }
+
+  SECTION("More Registries Than Thread-Local Keys") {
+    // A registry used to take one thread-local key per component, of which a
+    // process has about a thousand.
+    constexpr size_t registry_count = 1500;
+    std::vector<std::unique_ptr<sc::ecs::Registry>> registries;
+    registries.reserve(registry_count);
+
+    for (size_t i = 0; i < registry_count; ++i) {
+      auto &registry = *registries.emplace_back(
+          std::make_unique<sc::ecs::Registry>());
+      REQUIRE_NOTHROW(registry.reserve<Position>(1));
+      REQUIRE_NOTHROW(registry.reserve<MeshComponent>(1));
+    }
+  }
+}
+
+TEST_CASE("Registry Access Cache", "[ecs][registry]") {
+  SECTION("A New Registry At The Address Of A Destroyed One") {
+    // Both registries live in the same stack slot one after the other. The
+    // second one must not pick up what the thread cached for the first.
+    for (int round = 0; round < 3; ++round) {
+      sc::ecs::Registry registry;
+      auto e = registry.create();
+
+      registry.emplace<Position>(e, static_cast<float>(round), 0.0f);
+
+      auto [lock, pos] = registry.get<Position>(e);
+      REQUIRE(pos.x == static_cast<float>(round));
+    }
+  }
+
+  SECTION("Two Registries Used Alternately") {
+    sc::ecs::Registry first;
+    sc::ecs::Registry second;
+    auto e1 = first.create();
+    auto e2 = second.create();
+
+    first.emplace<Position>(e1, 1.0f, 0.0f);
+    second.emplace<Position>(e2, 2.0f, 0.0f);
+
+    for (int i = 0; i < 4; ++i) {
+      {
+        auto [lock, pos] = first.get<Position>(e1);
+        REQUIRE(pos.x == 1.0f);
+      }
+      {
+        auto [lock, pos] = second.get<Position>(e2);
+        REQUIRE(pos.x == 2.0f);
+      }
+    }
   }
 }
 
