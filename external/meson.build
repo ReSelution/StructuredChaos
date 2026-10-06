@@ -14,8 +14,10 @@ unordered_dense_dep = dependency(
   fallback: ['unordered_dense', 'unordered_dense_dep'],
 )
 
+# The ECS uses first-class mimalloc heaps, which are not reliable before 3.5.3.
 mimalloc_dep = dependency(
   'mimalloc',
+  version: '>=3.5.3',
   fallback: ['mimalloc', 'mimalloc_static_dep'],
   default_options: [
     'mi_build_shared=false',

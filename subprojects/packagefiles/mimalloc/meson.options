@@ -1,11 +1,14 @@
-# Optionen 1:1 aus der CMakeLists.txt übernommen (MI_FOO -> mi_foo)
-# Aufruf z.B.:  meson setup build -Dmi_secure=true -Dbuildtype=debug
+# Meson port of the options in mimalloc's CMakeLists.txt (v3.5.x).
+# MI_FOO becomes mi_foo; the ON/OFF/... choices are written in lower case.
+# The options CMake only keeps as deprecated aliases are left out.
+# Example: meson setup build -Dmimalloc:mi_secure=on
 
 option(
   'mi_secure',
-  type: 'boolean',
-  value: false,
-  description: 'Use full security mitigations (like guard pages, allocation randomization, double-free mitigation, and free-list corruption detection)',
+  type: 'combo',
+  choices: ['off', 'on', 'full'],
+  value: 'off',
+  description: 'Use security mitigations (like meta data guard pages, allocation randomization, double-free mitigation, and free-list corruption detection). full adds guard pages at the end of each mimalloc page (which may be expensive)',
 )
 option(
   'mi_override',
@@ -27,21 +30,23 @@ option(
 )
 option(
   'mi_guarded',
-  type: 'boolean',
-  value: false,
-  description: 'Build with guard pages behind certain object allocations (implies mi_no_padding=true)',
+  type: 'combo',
+  choices: ['off', 'on', 'full', 'default'],
+  value: 'default',
+  description: 'Build with ability to put guard pages behind certain object allocations',
 )
 option(
   'mi_use_cxx',
-  type: 'boolean',
-  value: false,
+  type: 'combo',
+  choices: ['off', 'on', 'default'],
+  value: 'default',
   description: 'Use the C++ compiler to compile the library (instead of the C compiler)',
 )
 option(
   'mi_opt_arch',
-  type: 'boolean',
-  value: false,
-  description: 'Only for optimized builds: turn on architecture specific optimizations (x64: -march=haswell -mavx2, arm64: -march=armv8.1-a)',
+  type: 'string',
+  value: 'default',
+  description: 'Only for optimized builds: turn on architecture specific optimizations: off, on, default, or a specific one like avx2, armv8.1, armv8.3, rva22, rva23, rv64gcb_zacas (on: x64 -march=haswell -mavx2, arm64 -march=armv8.1-a)',
 )
 option(
   'mi_opt_simd',
@@ -49,24 +54,53 @@ option(
   value: false,
   description: 'Use SIMD instructions (requires mi_opt_arch to be enabled)',
 )
-
 option(
   'mi_debug',
-  type: 'boolean',
-  value: false,
-  description: 'Enable assertion checks (enabled by default in a debug build)',
+  type: 'combo',
+  choices: ['off', 'on', 'internal', 'full', 'default'],
+  value: 'default',
+  description: 'Enable assertion checks. internal adds extra internal invariant checks, while full adds expensive heap invariant checks',
 )
 option(
-  'mi_debug_internal',
-  type: 'boolean',
-  value: false,
-  description: 'Enable assertion and internal invariant checks (enabled by default in a debug build)',
+  'mi_track',
+  type: 'combo',
+  choices: ['off', 'asan', 'valgrind', 'etw'],
+  value: 'off',
+  description: 'Enable tracking: asan (address sanitizer), valgrind, etw (Windows event tracing). Adds a small overhead',
 )
 option(
-  'mi_debug_full',
+  'mi_stats',
+  type: 'combo',
+  choices: ['off', 'on', 'full', 'default'],
+  value: 'default',
+  description: 'Enable statistics',
+)
+option(
+  'mi_profile',
+  type: 'combo',
+  choices: ['off', 'on', 'full', 'default'],
+  value: 'default',
+  description: 'Enable profiling',
+)
+option(
+  'mi_free_is_checked',
+  type: 'combo',
+  choices: ['off', 'shared', 'on', 'default'],
+  value: 'default',
+  description: 'Check for invalid pointers in mi_free. shared enables it only for the shared library',
+)
+option(
+  'mi_allow_thp',
+  type: 'combo',
+  choices: ['off', 'on', 'full', 'default'],
+  value: 'default',
+  description: 'Enable transparent huge pages on Linux. full enables THP and also avoids splitting up huge pages during purging',
+)
+option(
+  'mi_free_use_pagemap',
   type: 'boolean',
   value: false,
-  description: 'Enable assertion checks and expensive internal heap invariant checking',
+  description: 'Always use the page map when free-ing a pointer -- enable only for systems that do not support large OS aligned allocations well',
 )
 
 option(
@@ -80,24 +114,6 @@ option(
   type: 'boolean',
   value: false,
   description: 'Build with undefined-behavior sanitizer (needs clang++)',
-)
-option(
-  'mi_track_valgrind',
-  type: 'boolean',
-  value: false,
-  description: 'Compile with Valgrind support (adds a small overhead)',
-)
-option(
-  'mi_track_asan',
-  type: 'boolean',
-  value: false,
-  description: 'Compile with address sanitizer support (adds a small overhead)',
-)
-option(
-  'mi_track_etw',
-  type: 'boolean',
-  value: false,
-  description: 'Compile with Windows event tracing (ETW) support (adds a small overhead)',
 )
 
 option(
@@ -150,16 +166,24 @@ option(
   description: 'Windows: link mimalloc-redirect-arm64ec (replaces CMAKE_GENERATOR_PLATFORM=arm64ec)',
 )
 option(
-  'mi_win_direct_tls',
-  type: 'boolean',
-  value: false,
-  description: 'Use only direct TLS slots on Windows (only works if the program uses less than 64 TlsAlloc slots in total)',
+  'mi_win_init',
+  type: 'combo',
+  choices: ['crt_tls', 'raw_dllmain', 'tls_dllmain', 'fls', 'default'],
+  value: 'default',
+  description: 'Force Windows initialization strategy: crt_tls (default), raw_dllmain (use raw DLL main entry point), tls_dllmain (TLS entries with DllMain), fls (legacy fiber API)',
 )
 option(
-  'mi_local_dynamic_tls',
+  'mi_tls_model',
+  type: 'combo',
+  choices: ['local', 'pthreads', 'local_dynamic', 'win32', 'fixed', 'default'],
+  value: 'default',
+  description: 'Force TLS model: local (thread local variables), pthreads (pthread locals), local_dynamic (dlopen-compatible thread local storage (Unix)), win32 (direct Windows TLS slots), fixed (fixed thread local slots)',
+)
+option(
+  'mi_tls_recurse_guard',
   type: 'boolean',
   value: false,
-  description: 'Use local-dynamic-tls, a slightly slower but dlopen-compatible thread local storage mechanism (Unix)',
+  description: 'Force a recursion check on thread local access (for mi_tls_model=local only)',
 )
 option(
   'mi_libc_musl',
@@ -175,28 +199,22 @@ option(
   description: 'Enable padding to detect heap block overflow (always on in DEBUG or SECURE mode, or with Valgrind/ASAN)',
 )
 option(
-  'mi_skip_collect_on_exit',
-  type: 'boolean',
-  value: false,
-  description: 'Skip collecting memory on program exit',
-)
-option(
   'mi_no_padding',
   type: 'boolean',
   value: false,
   description: 'Force no use of padding even in DEBUG mode etc.',
 )
 option(
+  'mi_skip_collect_on_exit',
+  type: 'boolean',
+  value: false,
+  description: 'Skip collecting memory on program exit',
+)
+option(
   'mi_install_toplevel',
   type: 'boolean',
   value: false,
   description: 'Install directly into prefix instead of PREFIX/lib/mimalloc-version',
-)
-option(
-  'mi_no_thp',
-  type: 'boolean',
-  value: false,
-  description: 'Disable transparent huge pages support on Linux/Android for the mimalloc process only',
 )
 option(
   'mi_extra_cppdefs',
@@ -209,38 +227,4 @@ option(
   type: 'boolean',
   value: false,
   description: 'Generate assembly files',
-)
-
-# negierte Optionen (vcpkg)
-option(
-  'mi_no_use_cxx',
-  type: 'boolean',
-  value: false,
-  description: 'Use plain C compilation (has priority over mi_use_cxx)',
-)
-option(
-  'mi_no_opt_arch',
-  type: 'boolean',
-  value: false,
-  description: 'Do not use architecture specific optimizations (has priority over mi_opt_arch)',
-)
-
-# veraltete Optionen
-option(
-  'mi_win_use_fls',
-  type: 'boolean',
-  value: false,
-  description: 'Use Fiber local storage on Windows to detect thread termination (deprecated)',
-)
-option(
-  'mi_check_full',
-  type: 'boolean',
-  value: false,
-  description: 'Deprecated, use mi_debug_full instead',
-)
-option(
-  'mi_use_libatomic',
-  type: 'boolean',
-  value: false,
-  description: 'Deprecated, libatomic is detected automatically',
 )
