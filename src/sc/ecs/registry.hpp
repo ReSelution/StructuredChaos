@@ -72,7 +72,7 @@ class Registry {
   static constexpr uint32_t ENTITY_BLOCK_SIZE = 512;
   using entity = entt::entity;
 
-  std::vector<std::pmr::synchronized_pool_resource *> m_pools{};
+  mutable std::vector<std::pmr::synchronized_pool_resource *> m_pools{};
 
 public:
   ~Registry() {
@@ -144,10 +144,10 @@ private:
   template <typename Component>
   static void cleanupResources(entt::registry &reg, entt::entity e);
 
-  alignas(64) mutable std::mutex m_contextMutex;
+  alignas(64) mutable std::shared_mutex m_contextMutex;
   alignas(64) std::mutex eCreationLock;
   alignas(64) std::atomic<uint32_t> mEntityIdx{ENTITY_BLOCK_SIZE};
-  entt::registry m_reg;
+  mutable entt::registry m_reg;
   std::array<Entity, ENTITY_BLOCK_SIZE> mEntities{};
 };
 
@@ -182,13 +182,15 @@ template <typename... Components> auto Registry::view() {
 
 template <typename Component> auto *Registry::getComponentAccess() {
   using AccessType = ComponentAccess<Component>;
+
   {
+    std::shared_lock shared_lock(m_contextMutex);
     if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
       return uptr->get();
     }
   }
 
-  std::lock_guard lock(m_contextMutex);
+  std::unique_lock unique_lock(m_contextMutex);
   if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
     return uptr->get();
   }
@@ -202,24 +204,23 @@ template <typename Component> auto *Registry::getComponentAccess() {
 
 template <typename Component> auto *Registry::getComponentAccess() const {
   using AccessType = ComponentAccess<Component>;
+  {
+    std::shared_lock shared_lock(m_contextMutex);
+    if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
+      return uptr->get();
+    }
+  }
 
+  std::unique_lock unique_lock(m_contextMutex);
   if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
     return uptr->get();
   }
-
-  std::lock_guard lock(m_contextMutex);
-  if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
-    return uptr->get();
-  }
-
-  auto &mutableReg = const_cast<entt::registry &>(m_reg);
 
   auto uptr = std::make_unique<AccessType>();
   auto *ptr = uptr.get();
-  mutableReg.ctx().emplace<std::unique_ptr<AccessType>>(std::move(uptr));
+  m_reg.ctx().emplace<std::unique_ptr<AccessType>>(std::move(uptr));
 
-  const_cast<std::vector<std::pmr::synchronized_pool_resource *> &>(m_pools)
-      .emplace_back(&ptr->pool);
+  m_pools.emplace_back(&ptr->pool);
 
   return ptr;
 }
@@ -303,19 +304,27 @@ template <typename> using AlwaysLock = std::shared_lock<std::shared_mutex>;
 template <typename... Components> struct [[nodiscard]] Lock {
   std::tuple<AlwaysLock<Components>...> locks;
 
-  Lock(std::tuple<AlwaysLock<Components>...> &&l) : locks(std::move(l)) {
+  explicit Lock(std::tuple<AlwaysLock<Components>...> &&l)
+      : locks(std::move(l)) {
     lock();
   }
 
-  Lock(Lock &&other) noexcept : locks(std::move(other.locks)) {}
+  Lock(Lock &&other) noexcept = default;
+  Lock &operator=(Lock &&other) noexcept = default;
+
+  Lock(const Lock &) = delete;
+  Lock &operator=(const Lock &) = delete;
+
+  ~Lock() = default;
 
   void lock() {
     std::apply(
         [](auto &...lk) {
-          if constexpr (sizeof...(lk) > 1)
+          if constexpr (sizeof...(lk) > 1) {
             std::lock(lk...);
-          else if constexpr (sizeof...(lk) == 1)
+          } else if constexpr (sizeof...(lk) == 1) {
             (lk.lock(), ...);
+          }
         },
         locks);
   }
