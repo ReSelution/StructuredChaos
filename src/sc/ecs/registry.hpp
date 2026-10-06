@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <shared_mutex>
+#include <utility>
 
 #include <pfr.hpp>
 
@@ -63,10 +64,16 @@ using Entities =
 template <typename T>
 concept Mutable = !std::is_const_v<T>;
 class Registry {
+  template <typename Component>
+  using StorageFor = entt::storage_for_t<std::remove_const_t<Component>>;
+
   template <typename Component> struct alignas(64) ComponentAccess {
     mutable std::shared_mutex mutex;
     std::pmr::synchronized_pool_resource pool;
-    bool created = false;
+    // Set once on creation. All component operations go through this pointer
+    // instead of m_reg, which would look up the pool table shared by all
+    // components on every call.
+    StorageFor<Component> *storage = nullptr;
   };
 
   static constexpr uint32_t ENTITY_BLOCK_SIZE = 512;
@@ -85,8 +92,8 @@ public:
   Entity create();
 
   template <typename Component> void reserve(size_t count) {
-    auto &s = m_reg.storage<Component>();
-    s.reserve(count);
+    executeWrite<Component>(
+        [&](auto &storage) -> void { storage.reserve(count); });
   }
 
   template <typename It>
@@ -95,8 +102,8 @@ public:
 
   template <typename Component, typename... Args>
   decltype(auto) emplace(const entity e, Args &&...args) {
-    return executeWrite<Component>([&]() -> decltype(auto) {
-      return m_reg.emplace<Component>(e, std::forward<Args>(args)...);
+    return executeWrite<Component>([&](auto &storage) -> decltype(auto) {
+      return storage.emplace(e, std::forward<Args>(args)...);
     });
   }
 
@@ -107,12 +114,13 @@ public:
 
   template <typename Component, typename It, typename DataIt>
   void insert(It first, It last, DataIt dataBegin) {
-    executeWrite<Component>(
-        [&]() -> void { m_reg.insert<Component>(first, last, dataBegin); });
+    executeWrite<Component>([&](auto &storage) -> void {
+      storage.insert(first, last, dataBegin);
+    });
   }
 
   template <typename Component> void erase(entt::entity e) {
-    executeWrite<Component>([&]() { m_reg.erase<Component>(e); });
+    executeWrite<Component>([&](auto &storage) { storage.erase(e); });
   }
 
   template <typename... Components> decltype(auto) get(entt::entity e);
@@ -130,7 +138,8 @@ private:
 
   template <typename Component> auto *getComponentAccess() const;
 
-  template <typename Component> void connectOnDestroy();
+  template <typename Component>
+  static void connectOnDestroy(StorageFor<Component> &storage);
 
   template <typename Component, typename Func>
   decltype(auto) executeWrite(Func &&func);
@@ -142,10 +151,13 @@ private:
   decltype(auto) cexecuteRead(Func &&func) const;
 
   template <typename Component>
-  static void cleanupResources(entt::registry &reg, entt::entity e);
+  static void cleanupResources(StorageFor<Component> &storage,
+                               entt::registry &reg, entt::entity e);
 
   alignas(64) mutable std::shared_mutex m_contextMutex;
-  alignas(64) std::mutex eCreationLock;
+  // Guards entity creation: exclusive while m_reg creates entities and
+  // mEntities is refilled, shared while an entity is handed out.
+  alignas(64) mutable std::shared_mutex m_entityMutex;
   alignas(64) std::atomic<uint32_t> mEntityIdx{ENTITY_BLOCK_SIZE};
   mutable entt::registry m_reg;
   std::array<Entity, ENTITY_BLOCK_SIZE> mEntities{};
@@ -156,7 +168,7 @@ template <typename It>
 void Registry::create(It begin, It end) {
 
   {
-    std::lock_guard lock{eCreationLock};
+    std::unique_lock lock{m_entityMutex};
     m_reg.create(internal::EntityOutputIterator{begin, this},
                  internal::EntityOutputIterator{end, this});
   }
@@ -165,41 +177,34 @@ void Registry::create(It begin, It end) {
 }
 
 template <typename... Components> decltype(auto) Registry::get(entt::entity e) {
-  return executeRead<Components...>(
-      [&]() -> decltype(auto) { return m_reg.get<Components...>(e); });
+  return executeRead<Components...>([&](auto &...storage) -> decltype(auto) {
+    if constexpr (sizeof...(storage) == 1) {
+      return (storage.get(e), ...);
+    } else {
+      return std::forward_as_tuple(storage.get(e)...);
+    }
+  });
 }
 
 template <typename... Components>
 decltype(auto) Registry::cget(entt::entity e) const {
   return cexecuteRead<Components...>(
-      [&]() -> decltype(auto) { return m_reg.get<const Components...>(e); });
+      [&](const auto &...storage) -> decltype(auto) {
+        if constexpr (sizeof...(storage) == 1) {
+          return (storage.get(e), ...);
+        } else {
+          return std::forward_as_tuple(storage.get(e)...);
+        }
+      });
 }
 
 template <typename... Components> auto Registry::view() {
   return View{executeRead<Components...>(
-      [&]() { return m_reg.view<Components...>(); })};
+      [](auto &...storage) { return entt::basic_view{storage...}; })};
 }
 
 template <typename Component> auto *Registry::getComponentAccess() {
-  using AccessType = ComponentAccess<Component>;
-
-  {
-    std::shared_lock shared_lock(m_contextMutex);
-    if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
-      return uptr->get();
-    }
-  }
-
-  std::unique_lock unique_lock(m_contextMutex);
-  if (auto *uptr = m_reg.ctx().find<std::unique_ptr<AccessType>>()) {
-    return uptr->get();
-  }
-
-  auto uptr = std::make_unique<AccessType>();
-  auto *ptr = uptr.get();
-  m_reg.ctx().emplace<std::unique_ptr<AccessType>>(std::move(uptr));
-  m_pools.emplace_back(&ptr->pool);
-  return ptr;
+  return std::as_const(*this).template getComponentAccess<Component>();
 }
 
 template <typename Component> auto *Registry::getComponentAccess() const {
@@ -216,8 +221,14 @@ template <typename Component> auto *Registry::getComponentAccess() const {
     return uptr->get();
   }
 
+  // The only place that touches the pool table of m_reg, serialized by the
+  // exclusive context lock. EnTT keeps a storage at a stable address.
+  auto &storage = m_reg.storage<std::remove_const_t<Component>>();
+  connectOnDestroy<Component>(storage);
+
   auto uptr = std::make_unique<AccessType>();
   auto *ptr = uptr.get();
+  ptr->storage = &storage;
   m_reg.ctx().emplace<std::unique_ptr<AccessType>>(std::move(uptr));
 
   m_pools.emplace_back(&ptr->pool);
@@ -225,7 +236,8 @@ template <typename Component> auto *Registry::getComponentAccess() const {
   return ptr;
 }
 
-template <typename Component> void Registry::connectOnDestroy() {
+template <typename Component>
+void Registry::connectOnDestroy(StorageFor<Component> &storage) {
   constexpr bool has_resource = []() {
     if constexpr (!pfr::is_implicitly_reflectable_v<Component, void>) {
       return false;
@@ -242,14 +254,15 @@ template <typename Component> void Registry::connectOnDestroy() {
   }();
 
   if constexpr (has_resource) {
-    m_reg.on_destroy<Component>()
-        .template connect<&Registry::cleanupResources<Component>>();
+    storage.on_destroy()
+        .template connect<&Registry::cleanupResources<Component>>(storage);
   }
 }
 
 template <typename Component>
-void Registry::cleanupResources(entt::registry &reg, entt::entity e) {
-  auto &comp = reg.get<Component>(e);
+void Registry::cleanupResources(StorageFor<Component> &storage,
+                                entt::registry &, entt::entity e) {
+  auto &comp = storage.get(e);
   pfr::for_each_field(comp, [](auto &field) {
     using FieldType = std::remove_cvref_t<decltype(field)>;
     if constexpr (IsResource<FieldType>) {
@@ -269,32 +282,14 @@ decltype(auto) Registry::executeWrite(Func &&func) {
 
   PoolAnchor::current = &acc->pool;
   std::unique_lock lock(acc->mutex);
-  if (!acc->created) [[unlikely]] {
-    if (!acc->created) {
-      connectOnDestroy<Component>();
-      if constexpr (std::is_void_v<std::invoke_result_t<Func>>) {
-        func();
-        acc->created = true;
-        PoolAnchor::current = nullptr;
-        return;
-      } else {
-        decltype(auto) ret = func();
-        PoolAnchor::current = nullptr;
-
-        acc->created = true;
-        return ret;
-      }
-    }
-  }
-  if constexpr (std::is_void_v<std::invoke_result_t<Func>>) {
-    func();
-    acc->created = true;
+  if constexpr (std::is_void_v<
+                    std::invoke_result_t<Func, StorageFor<Component> &>>) {
+    func(*acc->storage);
     PoolAnchor::current = nullptr;
     return;
   } else {
-    decltype(auto) ret = func();
+    decltype(auto) ret = func(*acc->storage);
     PoolAnchor::current = nullptr;
-    acc->created = true;
     return ret;
   }
 }
@@ -342,10 +337,14 @@ decltype(auto) Registry::executeRead(Func &&func) {
       std::get<ComponentAccess<Components> *>(accessors)->mutex,
       std::defer_lock}...)};
 
-  if constexpr (std::is_void_v<std::invoke_result_t<Func>>) {
-    func();
+  auto call = [&]() -> decltype(auto) {
+    return func(
+        *std::get<ComponentAccess<Components> *>(accessors)->storage...);
+  };
+  if constexpr (std::is_void_v<std::invoke_result_t<decltype(call)>>) {
+    call();
   } else {
-    decltype(auto) result = func();
+    decltype(auto) result = call();
 
     if constexpr (entt::is_tuple_v<std::decay_t<decltype(result)>>) {
       return std::apply(
@@ -369,10 +368,14 @@ decltype(auto) Registry::cexecuteRead(Func &&func) const {
       std::get<ComponentAccess<Components> *>(accessors)->mutex,
       std::defer_lock}...)};
 
-  if constexpr (std::is_void_v<std::invoke_result_t<Func>>) {
-    func();
+  auto call = [&]() -> decltype(auto) {
+    return func(std::as_const(
+        *std::get<ComponentAccess<Components> *>(accessors)->storage)...);
+  };
+  if constexpr (std::is_void_v<std::invoke_result_t<decltype(call)>>) {
+    call();
   } else {
-    decltype(auto) result = func();
+    decltype(auto) result = call();
 
     if constexpr (entt::is_tuple_v<std::decay_t<decltype(result)>>) {
       return std::apply(

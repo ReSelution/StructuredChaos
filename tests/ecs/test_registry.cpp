@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 #include "glm/glm.hpp"
@@ -114,6 +115,26 @@ TEST_CASE("Registry Basic Entity and Component Operations", "[ecs][registry]") {
     auto [lock, pos, vel] = registry.get<Position, Velocity>(ent_id);
     REQUIRE(pos.x == 1.0f);
     REQUIRE(vel.dx == 0.5f);
+  }
+
+  SECTION("Const Access") {
+    auto e = registry.create();
+    const auto ent_id = static_cast<entt::entity>(e);
+
+    registry.emplace<Position>(ent_id, 3.0f, 4.0f);
+    registry.emplace<Velocity>(ent_id, 1.5f, 2.5f);
+
+    const auto &const_registry = registry;
+    {
+      auto [lock, pos] = const_registry.cget<Position>(ent_id);
+      STATIC_REQUIRE(std::is_const_v<std::remove_reference_t<decltype(pos)>>);
+      REQUIRE(pos.y == 4.0f);
+    }
+    {
+      auto [lock, pos, vel] = const_registry.cget<Position, Velocity>(ent_id);
+      REQUIRE(pos.x == 3.0f);
+      REQUIRE(vel.dy == 2.5f);
+    }
   }
 
   SECTION("Erase Component") {
