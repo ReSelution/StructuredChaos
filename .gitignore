@@ -23,3 +23,6 @@ stress_test_logs/
 # --- Betriebssystem-Spezifisches ---
 .DS_Store
 Thumbs.db
+
+/.xwin-cache/
+/.xwin/
