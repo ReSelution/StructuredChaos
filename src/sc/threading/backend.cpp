@@ -18,7 +18,9 @@ inline void on_task_finished() {
   if (outstanding_tasks.fetch_sub(1) == 1 && idle_waiters.load() != 0) {
     // Taking the mutex keeps the notification from slipping in between the
     // waiter's check of the counter and its going to sleep.
-    { std::lock_guard lock(queueMutex); }
+    {
+      std::lock_guard lock(queueMutex);
+    }
     wait_cv.notify_all();
   }
 }
