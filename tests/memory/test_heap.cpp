@@ -25,99 +25,94 @@
 
 namespace {
 
-bool isAligned(const void *ptr, size_t alignment) {
-  return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
-}
+  bool isAligned(const void *ptr, size_t alignment) { return reinterpret_cast<uintptr_t>(ptr) % alignment == 0; }
 
-struct Trivial {
-  int a;
-  double b;
-};
+  struct Trivial {
+    int a;
+    double b;
+  };
 
-struct alignas(64) Wide {
-  std::byte data[64];
-};
+  struct alignas(64) Wide {
+    std::byte data[64];
+  };
 
-// Writes its id into a log when it is destroyed.
-struct Tracked {
-  std::vector<int> *log;
-  int id;
+  // Writes its id into a log when it is destroyed.
+  struct Tracked {
+    std::vector<int> *log;
+    int id;
 
-  Tracked(std::vector<int> *log, int id) : log(log), id(id) {}
-  ~Tracked() { log->push_back(id); }
-};
+    Tracked(std::vector<int> *log, int id) : log(log), id(id) {}
+    ~Tracked() { log->push_back(id); }
+  };
 
-// A type with a destructor and a chosen alignment and size, which notes the
-// address it is destroyed at.
-template <size_t Align, size_t Size> struct alignas(Align) Probe {
-  static inline std::vector<const void *> destroyed;
+  // A type with a destructor and a chosen alignment and size, which notes the
+  // address it is destroyed at.
+  template <size_t Align, size_t Size> struct alignas(Align) Probe {
+    static inline std::vector<const void *> destroyed;
 
-  unsigned char data[Size];
+    unsigned char data[Size];
 
-  ~Probe() { destroyed.push_back(this); }
-};
+    ~Probe() { destroyed.push_back(this); }
+  };
 
-// Counts what passes through it on the way to the default resource.
-struct CountingResource : std::pmr::memory_resource {
-  size_t allocations = 0;
-  size_t deallocations = 0;
+  // Counts what passes through it on the way to the default resource.
+  struct CountingResource : std::pmr::memory_resource {
+    size_t allocations = 0;
+    size_t deallocations = 0;
 
-  void *do_allocate(size_t bytes, size_t alignment) override {
-    ++allocations;
-    return std::pmr::new_delete_resource()->allocate(bytes, alignment);
-  }
-
-  void do_deallocate(void *ptr, size_t bytes, size_t alignment) override {
-    ++deallocations;
-    std::pmr::new_delete_resource()->deallocate(ptr, bytes, alignment);
-  }
-
-  [[nodiscard]] bool
-  do_is_equal(const memory_resource &other) const noexcept override {
-    return this == &other;
-  }
-};
-
-// Looks like a pmr container to the heap and notes when it is destroyed.
-struct FakeContainer {
-  using value_type = int;
-  using allocator_type = std::pmr::polymorphic_allocator<int>;
-
-  static inline int destroyed = 0;
-
-  allocator_type allocator;
-
-  FakeContainer() = default;
-  explicit FakeContainer(allocator_type allocator) : allocator(allocator) {}
-  ~FakeContainer() { ++destroyed; }
-
-  [[nodiscard]] allocator_type get_allocator() const { return allocator; }
-};
-
-// Creates a few objects, overwrites them completely and checks that each one
-// is aligned and destroyed again at the address make() returned.
-template <size_t Align, size_t Size> void checkProbe() {
-  using Type = Probe<Align, Size>;
-  static_assert(alignof(Type) == Align);
-  Type::destroyed.clear();
-
-  std::vector<const void *> made;
-  {
-    sc::Heap heap;
-    for (int i = 0; i < 20; ++i) {
-      Type *object = heap.make<Type>();
-      REQUIRE(isAligned(object, Align));
-      REQUIRE(heap.contains(object));
-      // Must not reach what the heap keeps behind the object.
-      std::memset(object->data, 0xEE, Size);
-      made.push_back(object);
+    void *do_allocate(size_t bytes, size_t alignment) override {
+      ++allocations;
+      return std::pmr::new_delete_resource()->allocate(bytes, alignment);
     }
-    REQUIRE(Type::destroyed.empty());
-  }
 
-  std::ranges::reverse(made);
-  CHECK(Type::destroyed == made);
-}
+    void do_deallocate(void *ptr, size_t bytes, size_t alignment) override {
+      ++deallocations;
+      std::pmr::new_delete_resource()->deallocate(ptr, bytes, alignment);
+    }
+
+    [[nodiscard]] bool do_is_equal(const memory_resource &other) const noexcept override { return this == &other; }
+  };
+
+  // Looks like a pmr container to the heap and notes when it is destroyed.
+  struct FakeContainer {
+    using value_type = int;
+    using allocator_type = std::pmr::polymorphic_allocator<int>;
+
+    static inline int destroyed = 0;
+
+    allocator_type allocator;
+
+    FakeContainer() = default;
+    explicit FakeContainer(allocator_type allocator) : allocator(allocator) {}
+    ~FakeContainer() { ++destroyed; }
+
+    [[nodiscard]] allocator_type get_allocator() const { return allocator; }
+  };
+
+  // Creates a few objects, overwrites them completely and checks that each one
+  // is aligned and destroyed again at the address make() returned.
+  template <size_t Align, size_t Size> void checkProbe() {
+    using Type = Probe<Align, Size>;
+    static_assert(alignof(Type) == Align);
+    Type::destroyed.clear();
+
+    std::vector<const void *> made;
+    {
+      sc::Heap heap;
+      for (int i = 0; i < 20; ++i) {
+        Type *object = heap.make<Type>();
+        REQUIRE(isAligned(object, Align));
+        REQUIRE(heap.contains(object));
+        // Must not reach what the heap keeps behind the object.
+        std::memset(object->data, 0xEE, Size);
+        made.push_back(object);
+      }
+      REQUIRE(Type::destroyed.empty());
+    }
+
+    std::ranges::reverse(made);
+    CHECK(Type::destroyed == made);
+  }
 
 } // namespace
 
@@ -145,28 +140,19 @@ static_assert(!sc::detail::PmrContainer<std::string>);
 static_assert(!sc::detail::PmrContainer<int>);
 static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::vector<int>>);
 static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::string>);
-static_assert(
-    sc::detail::ownsOnlyResourceMemory<std::pmr::vector<std::pmr::string>>);
-static_assert(
-    sc::detail::ownsOnlyResourceMemory<std::pmr::map<int, std::pmr::string>>);
-static_assert(sc::detail::ownsOnlyResourceMemory<
-              std::pmr::unordered_map<std::pmr::string, std::pmr::vector<int>>>);
+static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::vector<std::pmr::string>>);
+static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::map<int, std::pmr::string>>);
+static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::unordered_map<std::pmr::string, std::pmr::vector<int>>>);
 static_assert(!sc::detail::ownsOnlyResourceMemory<std::pmr::vector<Tracked>>);
-static_assert(
-    !sc::detail::ownsOnlyResourceMemory<std::pmr::vector<std::string>>);
-static_assert(!sc::detail::ownsOnlyResourceMemory<
-              std::pmr::map<int, std::vector<int>>>);
-static_assert(!sc::detail::ownsOnlyResourceMemory<
-              std::pmr::vector<std::pmr::vector<Tracked>>>);
+static_assert(!sc::detail::ownsOnlyResourceMemory<std::pmr::vector<std::string>>);
+static_assert(!sc::detail::ownsOnlyResourceMemory<std::pmr::map<int, std::vector<int>>>);
+static_assert(!sc::detail::ownsOnlyResourceMemory<std::pmr::vector<std::pmr::vector<Tracked>>>);
 
-
-TEST_CASE("Heap: allocations are aligned and do not overlap",
-          "[memory][heap]") {
+TEST_CASE("Heap: allocations are aligned and do not overlap", "[memory][heap]") {
   sc::Heap heap;
 
   std::vector<std::pair<std::byte *, size_t>> chunks;
-  for (size_t alignment : {size_t{1}, size_t{8}, size_t{16}, size_t{64},
-                           size_t{4096}}) {
+  for (size_t alignment : {size_t{1}, size_t{8}, size_t{16}, size_t{64}, size_t{4096}}) {
     for (size_t bytes : {size_t{1}, size_t{24}, size_t{100}, size_t{5000}}) {
       auto *ptr = static_cast<std::byte *>(heap.allocate(bytes, alignment));
       REQUIRE(ptr != nullptr);
@@ -183,8 +169,7 @@ TEST_CASE("Heap: allocations are aligned and do not overlap",
   }
 }
 
-TEST_CASE("Heap: the default alignment fits every basic type",
-          "[memory][heap]") {
+TEST_CASE("Heap: the default alignment fits every basic type", "[memory][heap]") {
   sc::Heap heap;
 
   for (size_t bytes : {size_t{16}, size_t{64}, size_t{1000}}) {
@@ -253,8 +238,7 @@ TEST_CASE("Heap: make constructs the object in the heap", "[memory][heap]") {
   CHECK(heap.contains(text));
 }
 
-TEST_CASE("Heap: reset destroys the objects in reverse order",
-          "[memory][heap]") {
+TEST_CASE("Heap: reset destroys the objects in reverse order", "[memory][heap]") {
   std::vector<int> log;
   sc::Heap heap;
 
@@ -291,8 +275,7 @@ TEST_CASE("Heap: the destructor destroys the objects", "[memory][heap]") {
   CHECK(log == std::vector<int>{2, 1});
 }
 
-TEST_CASE("Heap: an object whose constructor throws is not destroyed",
-          "[memory][heap]") {
+TEST_CASE("Heap: an object whose constructor throws is not destroyed", "[memory][heap]") {
   struct Throwing {
     std::vector<int> *log;
 
@@ -311,8 +294,7 @@ TEST_CASE("Heap: an object whose constructor throws is not destroyed",
   CHECK(log == std::vector<int>{2, 1});
 }
 
-TEST_CASE("Heap: objects with a destructor keep their alignment",
-          "[memory][heap]") {
+TEST_CASE("Heap: objects with a destructor keep their alignment", "[memory][heap]") {
   // Sizes that are and are not a multiple of what the heap puts behind them.
   checkProbe<1, 1>();
   checkProbe<1, 3>();
@@ -328,8 +310,7 @@ TEST_CASE("Heap: objects with a destructor keep their alignment",
   checkProbe<4096, 4096>();
 }
 
-TEST_CASE("Heap: an object created by a destructor is destroyed as well",
-          "[memory][heap]") {
+TEST_CASE("Heap: an object created by a destructor is destroyed as well", "[memory][heap]") {
   struct Spawning {
     sc::Heap *heap;
     std::vector<int> *log;
@@ -349,8 +330,7 @@ TEST_CASE("Heap: an object created by a destructor is destroyed as well",
   CHECK(log == std::vector<int>{1, 2});
 }
 
-TEST_CASE("Heap: make destroys every pmr container it created",
-          "[memory][heap]") {
+TEST_CASE("Heap: make destroys every pmr container it created", "[memory][heap]") {
   FakeContainer::destroyed = 0;
 
   SECTION("whatever resource it uses, this heap included") {
@@ -370,8 +350,7 @@ TEST_CASE("Heap: make destroys every pmr container it created",
 
   SECTION("the heap as the value of the elements") {
     CountingResource counting;
-    std::pmr::memory_resource *before =
-        std::pmr::set_default_resource(&counting);
+    std::pmr::memory_resource *before = std::pmr::set_default_resource(&counting);
     {
       sc::Heap heap;
       auto *heaps = heap.make<std::pmr::vector<sc::Heap *>>(3, &heap);
@@ -391,8 +370,7 @@ TEST_CASE("Heap: make destroys every pmr container it created",
     auto *texts = heap.make<std::pmr::vector<std::pmr::string>>(&heap);
     for (int i = 0; i < 1000; ++i) {
       values->push_back(i);
-      texts->emplace_back("text number " + std::to_string(i) +
-                          ", long enough to leave the small buffer");
+      texts->emplace_back("text number " + std::to_string(i) + ", long enough to leave the small buffer");
     }
 
     CHECK(values->back() == 999);
@@ -404,8 +382,7 @@ TEST_CASE("Heap: make destroys every pmr container it created",
   }
 }
 
-TEST_CASE("Heap: makePmr puts the heap in as the allocator",
-          "[memory][heap]") {
+TEST_CASE("Heap: makePmr puts the heap in as the allocator", "[memory][heap]") {
   sc::Heap heap;
 
   SECTION("without further arguments") {
@@ -419,11 +396,9 @@ TEST_CASE("Heap: makePmr puts the heap in as the allocator",
   }
 
   SECTION("behind the arguments of the caller") {
-    auto *text = heap.makePmr<std::pmr::string>(
-        "a string that is too long for the small buffer");
+    auto *text = heap.makePmr<std::pmr::string>("a string that is too long for the small buffer");
     auto *values = heap.makePmr<std::pmr::vector<int>>(100, 3);
-    auto *listed =
-        heap.makePmr<std::pmr::vector<int>>(std::initializer_list<int>{1, 2});
+    auto *listed = heap.makePmr<std::pmr::vector<int>>(std::initializer_list<int>{1, 2});
 
     CHECK(*text == "a string that is too long for the small buffer");
     CHECK(heap.contains(text->data()));
@@ -437,8 +412,7 @@ TEST_CASE("Heap: makePmr puts the heap in as the allocator",
     auto *texts = heap.makePmr<std::pmr::vector<std::pmr::string>>();
     auto *named = heap.makePmr<std::pmr::map<int, std::pmr::string>>();
     for (int i = 0; i < 100; ++i) {
-      texts->emplace_back("text number " + std::to_string(i) +
-                          ", long enough to leave the small buffer");
+      texts->emplace_back("text number " + std::to_string(i) + ", long enough to leave the small buffer");
       named->emplace(i, "a string that is too long for the small buffer");
     }
 
@@ -491,15 +465,12 @@ TEST_CASE("Heap: makePmr puts the heap in as the allocator",
 
   SECTION("a constructor that throws leaves nothing to destroy") {
     FakeContainer::destroyed = 0;
-    CHECK_THROWS_AS(heap.makePmr<std::pmr::vector<int>>(
-                        std::numeric_limits<size_t>::max() / 8),
-                    std::exception);
+    CHECK_THROWS_AS(heap.makePmr<std::pmr::vector<int>>(std::numeric_limits<size_t>::max() / 8), std::exception);
     CHECK(heap.contains(heap.allocate(16)));
   }
 }
 
-TEST_CASE("Heap: a pmr container that needs its destructor gets it",
-          "[memory][heap]") {
+TEST_CASE("Heap: a pmr container that needs its destructor gets it", "[memory][heap]") {
   SECTION("because it uses another resource") {
     CountingResource other;
     {
@@ -532,8 +503,7 @@ TEST_CASE("Heap: a pmr container that needs its destructor gets it",
     std::vector<int> log;
     {
       sc::Heap heap;
-      auto *nested =
-          heap.make<std::pmr::vector<std::pmr::vector<Tracked>>>(&heap);
+      auto *nested = heap.make<std::pmr::vector<std::pmr::vector<Tracked>>>(&heap);
       nested->emplace_back();
       nested->back().reserve(2);
       nested->back().emplace_back(&log, 1);
@@ -564,8 +534,7 @@ TEST_CASE("Heap: make is safe from several threads", "[memory][heap]") {
       for (int t = 0; t < Threads; ++t) {
         workers.emplace_back([&, t] {
           for (int i = 0; i < PerThread; ++i) {
-            results[t].push_back(heap.make<Counted>(
-                &destroyed, std::to_string(t * PerThread + i)));
+            results[t].push_back(heap.make<Counted>(&destroyed, std::to_string((t * PerThread) + i)));
           }
         });
       }
@@ -574,7 +543,7 @@ TEST_CASE("Heap: make is safe from several threads", "[memory][heap]") {
     size_t wrong = 0;
     for (int t = 0; t < Threads; ++t) {
       for (int i = 0; i < PerThread; ++i) {
-        wrong += results[t][i]->text != std::to_string(t * PerThread + i);
+        wrong += static_cast<size_t>(results[t][i]->text != std::to_string((t * PerThread) + i));
       }
     }
     CHECK(wrong == 0);
@@ -655,12 +624,10 @@ TEST_CASE("Heap: is a pmr memory resource", "[memory][heap]") {
     for (int i = 0; i < 100'000; ++i) {
       values.push_back(i);
     }
-    std::pmr::string text("a string that is too long for the small buffer",
-                          &heap);
+    std::pmr::string text("a string that is too long for the small buffer", &heap);
     std::pmr::vector<std::pmr::string> texts(&heap);
     for (int i = 0; i < 100; ++i) {
-      texts.emplace_back("text number " + std::to_string(i) +
-                         ", long enough to leave the small buffer");
+      texts.emplace_back("text number " + std::to_string(i) + ", long enough to leave the small buffer");
     }
 
     CHECK(values.back() == 99'999);
@@ -682,14 +649,10 @@ TEST_CASE("Heap: is a pmr memory resource", "[memory][heap]") {
       if (first == nullptr) {
         first = values.data();
       }
-      const auto distance =
-          reinterpret_cast<uintptr_t>(values.data()) >
-                  reinterpret_cast<uintptr_t>(first)
-              ? reinterpret_cast<uintptr_t>(values.data()) -
-                    reinterpret_cast<uintptr_t>(first)
-              : reinterpret_cast<uintptr_t>(first) -
-                    reinterpret_cast<uintptr_t>(values.data());
-      differentPages += distance >= 64 * 1024;
+      const auto distance = reinterpret_cast<uintptr_t>(values.data()) > reinterpret_cast<uintptr_t>(first)
+                                ? reinterpret_cast<uintptr_t>(values.data()) - reinterpret_cast<uintptr_t>(first)
+                                : reinterpret_cast<uintptr_t>(first) - reinterpret_cast<uintptr_t>(values.data());
+      differentPages += static_cast<size_t>(distance >= static_cast<uintptr_t>(64 * 1024));
     }
     CHECK(differentPages == 0);
   }
@@ -710,8 +673,7 @@ TEST_CASE("Heap: contains only its own blocks", "[memory][heap]") {
   CHECK_FALSE(a.contains(&onStack));
 }
 
-TEST_CASE("Heap: reset frees everything and leaves a usable heap",
-          "[memory][heap]") {
+TEST_CASE("Heap: reset frees everything and leaves a usable heap", "[memory][heap]") {
   sc::Heap heap;
 
   std::vector<void *> blocks;
@@ -723,7 +685,7 @@ TEST_CASE("Heap: reset frees everything and leaves a usable heap",
   REQUIRE(heap.get() != nullptr);
   size_t stillOwned = 0;
   for (void *block : blocks) {
-    stillOwned += heap.contains(block);
+    stillOwned += static_cast<size_t>(heap.contains(block));
   }
   CHECK(stillOwned == 0);
 
@@ -768,9 +730,9 @@ TEST_CASE("Heap: concurrent allocations do not overlap", "[memory][heap]") {
   for (size_t t = 0; t < Threads; ++t) {
     for (std::byte *ptr : results[t]) {
       for (size_t i = 0; i < Bytes; ++i) {
-        corrupted += ptr[i] != static_cast<std::byte>(t + 1);
+        corrupted += static_cast<size_t>(ptr[i] != static_cast<std::byte>(t + 1));
       }
-      foreign += !heap.contains(ptr);
+      foreign += static_cast<size_t>(!heap.contains(ptr));
       all.push_back(ptr);
     }
   }
@@ -780,7 +742,7 @@ TEST_CASE("Heap: concurrent allocations do not overlap", "[memory][heap]") {
   std::ranges::sort(all);
   size_t overlaps = 0;
   for (size_t i = 1; i < all.size(); ++i) {
-    overlaps += all[i - 1] + Bytes > all[i];
+    overlaps += static_cast<size_t>(all[i - 1] + Bytes > all[i]);
   }
   CHECK(overlaps == 0);
 

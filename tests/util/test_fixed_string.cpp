@@ -8,33 +8,33 @@
 
 namespace {
 
-using sc::FixedString;
+  using sc::FixedString;
 
-// Mirrors how Logger and Stat take their names.
-template <FixedString Name> struct Named {
-  static constexpr std::string_view name = Name;
-};
+  // Mirrors how Logger and Stat take their names.
+  template <FixedString Name> struct Named {
+    static constexpr std::string_view name = Name;
+  };
 
-template <FixedString A, FixedString B = ""> struct Pair {
-  static constexpr std::string_view first = A;
-  static constexpr std::string_view second = B;
-};
+  template <FixedString A, FixedString B = ""> struct Pair {
+    static constexpr std::string_view first = A;
+    static constexpr std::string_view second = B;
+  };
 
-// Everything here is usable in constant expressions.
-constexpr FixedString HELLO = "Hello";
-static_assert(sizeof(HELLO) == 6);
-static_assert(HELLO.text() == "Hello");
-static_assert(std::string_view{HELLO} == "Hello");
-static_assert(HELLO.text().size() == 5);
-static_assert(HELLO.buf[5] == '\0');
+  // Everything here is usable in constant expressions.
+  constexpr FixedString HELLO = "Hello";
+  static_assert(sizeof(HELLO) == 6);
+  static_assert(HELLO.text() == "Hello");
+  static_assert(std::string_view{HELLO} == "Hello");
+  static_assert(HELLO.text().size() == 5);
+  static_assert(HELLO.buf[5] == '\0');
 
-static_assert(std::is_same_v<decltype(FixedString{"abc"}), FixedString<4>>);
-static_assert(std::is_same_v<decltype(FixedString{""}), FixedString<1>>);
+  static_assert(std::is_same_v<decltype(FixedString{"abc"}), FixedString<4>>);
+  static_assert(std::is_same_v<decltype(FixedString{""}), FixedString<1>>);
 
-static_assert(std::is_same_v<Named<"Chaos">, Named<"Chaos">>);
-static_assert(!std::is_same_v<Named<"Chaos">, Named<"chaos">>);
-static_assert(!std::is_same_v<Named<"Chaos">, Named<"Chao">>);
-static_assert(!std::is_same_v<Named<"ab">, Named<"ba">>);
+  static_assert(std::is_same_v<Named<"Chaos">, Named<"Chaos">>);
+  static_assert(!std::is_same_v<Named<"Chaos">, Named<"chaos">>);
+  static_assert(!std::is_same_v<Named<"Chaos">, Named<"Chao">>);
+  static_assert(!std::is_same_v<Named<"ab">, Named<"ba">>);
 
 } // namespace
 

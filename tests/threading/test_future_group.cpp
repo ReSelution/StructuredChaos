@@ -19,34 +19,32 @@
 
 namespace {
 
-using sc::threading::FutureGroup;
+  using sc::threading::FutureGroup;
 
-static_assert(std::is_default_constructible_v<FutureGroup<int>>);
-static_assert(std::is_nothrow_move_constructible_v<FutureGroup<int>>);
-static_assert(std::is_nothrow_move_assignable_v<FutureGroup<int>>);
-static_assert(!std::is_copy_constructible_v<FutureGroup<int>>);
-static_assert(!std::is_copy_assignable_v<FutureGroup<int>>);
-static_assert(std::is_same_v<decltype(std::declval<FutureGroup<int> &>().get()),
-                             std::vector<int>>);
-static_assert(
-    std::is_void_v<decltype(std::declval<FutureGroup<void> &>().get())>);
+  static_assert(std::is_default_constructible_v<FutureGroup<int>>);
+  static_assert(std::is_nothrow_move_constructible_v<FutureGroup<int>>);
+  static_assert(std::is_nothrow_move_assignable_v<FutureGroup<int>>);
+  static_assert(!std::is_copy_constructible_v<FutureGroup<int>>);
+  static_assert(!std::is_copy_assignable_v<FutureGroup<int>>);
+  static_assert(std::is_same_v<decltype(std::declval<FutureGroup<int> &>().get()), std::vector<int>>);
+  static_assert(std::is_void_v<decltype(std::declval<FutureGroup<void> &>().get())>);
 
-struct SFOBreaker {
-  std::array<std::byte, 100> weight{};
-};
+  struct SFOBreaker {
+    std::array<std::byte, 100> weight{};
+  };
 
-// A group over fresh promises, which the test resolves by hand.
-template <typename T> struct Pending {
-  std::vector<std::promise<T>> promises;
-  FutureGroup<T> group;
+  // A group over fresh promises, which the test resolves by hand.
+  template <typename T> struct Pending {
+    std::vector<std::promise<T>> promises;
+    FutureGroup<T> group;
 
-  explicit Pending(size_t count) : promises(count) {
-    group.reserve(count);
-    for (auto &p : promises) {
-      group.push(p.get_future());
+    explicit Pending(size_t count) : promises(count) {
+      group.reserve(count);
+      for (auto &p : promises) {
+        group.push(p.get_future());
+      }
     }
-  }
-};
+  };
 
 } // namespace
 
@@ -54,7 +52,7 @@ TEST_CASE("FutureGroup Empty Group", "[threading][future_group]") {
   FutureGroup<int> group;
 
   REQUIRE(group.empty());
-  REQUIRE(group.size() == 0);
+  REQUIRE(group.empty());
   REQUIRE(group.valid_count() == 0);
   REQUIRE(group.completed_count() == 0);
   REQUIRE(group.ready());
@@ -95,8 +93,7 @@ TEST_CASE("FutureGroup Tracks Completion", "[threading][future_group]") {
   SECTION("An Exception Counts As Completed") {
     Pending<int> pending(2);
 
-    pending.promises[0].set_exception(
-        std::make_exception_ptr(std::runtime_error("failed")));
+    pending.promises[0].set_exception(std::make_exception_ptr(std::runtime_error("failed")));
 
     REQUIRE(pending.group.completed_count() == 1);
     REQUIRE_FALSE(pending.group.ready());
@@ -183,8 +180,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
   SECTION("get Rethrows A Stored Exception") {
     Pending<int> pending(3);
     pending.promises[0].set_value(1);
-    pending.promises[1].set_exception(
-        std::make_exception_ptr(std::runtime_error("failed")));
+    pending.promises[1].set_exception(std::make_exception_ptr(std::runtime_error("failed")));
     pending.promises[2].set_value(3);
 
     REQUIRE_THROWS_AS(pending.group.get(), std::runtime_error);
@@ -196,10 +192,8 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
   SECTION("The First Exception In Push Order Wins") {
     Pending<int> pending(3);
     // Resolved back to front, so completion order differs from push order.
-    pending.promises[2].set_exception(
-        std::make_exception_ptr(std::logic_error("second")));
-    pending.promises[1].set_exception(
-        std::make_exception_ptr(std::runtime_error("first")));
+    pending.promises[2].set_exception(std::make_exception_ptr(std::logic_error("second")));
+    pending.promises[1].set_exception(std::make_exception_ptr(std::runtime_error("first")));
     pending.promises[0].set_value(1);
 
     REQUIRE_THROWS_AS(pending.group.get(), std::runtime_error);
@@ -209,8 +203,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
   SECTION("get Waits For The Remaining Futures Before Rethrowing") {
     Pending<int> pending(3);
     std::atomic<bool> all_resolved{false};
-    pending.promises[0].set_exception(
-        std::make_exception_ptr(std::runtime_error("failed")));
+    pending.promises[0].set_exception(std::make_exception_ptr(std::runtime_error("failed")));
 
     std::thread producer([&] {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -228,8 +221,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
   SECTION("Void get Rethrows A Stored Exception") {
     Pending<void> pending(2);
     pending.promises[0].set_value();
-    pending.promises[1].set_exception(
-        std::make_exception_ptr(std::runtime_error("failed")));
+    pending.promises[1].set_exception(std::make_exception_ptr(std::runtime_error("failed")));
 
     REQUIRE_THROWS_AS(pending.group.get(), std::runtime_error);
     REQUIRE(pending.group.valid_count() == 0);
@@ -237,8 +229,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
 
   SECTION("Void get Consumes The Futures Behind A Failure") {
     Pending<void> pending(3);
-    pending.promises[0].set_exception(
-        std::make_exception_ptr(std::runtime_error("failed")));
+    pending.promises[0].set_exception(std::make_exception_ptr(std::runtime_error("failed")));
     pending.promises[1].set_value();
     pending.promises[2].set_value();
 
@@ -328,7 +319,7 @@ TEST_CASE("FutureGroup Ownership", "[threading][future_group]") {
     pending.group.clear();
 
     REQUIRE(pending.group.empty());
-    REQUIRE(pending.group.size() == 0);
+    REQUIRE(pending.group.empty());
     REQUIRE(pending.group.ready());
     REQUIRE(pending.group.progress() == 1.0f);
   }
@@ -339,11 +330,10 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
 
   constexpr size_t task_count = 1000;
   std::vector<int> tasks(task_count);
-  std::iota(tasks.begin(), tasks.end(), 0);
+  std::ranges::iota(tasks, 0);
 
   SECTION("Small Tasks Return One Result Per Item In Order") {
-    FutureGroup<int> group = sc::threading::enqueueBatch(
-        std::move(tasks), [](int, int value) { return value * 2; });
+    FutureGroup<int> group = sc::threading::enqueueBatch(std::move(tasks), [](int, int value) { return value * 2; });
 
     REQUIRE(group.size() == task_count);
 
@@ -358,11 +348,9 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
     SFOBreaker breaker;
     breaker.weight.fill(std::byte{1});
 
-    FutureGroup<size_t> group = sc::threading::enqueueBatch(
-        std::move(tasks), [breaker](int, int value) {
-          return static_cast<size_t>(value) +
-                 std::to_integer<size_t>(breaker.weight[0]);
-        });
+    FutureGroup<size_t> group = sc::threading::enqueueBatch(std::move(tasks), [breaker](int, int value) {
+      return static_cast<size_t>(value) + std::to_integer<size_t>(breaker.weight[0]);
+    });
 
     auto results = group.get();
     REQUIRE(results.size() == task_count);
@@ -372,9 +360,8 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
   }
 
   SECTION("Extra Arguments Are Forwarded") {
-    FutureGroup<int> group = sc::threading::enqueueBatch(
-        std::move(tasks),
-        [](int, int value, int offset) { return value + offset; }, 100);
+    FutureGroup<int> group =
+        sc::threading::enqueueBatch(std::move(tasks), [](int, int value, int offset) { return value + offset; }, 100);
 
     auto results = group.get();
     REQUIRE(results.size() == task_count);
@@ -392,8 +379,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
   }
 
   SECTION("Becomes Ready Once The Pool Is Idle") {
-    auto group = sc::threading::enqueueBatch(
-        std::move(tasks), [](int, int value) { return value; });
+    auto group = sc::threading::enqueueBatch(std::move(tasks), [](int, int value) { return value; });
 
     sc::threading::wait_until_finished();
 
@@ -403,13 +389,12 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
   }
 
   SECTION("A Throwing Task Surfaces Through get") {
-    auto group = sc::threading::enqueueBatch(
-        std::move(tasks), [](int, int value) -> int {
-          if (value == 500) {
-            throw std::runtime_error("task 500");
-          }
-          return value;
-        });
+    auto group = sc::threading::enqueueBatch(std::move(tasks), [](int, int value) -> int {
+      if (value == 500) {
+        throw std::runtime_error("task 500");
+      }
+      return value;
+    });
 
     group.wait();
     REQUIRE(group.ready());
@@ -421,14 +406,13 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
   SECTION("A Throwing Task On The Merged Path Surfaces Through get") {
     SFOBreaker breaker;
 
-    auto group = sc::threading::enqueueBatch(
-        std::move(tasks), [breaker](int, int value) -> int {
-          (void)breaker;
-          if (value == 500) {
-            throw std::runtime_error("task 500");
-          }
-          return value;
-        });
+    auto group = sc::threading::enqueueBatch(std::move(tasks), [breaker](int, int value) -> int {
+      (void)breaker;
+      if (value == 500) {
+        throw std::runtime_error("task 500");
+      }
+      return value;
+    });
 
     REQUIRE_THROWS_AS(group.get(), std::runtime_error);
     REQUIRE(group.valid_count() == 0);

@@ -29,7 +29,7 @@ TEST_CASE("ComponentLock Basic Use", "[ecs][lock]") {
       std::unique_lock guard(lock);
     }
     {
-      std::lock_guard guard(lock);
+      std::scoped_lock guard(lock);
     }
     lock.lock_shared();
     lock.unlock_shared();
@@ -115,8 +115,7 @@ TEST_CASE("ComponentLock Readers Never See A Writer At Work", "[ecs][lock]") {
   REQUIRE(reads.load() > 0);
 }
 
-TEST_CASE("ComponentLock Writer Gets In Between Overlapping Readers",
-          "[ecs][lock]") {
+TEST_CASE("ComponentLock Writer Gets In Between Overlapping Readers", "[ecs][lock]") {
   // Every reader holds the lock much longer than it stays away from it, so
   // with eight of them the lock is practically never free on its own. A
   // writer only gets its turn because new readers stay out while it waits.
@@ -149,10 +148,8 @@ TEST_CASE("ComponentLock Writer Gets In Between Overlapping Readers",
 
   // Generous limit: with the waiting mark this takes a few hundredths of a
   // second. Once the readers stop, the writer finishes either way.
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (written.load(std::memory_order_relaxed) < writes &&
-         std::chrono::steady_clock::now() < deadline) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (written.load(std::memory_order_relaxed) < writes && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   const int reached = written.load();

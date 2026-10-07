@@ -10,47 +10,43 @@
 
 namespace {
 
-struct DestroyPosition {
-  float owner{0.0f};
-};
+  struct DestroyPosition {
+    float owner{0.0f};
+  };
 
-struct DestroyVelocity {
-  float owner{0.0f};
-};
+  struct DestroyVelocity {
+    float owner{0.0f};
+  };
 
-// Counts how often the registry asked it to give up its memory.
-struct CountingResource {
-  static constexpr bool is_resource = true;
-  static inline std::atomic<int> cleared{0};
+  // Counts how often the registry asked it to give up its memory.
+  struct CountingResource {
+    static constexpr bool is_resource = true;
+    static inline std::atomic<int> cleared{0};
 
-  void clear() { cleared.fetch_add(1); }
-};
+    static void clear() { cleared.fetch_add(1); }
+  };
 
-struct DestroyOwner {
-  int id{0};
-  CountingResource resource{};
-};
+  struct DestroyOwner {
+    int id{0};
+    CountingResource resource{};
+  };
 
-float number_of(entt::entity e) {
-  return static_cast<float>(entt::to_entity(e));
-}
+  float number_of(entt::entity e) { return static_cast<float>(entt::to_entity(e)); }
 
-std::vector<sc::ecs::Entity> make_entities(sc::ecs::Registry &registry,
-                                           size_t count) {
-  std::vector<sc::ecs::Entity> entities(count);
-  registry.create(entities.begin(), entities.end());
-  return entities;
-}
-
-template <typename... Components>
-size_t count_of(sc::ecs::Registry &registry) {
-  auto view = registry.view<Components...>();
-  size_t count = 0;
-  for ([[maybe_unused]] auto e : view) {
-    ++count;
+  std::vector<sc::ecs::Entity> make_entities(sc::ecs::Registry &registry, size_t count) {
+    std::vector<sc::ecs::Entity> entities(count);
+    registry.create(entities.begin(), entities.end());
+    return entities;
   }
-  return count;
-}
+
+  template <typename... Components> size_t count_of(sc::ecs::Registry &registry) {
+    auto view = registry.view<Components...>();
+    size_t count = 0;
+    for ([[maybe_unused]] auto e : view) {
+      ++count;
+    }
+    return count;
+  }
 
 } // namespace
 
@@ -99,9 +95,7 @@ TEST_CASE("Registry Destroy", "[ecs][registry][destroy]") {
     bool number_reused = false;
     for (auto e : fresh) {
       REQUIRE(static_cast<entt::entity>(e) != old);
-      number_reused =
-          number_reused || entt::to_entity(static_cast<entt::entity>(e)) ==
-                               entt::to_entity(old);
+      number_reused = number_reused || entt::to_entity(static_cast<entt::entity>(e)) == entt::to_entity(old);
     }
     REQUIRE(number_reused);
     REQUIRE_FALSE(registry.valid(old));
@@ -148,17 +142,14 @@ TEST_CASE("Registry Destroy", "[ecs][registry][destroy]") {
     auto group = registry.group<DestroyPosition, DestroyVelocity>();
     REQUIRE(group.size() == 19);
     bool matching = true;
-    group.raw().each([&](entt::entity e, const DestroyPosition &position,
-                         const DestroyVelocity &velocity) {
-      matching = matching && position.owner == number_of(e) &&
-                 velocity.owner == number_of(e);
+    group.raw().each([&](entt::entity e, const DestroyPosition &position, const DestroyVelocity &velocity) {
+      matching = matching && position.owner == number_of(e) && velocity.owner == number_of(e);
     });
     REQUIRE(matching);
   }
 }
 
-TEST_CASE("Registry Destroy From Several Threads",
-          "[ecs][registry][destroy][threading]") {
+TEST_CASE("Registry Destroy From Several Threads", "[ecs][registry][destroy][threading]") {
   // Every thread destroys its own share of the entities while a reader keeps
   // walking both components and checks that they still belong together.
   constexpr int thread_count = 4;
@@ -166,8 +157,7 @@ TEST_CASE("Registry Destroy From Several Threads",
   constexpr size_t survivors = 500;
 
   sc::ecs::Registry registry;
-  auto entities =
-      make_entities(registry, thread_count * per_thread + survivors);
+  auto entities = make_entities(registry, (thread_count * per_thread) + survivors);
   for (auto e : entities) {
     registry.emplace<DestroyPosition>(e, number_of(e));
     registry.emplace<DestroyVelocity>(e, number_of(e));
@@ -180,8 +170,7 @@ TEST_CASE("Registry Destroy From Several Threads",
   std::thread reader([&]() {
     while (!stop.load(std::memory_order_relaxed)) {
       auto view = registry.view<DestroyPosition, DestroyVelocity>();
-      view.raw().each([&](entt::entity e, const DestroyPosition &position,
-                          const DestroyVelocity &velocity) {
+      view.raw().each([&](entt::entity e, const DestroyPosition &position, const DestroyVelocity &velocity) {
         if (position.owner != number_of(e) || velocity.owner != number_of(e)) {
           mismatches.fetch_add(1, std::memory_order_relaxed);
         }
@@ -193,7 +182,7 @@ TEST_CASE("Registry Destroy From Several Threads",
   for (int t = 0; t < thread_count; ++t) {
     destroyers.emplace_back([&, t]() {
       for (size_t i = 0; i < per_thread; ++i) {
-        if (!registry.destroy(entities[t * per_thread + i])) {
+        if (!registry.destroy(entities[(t * per_thread) + i])) {
           failed.fetch_add(1, std::memory_order_relaxed);
         }
       }

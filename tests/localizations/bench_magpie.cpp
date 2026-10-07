@@ -18,28 +18,27 @@
 
 namespace {
 
-using sc::Magpie;
-using sc::MagpieKey;
+  using sc::Magpie;
+  using sc::MagpieKey;
 
-struct Text {
-  std::string key;
-  std::string value;
-  std::u16string value16;
-};
+  struct Text {
+    std::string key;
+    std::string value;
+    std::u16string value16;
+  };
 
-// Texts of 8 to 71 characters, like the labels and sentences of a game.
-std::vector<Text> make_texts(size_t count, size_t thread) {
-  std::vector<Text> texts;
-  texts.reserve(count);
-  for (size_t i = 0; i < count; ++i) {
-    std::string key = "t" + std::to_string(thread) + "_" + std::to_string(i);
-    std::string value = key + std::string(8 + (i * 7) % 64 - key.size() % 8,
-                                          static_cast<char>('a' + i % 26));
-    std::u16string value16(value.begin(), value.end());
-    texts.push_back({std::move(key), std::move(value), std::move(value16)});
+  // Texts of 8 to 71 characters, like the labels and sentences of a game.
+  std::vector<Text> make_texts(size_t count, size_t thread) {
+    std::vector<Text> texts;
+    texts.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      std::string key = "t" + std::to_string(thread) + "_" + std::to_string(i);
+      std::string value = key + std::string(8 + ((i * 7) % 64) - (key.size() % 8), static_cast<char>('a' + (i % 26)));
+      std::u16string value16(value.begin(), value.end());
+      texts.push_back({.key = std::move(key), .value = std::move(value), .value16 = std::move(value16)});
+    }
+    return texts;
   }
-  return texts;
-}
 
 } // namespace
 
@@ -60,8 +59,7 @@ TEST_CASE("Benchmark: storing texts", "[!benchmark][magpie]") {
   BENCHMARK("storeStrUTF16: 10000 texts, then clear") {
     size_t sum = 0;
     for (const Text &text : texts) {
-      sum +=
-          magpie.storeStrUTF16(text.value16.data(), text.value16.size()).size();
+      sum += magpie.storeStrUTF16(text.value16.data(), text.value16.size()).size();
     }
     magpie.clear();
     return sum;
@@ -78,8 +76,7 @@ TEST_CASE("Benchmark: storing texts", "[!benchmark][magpie]") {
   };
 }
 
-TEST_CASE("Benchmark: filling the table from several threads",
-          "[!benchmark][magpie]") {
+TEST_CASE("Benchmark: filling the table from several threads", "[!benchmark][magpie]") {
   constexpr size_t THREADS = 8;
   constexpr size_t PER_THREAD = 5'000;
   auto &magpie = *Magpie::get();
@@ -96,9 +93,7 @@ TEST_CASE("Benchmark: filling the table from several threads",
         workers.emplace_back([&, t] {
           Magpie::mt_reserve(PER_THREAD);
           for (const Text &text : texts[t]) {
-            magpie.mt_InsertStored(MagpieKey("bench", text.key),
-                                   magpie.storeStr(text.value), "bench",
-                                   text.key);
+            magpie.mt_InsertStored(MagpieKey("bench", text.key), magpie.storeStr(text.value), "bench", text.key);
           }
           magpie.mt_Merge(false);
         });

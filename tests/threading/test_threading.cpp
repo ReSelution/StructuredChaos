@@ -9,6 +9,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "sc/logger/logger.hpp"
@@ -18,83 +19,72 @@
 #include "sc/threading/threading.hpp"
 
 using StressLog = sc::Logger<"StressLog">;
-using BatchThroughput =
-    sc::stats::Stat<"Batch Processing",
-                    sc::stats::Throughput<sc::stats::MetricUnits>>;
+using BatchThroughput = sc::stats::Stat<"Batch Processing", sc::stats::Throughput<sc::stats::MetricUnits>>;
 
 namespace {
 
-struct SFOBreaker {
-  std::array<std::byte, 100> weight;
-};
+  struct SFOBreaker {
+    std::array<std::byte, 100> weight;
+  };
 
-struct TrackedTask {
-  inline static std::atomic<int> copies{0};
-  inline static std::atomic<int> moves{0};
+  struct TrackedTask {
+    inline static std::atomic<int> copies{0};
+    inline static std::atomic<int> moves{0};
 
-  int id;
+    int id;
 
-  TrackedTask(int i) : id(i) {}
+    TrackedTask(int i) : id(i) {}
 
-  TrackedTask(const TrackedTask &o) : id(o.id) { copies++; }
-  TrackedTask(TrackedTask &&o) noexcept : id(o.id) { moves++; }
+    TrackedTask(const TrackedTask &o) : id(o.id) { copies++; }
+    TrackedTask(TrackedTask &&o) noexcept : id(o.id) { moves++; }
 
-  static void reset() {
-    copies = 0;
-    moves = 0;
-  }
-};
-
-struct FastTask {
-  int id;
-  FastTask(int i) : id(i) {}
-};
-
-template <typename TaskType>
-void execute_batch_run(bool force_no_sfo, bool use_detach) {
-  constexpr size_t TASKS = 20000;
-  std::vector<TaskType> tasks;
-  tasks.reserve(TASKS);
-  for (int i = 0; i < static_cast<int>(TASKS); ++i) {
-    tasks.emplace_back(i);
-  }
-
-  SFOBreaker breaker;
-
-  BatchThroughput::reset();
-  BatchThroughput::start();
-
-  sc::threading::PoolThroughput::m_storage.value.store(
-      0, std::memory_order_relaxed);
-  sc::threading::PoolThroughput::m_storage.accumulated_ns.store(
-      0, std::memory_order_relaxed);
-  sc::threading::PoolThroughput::m_storage.running.store(
-      false, std::memory_order_relaxed);
-  sc::threading::PoolThroughput::start();
-
-  if (use_detach) {
-    if (force_no_sfo) {
-      sc::threading::detachBatch(
-          std::move(tasks), [breaker](int id, TaskType t) { (void)breaker; },
-          nullptr);
-    } else {
-      sc::threading::detachBatch(
-          std::move(tasks), [](int id, TaskType t) {}, nullptr);
+    static void reset() {
+      copies = 0;
+      moves = 0;
     }
-  } else {
-    if (force_no_sfo) {
-      auto f = sc::threading::enqueueBatch(
-          std::move(tasks), [breaker](int id, TaskType t) { (void)breaker; });
-    } else {
-      auto f = sc::threading::enqueueBatch(std::move(tasks),
-                                           [](int id, TaskType t) {});
-    }
-  }
+  };
 
-  BatchThroughput::record(TASKS);
-  BatchThroughput::stop();
-  sc::threading::wait_until_finished();
-}
+  struct FastTask {
+    int id;
+    FastTask(int i) : id(i) {}
+  };
+
+  template <typename TaskType> void execute_batch_run(bool force_no_sfo, bool use_detach) {
+    constexpr size_t TASKS = 20000;
+    std::vector<TaskType> tasks;
+    tasks.reserve(TASKS);
+    for (int i = 0; std::cmp_less(i, TASKS); ++i) {
+      tasks.emplace_back(i);
+    }
+
+    SFOBreaker breaker;
+
+    BatchThroughput::reset();
+    BatchThroughput::start();
+
+    sc::threading::PoolThroughput::m_storage.value.store(0, std::memory_order_relaxed);
+    sc::threading::PoolThroughput::m_storage.accumulated_ns.store(0, std::memory_order_relaxed);
+    sc::threading::PoolThroughput::m_storage.running.store(false, std::memory_order_relaxed);
+    sc::threading::PoolThroughput::start();
+
+    if (use_detach) {
+      if (force_no_sfo) {
+        sc::threading::detachBatch(std::move(tasks), [breaker](int id, TaskType t) { (void)breaker; }, nullptr);
+      } else {
+        sc::threading::detachBatch(std::move(tasks), [](int id, TaskType t) {}, nullptr);
+      }
+    } else {
+      if (force_no_sfo) {
+        auto f = sc::threading::enqueueBatch(std::move(tasks), [breaker](int id, TaskType t) { (void)breaker; });
+      } else {
+        auto f = sc::threading::enqueueBatch(std::move(tasks), [](int id, TaskType t) {});
+      }
+    }
+
+    BatchThroughput::record(TASKS);
+    BatchThroughput::stop();
+    sc::threading::wait_until_finished();
+  }
 
 } // namespace
 
@@ -106,12 +96,11 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
   SECTION("Verify enqueueBatch Executes All Tasks") {
     std::atomic<size_t> executed_counter{0};
     std::vector<int> tasks(task_count);
-    std::iota(tasks.begin(), tasks.end(), 0);
+    std::ranges::iota(tasks, 0);
 
-    auto future = sc::threading::enqueueBatch(
-        std::move(tasks), [&executed_counter](int thread_id, int task_val) {
-          executed_counter.fetch_add(1, std::memory_order_relaxed);
-        });
+    auto future = sc::threading::enqueueBatch(std::move(tasks), [&executed_counter](int thread_id, int task_val) {
+      executed_counter.fetch_add(1, std::memory_order_relaxed);
+    });
 
     sc::threading::wait_until_finished();
 
@@ -121,13 +110,11 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
   SECTION("Verify detachBatch Executes All Tasks") {
     std::atomic<size_t> executed_counter{0};
     std::vector<int> tasks(task_count);
-    std::iota(tasks.begin(), tasks.end(), 0);
+    std::ranges::iota(tasks, 0);
 
     sc::threading::detachBatch(
         std::move(tasks),
-        [&executed_counter](int thread_id, int task_val) {
-          executed_counter.fetch_add(1, std::memory_order_relaxed);
-        },
+        [&executed_counter](int thread_id, int task_val) { executed_counter.fetch_add(1, std::memory_order_relaxed); },
         nullptr);
 
     sc::threading::wait_until_finished();
@@ -138,12 +125,12 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
   SECTION("Verify Correct Data Payload Passed To Worker") {
     std::atomic<bool> data_valid{true};
     std::vector<int> tasks(task_count);
-    std::iota(tasks.begin(), tasks.end(), 0);
+    std::ranges::iota(tasks, 0);
 
     sc::threading::detachBatch(
         std::move(tasks),
         [&data_valid](int thread_id, int task_val) {
-          if (task_val < 0 || task_val >= static_cast<int>(task_count)) {
+          if (task_val < 0 || std::cmp_greater_equal(task_val, task_count)) {
             data_valid.store(false, std::memory_order_relaxed);
           }
         },
@@ -155,8 +142,7 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
   }
 }
 
-TEST_CASE("Threading Efficiency Correctness",
-          "[threading][efficiency][verification]") {
+TEST_CASE("Threading Efficiency Correctness", "[threading][efficiency][verification]") {
   sc::threading::init();
 
   SECTION("SFO Path - Batch") {
@@ -190,8 +176,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
   SECTION("Runs Task With Arguments") {
     std::atomic<int> result{0};
 
-    sc::threading::detach(
-        [&result](int thread_id, int a, int b) { result.store(a + b); }, 40, 2);
+    sc::threading::detach([&result](int thread_id, int a, int b) { result.store(a + b); }, 40, 2);
     sc::threading::wait_until_finished();
 
     REQUIRE(result.load() == 42);
@@ -201,11 +186,8 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     std::atomic<size_t> weight_size{0};
     SFOBreaker breaker{};
 
-    sc::threading::detach(
-        [&weight_size](int thread_id, const SFOBreaker &b) {
-          weight_size.store(b.weight.size());
-        },
-        breaker);
+    sc::threading::detach([&weight_size](int thread_id, const SFOBreaker &b) { weight_size.store(b.weight.size()); },
+                          breaker);
     sc::threading::wait_until_finished();
 
     REQUIRE(weight_size.load() == breaker.weight.size());
@@ -214,10 +196,8 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
   SECTION("Accepts A Priority") {
     std::atomic<int> executed{0};
 
-    sc::threading::detach<sc::threading::Priority::High>(
-        [&executed](int thread_id) { executed.fetch_add(1); });
-    sc::threading::detach<sc::threading::Priority::Low>(
-        [&executed](int thread_id) { executed.fetch_add(1); });
+    sc::threading::detach<sc::threading::Priority::High>([&executed](int thread_id) { executed.fetch_add(1); });
+    sc::threading::detach<sc::threading::Priority::Low>([&executed](int thread_id) { executed.fetch_add(1); });
     sc::threading::wait_until_finished();
 
     REQUIRE(executed.load() == 2);
@@ -228,9 +208,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     std::atomic<int> executed{0};
 
     for (int i = 0; i < task_count; ++i) {
-      sc::threading::detach([&executed](int thread_id) {
-        executed.fetch_add(1, std::memory_order_relaxed);
-      });
+      sc::threading::detach([&executed](int thread_id) { executed.fetch_add(1, std::memory_order_relaxed); });
     }
     sc::threading::wait_until_finished();
 
@@ -241,13 +219,8 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     std::atomic<int> executed{0};
     SFOBreaker breaker{};
 
-    sc::threading::detach(
-        [](int thread_id) { throw std::runtime_error("small task"); });
-    sc::threading::detach(
-        [](int thread_id, const SFOBreaker &) {
-          throw std::runtime_error("large task");
-        },
-        breaker);
+    sc::threading::detach([](int thread_id) { throw std::runtime_error("small task"); });
+    sc::threading::detach([](int thread_id, const SFOBreaker &) { throw std::runtime_error("large task"); }, breaker);
     sc::threading::detach([&executed](int thread_id) { executed.store(1); });
     sc::threading::wait_until_finished();
 
@@ -259,9 +232,7 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
   sc::threading::init();
 
   SECTION("Returns The Result Through The Future") {
-    auto future =
-        sc::threading::enqueue([](int thread_id, int a, int b) { return a * b; },
-                               6, 7);
+    auto future = sc::threading::enqueue([](int thread_id, int a, int b) { return a * b; }, 6, 7);
 
     REQUIRE(future.get() == 42);
   }
@@ -269,8 +240,7 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
   SECTION("Completes A Void Future") {
     std::atomic<bool> executed{false};
 
-    std::future<void> future = sc::threading::enqueue(
-        [&executed](int thread_id) { executed.store(true); });
+    std::future<void> future = sc::threading::enqueue([&executed](int thread_id) { executed.store(true); });
     future.get();
 
     REQUIRE(executed.load());
@@ -294,8 +264,8 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
   }
 
   SECTION("Accepts A Priority") {
-    auto future = sc::threading::enqueue<sc::threading::Priority::High>(
-        [](int thread_id) { return std::string{"high"}; });
+    auto future =
+        sc::threading::enqueue<sc::threading::Priority::High>([](int thread_id) { return std::string{"high"}; });
 
     REQUIRE(future.get() == "high");
   }
@@ -309,13 +279,9 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
   SECTION("Forwards Exceptions Through The Future") {
     SFOBreaker breaker{};
 
-    auto small_task = sc::threading::enqueue(
-        [](int thread_id) -> int { throw std::runtime_error("small task"); });
+    auto small_task = sc::threading::enqueue([](int thread_id) -> int { throw std::runtime_error("small task"); });
     auto large_task = sc::threading::enqueue(
-        [](int thread_id, const SFOBreaker &) -> int {
-          throw std::runtime_error("large task");
-        },
-        breaker);
+        [](int thread_id, const SFOBreaker &) -> int { throw std::runtime_error("large task"); }, breaker);
 
     REQUIRE_THROWS_AS(small_task.get(), std::runtime_error);
     REQUIRE_THROWS_AS(large_task.get(), std::runtime_error);
@@ -328,9 +294,8 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
     futures.reserve(task_count);
 
     for (int i = 0; i < task_count; ++i) {
-      futures.push_back(sc::threading::enqueue([&executed](int thread_id) {
-        executed.fetch_add(1, std::memory_order_relaxed);
-      }));
+      futures.push_back(
+          sc::threading::enqueue([&executed](int thread_id) { executed.fetch_add(1, std::memory_order_relaxed); }));
     }
     sc::threading::wait_until_finished();
 
@@ -338,19 +303,14 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
   }
 }
 
-TEST_CASE("Threading Raw Speed Benchmarks",
-          "[threading][efficiency][benchmark]") {
+TEST_CASE("Threading Raw Speed Benchmarks", "[threading][efficiency][benchmark]") {
   sc::threading::init();
 
   BENCHMARK("SFO Path - Batch") { execute_batch_run<FastTask>(false, false); };
 
   BENCHMARK("SFO Path - Detach") { execute_batch_run<FastTask>(false, true); };
 
-  BENCHMARK("Merged Path (No SFO) - Batch") {
-    execute_batch_run<FastTask>(true, false);
-  };
+  BENCHMARK("Merged Path (No SFO) - Batch") { execute_batch_run<FastTask>(true, false); };
 
-  BENCHMARK("Merged Path (No SFO) - Detach") {
-    execute_batch_run<FastTask>(true, true);
-  };
+  BENCHMARK("Merged Path (No SFO) - Detach") { execute_batch_run<FastTask>(true, true); };
 }

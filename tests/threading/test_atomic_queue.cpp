@@ -8,33 +8,29 @@
 
 namespace {
 
-struct MoveOnlyType {
-  int value;
-  explicit MoveOnlyType(int v) : value(v) {}
-  MoveOnlyType(const MoveOnlyType &) = delete;
-  MoveOnlyType &operator=(const MoveOnlyType &) = delete;
-  MoveOnlyType(MoveOnlyType &&) noexcept = default;
-  MoveOnlyType &operator=(MoveOnlyType &&) noexcept = default;
-};
+  struct MoveOnlyType {
+    int value;
+    explicit MoveOnlyType(int v) : value(v) {}
+    MoveOnlyType(const MoveOnlyType &) = delete;
+    MoveOnlyType &operator=(const MoveOnlyType &) = delete;
+    MoveOnlyType(MoveOnlyType &&) noexcept = default;
+    MoveOnlyType &operator=(MoveOnlyType &&) noexcept = default;
+  };
 
-struct LifetimeTracker {
-  inline static std::atomic<int> instances{0};
-  int value{0};
+  struct LifetimeTracker {
+    inline static std::atomic<int> instances{0};
+    int value{0};
 
-  explicit LifetimeTracker(int v) : value(v) {
-    instances.fetch_add(1, std::memory_order_relaxed);
-  }
-  ~LifetimeTracker() { instances.fetch_sub(1, std::memory_order_relaxed); }
+    explicit LifetimeTracker(int v) : value(v) { instances.fetch_add(1, std::memory_order_relaxed); }
+    ~LifetimeTracker() { instances.fetch_sub(1, std::memory_order_relaxed); }
 
-  LifetimeTracker(const LifetimeTracker &o) : value(o.value) {
-    instances.fetch_add(1, std::memory_order_relaxed);
-  }
-  LifetimeTracker(LifetimeTracker &&o) noexcept : value(o.value) {
-    instances.fetch_add(1, std::memory_order_relaxed);
-  }
-  LifetimeTracker &operator=(const LifetimeTracker &) = default;
-  LifetimeTracker &operator=(LifetimeTracker &&) noexcept = default;
-};
+    LifetimeTracker(const LifetimeTracker &o) : value(o.value) { instances.fetch_add(1, std::memory_order_relaxed); }
+    LifetimeTracker(LifetimeTracker &&o) noexcept : value(o.value) {
+      instances.fetch_add(1, std::memory_order_relaxed);
+    }
+    LifetimeTracker &operator=(const LifetimeTracker &) = default;
+    LifetimeTracker &operator=(LifetimeTracker &&) noexcept = default;
+  };
 
 } // namespace
 
@@ -44,7 +40,7 @@ TEST_CASE("AtomicQueue Basic Operations", "[threading][atomic_queue]") {
   SECTION("Push and Pop Single Element") {
     AtomicQueue<int, 64> queue;
     REQUIRE(queue.empty());
-    REQUIRE(queue.size() == 0);
+    REQUIRE(queue.empty());
 
     queue.push(42);
     REQUIRE_FALSE(queue.empty());
@@ -151,7 +147,7 @@ TEST_CASE("AtomicQueue Stress and Wrap-Around", "[threading][atomic_queue]") {
     for (int p = 0; p < num_producers; ++p) {
       threads.emplace_back([&queue, p]() {
         for (int i = 0; i < items_per_producer; ++i) {
-          queue.push(p * items_per_producer + i);
+          queue.push((p * items_per_producer) + i);
         }
       });
     }
@@ -237,7 +233,7 @@ TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
     for (int p = 0; p < num_producers; ++p) {
       threads.emplace_back([&queue, p]() {
         for (int i = 0; i < items_per_producer; ++i) {
-          queue.push(static_cast<int64_t>(p) * items_per_producer + i);
+          queue.push((static_cast<int64_t>(p) * items_per_producer) + i);
         }
       });
     }
@@ -267,8 +263,7 @@ TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
       t.join();
     }
 
-    const int64_t expected_sum =
-        static_cast<int64_t>(total_items) * (total_items - 1) / 2;
+    const int64_t expected_sum = static_cast<int64_t>(total_items) * (total_items - 1) / 2;
     REQUIRE(consumed_count.load() == total_items);
     REQUIRE(sum_consumed.load() == expected_sum);
     REQUIRE(order_ok.load());

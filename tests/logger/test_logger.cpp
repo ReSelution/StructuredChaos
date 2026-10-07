@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <numbers>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -14,55 +15,53 @@
 
 namespace {
 
-// All log files of this test program go to a directory of their own, which
-// is removed again when the program ends. Set up before main(), so before any
-// logger can exist.
-struct LogDirectory {
-  std::filesystem::path path;
+  // All log files of this test program go to a directory of their own, which
+  // is removed again when the program ends. Set up before main(), so before any
+  // logger can exist.
+  struct LogDirectory {
+    std::filesystem::path path;
 
-  LogDirectory() {
-    const auto stamp =
-        std::chrono::steady_clock::now().time_since_epoch().count();
-    path = std::filesystem::temp_directory_path() /
-           ("sc_logger_test_" + std::to_string(stamp));
-    sc::setLogDirectory(path);
+    LogDirectory() {
+      const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+      path = std::filesystem::temp_directory_path() / ("sc_logger_test_" + std::to_string(stamp));
+      sc::setLogDirectory(path);
+    }
+
+    ~LogDirectory() {
+      // Best effort: where open files cannot be removed, some are left behind.
+      std::error_code ec;
+      std::filesystem::remove_all(path, ec);
+    }
+  };
+
+  const LogDirectory LOG_DIRECTORY_OWNER;
+  const std::filesystem::path &LOG_DIRECTORY = LOG_DIRECTORY_OWNER.path;
+
+  std::vector<std::string> lines_of(const std::string &module) {
+    std::ifstream file(LOG_DIRECTORY / (module + ".log"));
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(file, line);) {
+      lines.push_back(line);
+    }
+    return lines;
   }
 
-  ~LogDirectory() {
-    // Best effort: where open files cannot be removed, some are left behind.
-    std::error_code ec;
-    std::filesystem::remove_all(path, ec);
+  bool matches(const std::string &line, const std::string &pattern) {
+    return std::regex_match(line, std::regex(pattern));
   }
-};
 
-const LogDirectory LOG_DIRECTORY_OWNER;
-const std::filesystem::path &LOG_DIRECTORY = LOG_DIRECTORY_OWNER.path;
+  // The start of every line in a log file: the time of day.
+  const std::string TIME = R"(\[\d\d:\d\d:\d\d\] )";
 
-std::vector<std::string> lines_of(const std::string &module) {
-  std::ifstream file(LOG_DIRECTORY / (module + ".log"));
-  std::vector<std::string> lines;
-  for (std::string line; std::getline(file, line);) {
-    lines.push_back(line);
-  }
-  return lines;
-}
+  struct FrameStat {
+    static constexpr std::string_view name() { return "Frames"; }
+    static std::string str() { return "60"; }
+  };
 
-bool matches(const std::string &line, const std::string &pattern) {
-  return std::regex_match(line, std::regex(pattern));
-}
-
-// The start of every line in a log file: the time of day.
-const std::string TIME = R"(\[\d\d:\d\d:\d\d\] )";
-
-struct FrameStat {
-  static constexpr std::string_view name() { return "Frames"; }
-  static std::string str() { return "60"; }
-};
-
-struct MemoryStat {
-  static constexpr std::string_view name() { return "Memory"; }
-  static std::string str() { return "12 MiB"; }
-};
+  struct MemoryStat {
+    static constexpr std::string_view name() { return "Memory"; }
+    static std::string str() { return "12 MiB"; }
+  };
 
 } // namespace
 
@@ -96,7 +95,7 @@ TEST_CASE("Logger Formats Its Arguments", "[logger]") {
   Log::init(spdlog::level::off);
 
   Log::info("{} + {} = {}", 1, 2, 3);
-  Log::info("{} is {:.2f}", std::string("pi"), 3.14159);
+  Log::info("{} is {:.2f}", std::string("pi"), std::numbers::pi);
   Log::flush();
 
   const auto lines = lines_of("TestFormat");
@@ -151,8 +150,7 @@ TEST_CASE("Logger Timer", "[logger]") {
   {
     // Format string and argument are temporaries that are gone long before
     // the timer logs.
-    auto timer = Log::time(std::string("{} to load ") + "{}",
-                           std::string("a save game with a rather long name"));
+    auto timer = Log::time(std::string("{} to load ") + "{}", std::string("a save game with a rather long name"));
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   {
@@ -162,12 +160,8 @@ TEST_CASE("Logger Timer", "[logger]") {
 
   const auto lines = lines_of("TestTimer");
   REQUIRE(lines.size() == 2);
-  REQUIRE(matches(
-      lines[0],
-      TIME +
-          R"(\[info\]: \d+\.\d\d(ns|µs|ms|s) to load a save game with a rather long name)"));
-  REQUIRE(matches(lines[1],
-                  TIME + R"(\[warning\]: \d+\.\d\d(ns|µs|ms|s) in total)"));
+  REQUIRE(matches(lines[0], TIME + R"(\[info\]: \d+\.\d\d(ns|µs|ms|s) to load a save game with a rather long name)"));
+  REQUIRE(matches(lines[1], TIME + R"(\[warning\]: \d+\.\d\d(ns|µs|ms|s) in total)"));
 }
 
 TEST_CASE("Logger Stats", "[logger]") {
@@ -182,9 +176,7 @@ TEST_CASE("Logger Stats", "[logger]") {
 
   const auto lines = lines_of("TestStats");
   REQUIRE(lines.size() == 2);
-  REQUIRE(matches(
-      lines[0],
-      TIME + R"(\[info\]: after frame 3 -> \[Frames: 60 \| Memory: 12 MiB\])"));
+  REQUIRE(matches(lines[0], TIME + R"(\[info\]: after frame 3 -> \[Frames: 60 \| Memory: 12 MiB\])"));
   REQUIRE(matches(lines[1], TIME + R"(\[warning\]: \[Frames: 60\])"));
 }
 
@@ -192,7 +184,9 @@ TEST_CASE("Logger Survives A Log File It Cannot Open", "[logger]") {
   // A directory below a regular file can never be created.
   const auto blocker = LOG_DIRECTORY / "blocker";
   std::filesystem::create_directories(LOG_DIRECTORY);
-  { std::ofstream file(blocker); }
+  {
+    std::ofstream file(blocker);
+  }
 
   sc::setLogDirectory(blocker / "below");
   using Log = sc::Logger<"TestUnwritable">;

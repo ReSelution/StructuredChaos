@@ -27,87 +27,84 @@
 
 namespace {
 
-constexpr size_t FIRST_BLOCK = 16 * 1024;
+  constexpr size_t FIRST_BLOCK = static_cast<const size_t>(16 * 1024);
 
-// Writes to the block, so that a block that was never mapped costs something.
-inline uintptr_t touch(void *ptr) {
-  *static_cast<unsigned char *>(ptr) = 1;
-  return reinterpret_cast<uintptr_t>(ptr);
-}
-
-uintptr_t fill(sc::Heap &heap, size_t count, size_t bytes) {
-  uintptr_t sum = 0;
-  for (size_t i = 0; i < count; ++i) {
-    sum += touch(heap.allocate(bytes, 8));
+  // Writes to the block, so that a block that was never mapped costs something.
+  inline uintptr_t touch(void *ptr) {
+    *static_cast<unsigned char *>(ptr) = 1;
+    return reinterpret_cast<uintptr_t>(ptr);
   }
-  return sum;
-}
 
-uintptr_t heap_scope(size_t count, size_t bytes) {
-  sc::Heap heap;
-  return fill(heap, count, bytes);
-}
-
-uintptr_t reset_scope(sc::Heap &heap, size_t count, size_t bytes) {
-  uintptr_t sum = fill(heap, count, bytes);
-  heap.reset();
-  return sum;
-}
-
-uintptr_t mi_heap_scope(size_t count, size_t bytes) {
-  mi_heap_t *heap = mi_heap_new();
-  uintptr_t sum = 0;
-  for (size_t i = 0; i < count; ++i) {
-    sum += touch(mi_heap_malloc(heap, bytes));
+  uintptr_t fill(sc::Heap &heap, size_t count, size_t bytes) {
+    uintptr_t sum = 0;
+    for (size_t i = 0; i < count; ++i) {
+      sum += touch(heap.allocate(bytes, 8));
+    }
+    return sum;
   }
-  mi_heap_destroy(heap);
-  return sum;
-}
 
-uintptr_t malloc_scope(std::vector<void *> &blocks, size_t bytes) {
-  uintptr_t sum = 0;
-  for (void *&block : blocks) {
-    block = mi_malloc(bytes);
-    sum += touch(block);
+  uintptr_t heap_scope(size_t count, size_t bytes) {
+    sc::Heap heap;
+    return fill(heap, count, bytes);
   }
-  for (void *block : blocks) {
-    mi_free(block);
+
+  uintptr_t reset_scope(sc::Heap &heap, size_t count, size_t bytes) {
+    uintptr_t sum = fill(heap, count, bytes);
+    heap.reset();
+    return sum;
   }
-  return sum;
-}
 
-uintptr_t pmr_scope(size_t count, size_t bytes) {
-  std::pmr::monotonic_buffer_resource resource(FIRST_BLOCK);
-  uintptr_t sum = 0;
-  for (size_t i = 0; i < count; ++i) {
-    sum += touch(resource.allocate(bytes, 8));
+  uintptr_t mi_heap_scope(size_t count, size_t bytes) {
+    mi_heap_t *heap = mi_heap_new();
+    uintptr_t sum = 0;
+    for (size_t i = 0; i < count; ++i) {
+      sum += touch(mi_heap_malloc(heap, bytes));
+    }
+    mi_heap_destroy(heap);
+    return sum;
   }
-  return sum;
-}
 
-void run_scopes(size_t count, size_t bytes) {
-  const std::string label =
-      std::to_string(count) + " x " + std::to_string(bytes) + " B";
-  std::vector<void *> blocks(count);
-  sc::Heap reused;
-
-  BENCHMARK("Heap:          " + label) { return heap_scope(count, bytes); };
-  BENCHMARK("Heap, reset:   " + label) {
-    return reset_scope(reused, count, bytes);
-  };
-  BENCHMARK("mi_heap:       " + label) { return mi_heap_scope(count, bytes); };
-  BENCHMARK("mi_malloc:     " + label) { return malloc_scope(blocks, bytes); };
-  BENCHMARK("pmr monotonic: " + label) { return pmr_scope(count, bytes); };
-}
-
-// Runs work on every thread at once and waits for all of them.
-template <typename Work> void on_threads(size_t threads, Work work) {
-  std::vector<std::jthread> workers;
-  workers.reserve(threads);
-  for (size_t t = 0; t < threads; ++t) {
-    workers.emplace_back(work);
+  uintptr_t malloc_scope(std::vector<void *> &blocks, size_t bytes) {
+    uintptr_t sum = 0;
+    for (void *&block : blocks) {
+      block = mi_malloc(bytes);
+      sum += touch(block);
+    }
+    for (void *block : blocks) {
+      mi_free(block);
+    }
+    return sum;
   }
-}
+
+  uintptr_t pmr_scope(size_t count, size_t bytes) {
+    std::pmr::monotonic_buffer_resource resource(FIRST_BLOCK);
+    uintptr_t sum = 0;
+    for (size_t i = 0; i < count; ++i) {
+      sum += touch(resource.allocate(bytes, 8));
+    }
+    return sum;
+  }
+
+  void run_scopes(size_t count, size_t bytes) {
+    const std::string label = std::to_string(count) + " x " + std::to_string(bytes) + " B";
+    std::vector<void *> blocks(count);
+    sc::Heap reused;
+
+    BENCHMARK("Heap:          " + label) { return heap_scope(count, bytes); };
+    BENCHMARK("Heap, reset:   " + label) { return reset_scope(reused, count, bytes); };
+    BENCHMARK("mi_heap:       " + label) { return mi_heap_scope(count, bytes); };
+    BENCHMARK("mi_malloc:     " + label) { return malloc_scope(blocks, bytes); };
+    BENCHMARK("pmr monotonic: " + label) { return pmr_scope(count, bytes); };
+  }
+
+  // Runs work on every thread at once and waits for all of them.
+  template <typename Work> void on_threads(size_t threads, Work work) {
+    std::vector<std::jthread> workers;
+    workers.reserve(threads);
+    for (size_t t = 0; t < threads; ++t) {
+      workers.emplace_back(work);
+    }
+  }
 
 } // namespace
 
@@ -203,11 +200,10 @@ TEST_CASE("Benchmark: one scope of pmr containers", "[!benchmark][memory]") {
 }
 
 TEST_CASE("Benchmark: one scope of large blocks", "[!benchmark][memory]") {
-  run_scopes(16, 1024 * 1024);
+  run_scopes(16, static_cast<size_t>(1024 * 1024));
 }
 
-TEST_CASE("Benchmark: every thread with its own scopes",
-          "[!benchmark][memory]") {
+TEST_CASE("Benchmark: every thread with its own scopes", "[!benchmark][memory]") {
   constexpr size_t THREADS = 8;
   constexpr size_t SCOPES = 200;
   constexpr size_t COUNT = 1'000;
@@ -224,8 +220,7 @@ TEST_CASE("Benchmark: every thread with its own scopes",
   };
 }
 
-TEST_CASE("Benchmark: all threads share one allocator",
-          "[!benchmark][memory]") {
+TEST_CASE("Benchmark: all threads share one allocator", "[!benchmark][memory]") {
   constexpr size_t THREADS = 8;
   constexpr size_t COUNT = 20'000;
   constexpr size_t BYTES = 64;

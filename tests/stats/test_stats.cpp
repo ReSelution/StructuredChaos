@@ -23,38 +23,34 @@
 
 namespace {
 
-using namespace std::chrono_literals;
-using sc::stats::StatsEnabled;
+  using namespace std::chrono_literals;
+  using sc::stats::StatsEnabled;
 
-using Metric = sc::stats::ChaosFormatter<sc::stats::MetricUnits>;
-using Data = sc::stats::ChaosFormatter<sc::stats::DataUnits>;
+  using Metric = sc::stats::ChaosFormatter<sc::stats::MetricUnits>;
+  using Data = sc::stats::ChaosFormatter<sc::stats::DataUnits>;
 
-using TestCounter = sc::stats::Stat<"Test Counter", sc::stats::Counter<>>;
-using TestBytes = sc::stats::Stat<"Test Bytes", sc::stats::Throughput<>>;
-using TestGuarded =
-    sc::stats::Stat<"Test Guarded",
-                    sc::stats::Throughput<sc::stats::MetricUnits>>;
-using TestKept = sc::stats::Stat<"Test Kept", sc::stats::Counter<>, false>;
+  using TestCounter = sc::stats::Stat<"Test Counter", sc::stats::Counter<>>;
+  using TestBytes = sc::stats::Stat<"Test Bytes", sc::stats::Throughput<>>;
+  using TestGuarded = sc::stats::Stat<"Test Guarded", sc::stats::Throughput<sc::stats::MetricUnits>>;
+  using TestKept = sc::stats::Stat<"Test Kept", sc::stats::Counter<>, false>;
 
-// Stands in for a logger in report_all.
-struct CollectingLogger {
-  enum class LogLevel { info, warn };
+  // Stands in for a logger in report_all.
+  struct CollectingLogger {
+    enum class LogLevel { info, warn };
 
-  static inline std::vector<std::pair<LogLevel, std::string>> lines;
+    static inline std::vector<std::pair<LogLevel, std::string>> lines;
 
-  static void log(LogLevel level, std::string_view,
-                  std::string_view name, const std::string &text) {
-    lines.emplace_back(level, std::string(name) + " -> " + text);
+    static void log(LogLevel level, std::string_view, std::string_view name, const std::string &text) {
+      lines.emplace_back(level, std::string(name) + " -> " + text);
+    }
+  };
+
+  std::map<std::string, std::string> report() {
+    std::map<std::string, std::string> result;
+    sc::stats::report_all_to(
+        [&](std::string_view name, const std::string &text) { result.emplace(std::string(name), text); });
+    return result;
   }
-};
-
-std::map<std::string, std::string> report() {
-  std::map<std::string, std::string> result;
-  sc::stats::report_all_to([&](std::string_view name, const std::string &text) {
-    result.emplace(std::string(name), text);
-  });
-  return result;
-}
 
 } // namespace
 
@@ -88,9 +84,7 @@ TEST_CASE("Formatter Picks The Unit", "[stats]") {
     REQUIRE(Metric::format(999.99) == "999.99");
   }
 
-  SECTION("Past The Largest Unit The Number Just Grows") {
-    REQUIRE(Metric::format(5e15) == "5000.00 T");
-  }
+  SECTION("Past The Largest Unit The Number Just Grows") { REQUIRE(Metric::format(5e15) == "5000.00 T"); }
 
   SECTION("With A Suffix For The Time") {
     REQUIRE(Metric::format(5, "/s") == "5.00 /s");
@@ -101,7 +95,7 @@ TEST_CASE("Formatter Picks The Unit", "[stats]") {
 
 TEST_CASE("Counter", "[stats]") {
   using Tracker = sc::stats::Counter<>;
-  Tracker::Storage storage{"counter"};
+  Tracker::Storage storage{.name = "counter"};
 
   SECTION("Adds Up And Resets") {
     REQUIRE(Tracker::format(storage) == "0.00");
@@ -141,7 +135,7 @@ TEST_CASE("Counter", "[stats]") {
 
 TEST_CASE("Throughput", "[stats]") {
   using Tracker = sc::stats::Throughput<sc::stats::MetricUnits>;
-  Tracker::Storage storage{"throughput"};
+  Tracker::Storage storage{.name = "throughput"};
 
   SECTION("Nothing Recorded") {
     REQUIRE(Tracker::format(storage) == "0.00 total | 0.00/s");
@@ -181,8 +175,7 @@ TEST_CASE("Throughput", "[stats]") {
     Tracker::stop(storage);
 
     REQUIRE(std::chrono::nanoseconds{first} >= 10ms);
-    REQUIRE(std::chrono::nanoseconds{storage.accumulated_ns.load() - first} >=
-            10ms);
+    REQUIRE(std::chrono::nanoseconds{storage.accumulated_ns.load() - first} >= 10ms);
   }
 
   SECTION("Shows A Rate While Still Running") {
@@ -231,8 +224,8 @@ TEST_CASE("Throughput", "[stats]") {
 }
 
 TEST_CASE("Timer", "[stats]") {
-  using sc::stats::TimeResult;
   using sc::stats::Timer;
+  using sc::stats::TimeResult;
   using sc::stats::Unit;
 
   SECTION("Reports Once When It Goes Out Of Scope") {
@@ -267,7 +260,10 @@ TEST_CASE("Timer", "[stats]") {
   }
 
   SECTION("Every Fixed Unit Converts The Same Duration") {
-    TimeResult nano{}, micro{}, milli{}, seconds{};
+    TimeResult nano{};
+    TimeResult micro{};
+    TimeResult milli{};
+    TimeResult seconds{};
     {
       Timer a([&](TimeResult r) { nano = r; }, Unit::Nano);
       Timer b([&](TimeResult r) { micro = r; }, Unit::Micro);
@@ -297,7 +293,9 @@ TEST_CASE("Timer", "[stats]") {
     REQUIRE(slow.value < 1000.0);
 
     TimeResult fast{};
-    { Timer timer([&](TimeResult r) { fast = r; }); }
+    {
+      Timer timer([&](TimeResult r) { fast = r; });
+    }
     REQUIRE(fast.unit != Unit::Seconds);
     REQUIRE(fast.unit != Unit::Auto);
     REQUIRE(fast.value < 1000.0);
@@ -318,9 +316,7 @@ TEST_CASE("Timer", "[stats]") {
 
   SECTION("Assigning Over A Timer Finishes It First") {
     std::vector<int> order;
-    auto report = [&](int id) {
-      return [&order, id](TimeResult) { order.push_back(id); };
-    };
+    auto report = [&](int id) { return [&order, id](TimeResult) { order.push_back(id); }; };
     // The same type for both, so one can be assigned to the other.
     using Callback = std::function<void(TimeResult)>;
     {
@@ -335,8 +331,12 @@ TEST_CASE("Timer", "[stats]") {
   SECTION("Takes A Callback That Lives Elsewhere") {
     int calls = 0;
     auto callback = [&](TimeResult) { ++calls; };
-    { Timer timer(callback); }
-    { Timer timer(callback, Unit::Micro); }
+    {
+      Timer timer(callback);
+    }
+    {
+      Timer timer(callback, Unit::Micro);
+    }
     REQUIRE(calls == 2);
   }
 }

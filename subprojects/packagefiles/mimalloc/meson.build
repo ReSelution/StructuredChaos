@@ -690,8 +690,7 @@ message('Library name     : ' + mi_libname)
 message('Version          : ' + mi_version_full)
 message('Build type       : ' + buildtype_lc)
 message(
-  'Compiler         : '
-  + (mi_use_cxx ? cpp.get_id() + ' (C++)' : cc_id),
+  'Compiler         : ' + (mi_use_cxx ? cpp.get_id() + ' (C++)' : cc_id),
 )
 message('Compiler flags   : @0@'.format(mi_cflags))
 message('Compiler defines : @0@'.format(mi_defines))

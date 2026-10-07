@@ -10,30 +10,27 @@
 
 namespace {
 
-// Every component carries the number of its entity, so a reader can tell
-// whether the components it is handed belong together.
-struct GroupPosition {
-  float owner{0.0f};
-};
+  // Every component carries the number of its entity, so a reader can tell
+  // whether the components it is handed belong together.
+  struct GroupPosition {
+    float owner{0.0f};
+  };
 
-struct GroupVelocity {
-  float owner{0.0f};
-};
+  struct GroupVelocity {
+    float owner{0.0f};
+  };
 
-struct GroupHealth {
-  float owner{0.0f};
-};
+  struct GroupHealth {
+    float owner{0.0f};
+  };
 
-float number_of(entt::entity e) {
-  return static_cast<float>(entt::to_integral(e));
-}
+  float number_of(entt::entity e) { return static_cast<float>(entt::to_integral(e)); }
 
-std::vector<sc::ecs::Entity> make_entities(sc::ecs::Registry &registry,
-                                           size_t count) {
-  std::vector<sc::ecs::Entity> entities(count);
-  registry.create(entities.begin(), entities.end());
-  return entities;
-}
+  std::vector<sc::ecs::Entity> make_entities(sc::ecs::Registry &registry, size_t count) {
+    std::vector<sc::ecs::Entity> entities(count);
+    registry.create(entities.begin(), entities.end());
+    return entities;
+  }
 
 } // namespace
 
@@ -55,11 +52,9 @@ TEST_CASE("Registry Groups", "[ecs][registry][group]") {
 
     size_t visited = 0;
     bool matching = true;
-    group.raw().each([&](entt::entity e, const GroupPosition &position,
-                         const GroupVelocity &velocity) {
+    group.raw().each([&](entt::entity e, const GroupPosition &position, const GroupVelocity &velocity) {
       ++visited;
-      matching = matching && position.owner == number_of(e) &&
-                 velocity.owner == number_of(e);
+      matching = matching && position.owner == number_of(e) && velocity.owner == number_of(e);
     });
     REQUIRE(visited == count / 2);
     REQUIRE(matching);
@@ -79,10 +74,8 @@ TEST_CASE("Registry Groups", "[ecs][registry][group]") {
     REQUIRE(group.size() == count / 2 - 1);
 
     bool matching = true;
-    group.raw().each([&](entt::entity e, const GroupPosition &position,
-                         const GroupVelocity &velocity) {
-      matching = matching && position.owner == number_of(e) &&
-                 velocity.owner == number_of(e);
+    group.raw().each([&](entt::entity e, const GroupPosition &position, const GroupVelocity &velocity) {
+      matching = matching && position.owner == number_of(e) && velocity.owner == number_of(e);
     });
     REQUIRE(matching);
 
@@ -98,8 +91,7 @@ TEST_CASE("Registry Groups", "[ecs][registry][group]") {
 
   SECTION("Non-Owning Group With Exclusion") {
     {
-      auto group = registry.group<>(entt::get<GroupPosition>,
-                                    entt::exclude<GroupVelocity>);
+      auto group = registry.group<>(entt::get<GroupPosition>, entt::exclude<GroupVelocity>);
       REQUIRE(group.size() == count / 2);
     }
 
@@ -107,8 +99,7 @@ TEST_CASE("Registry Groups", "[ecs][registry][group]") {
     // one of its components from the same thread would wait for it forever.
     registry.emplace<GroupVelocity>(entities[1], number_of(entities[1]));
 
-    auto again =
-        registry.group<>(entt::get<GroupPosition>, entt::exclude<GroupVelocity>);
+    auto again = registry.group<>(entt::get<GroupPosition>, entt::exclude<GroupVelocity>);
     REQUIRE(again.size() == count / 2 - 1);
   }
 
@@ -120,15 +111,12 @@ TEST_CASE("Registry Groups", "[ecs][registry][group]") {
     // Both components share one lock now, which the view takes twice.
     auto view = registry.view<GroupPosition, GroupVelocity>();
     size_t visited = 0;
-    view.raw().each([&](const GroupPosition &, const GroupVelocity &) {
-      ++visited;
-    });
+    view.raw().each([&](const GroupPosition &, const GroupVelocity &) { ++visited; });
     REQUIRE(visited == count / 2);
   }
 }
 
-TEST_CASE("Registry Group Under Concurrent Writes",
-          "[ecs][registry][group][threading]") {
+TEST_CASE("Registry Group Under Concurrent Writes", "[ecs][registry][group][threading]") {
   // One thread adds and removes positions, another velocities, so entities
   // keep entering and leaving the group from two sides. Each change of one
   // component reorders the storage of the other; a reader that could look at
@@ -141,7 +129,7 @@ TEST_CASE("Registry Group Under Concurrent Writes",
 
   {
     auto group = registry.group<GroupPosition, GroupVelocity>();
-    REQUIRE(group.size() == 0);
+    REQUIRE(group.empty());
   }
 
   std::atomic<bool> stop{false};
@@ -151,8 +139,7 @@ TEST_CASE("Registry Group Under Concurrent Writes",
   std::thread reader([&]() {
     while (!stop.load(std::memory_order_relaxed)) {
       auto group = registry.group<GroupPosition, GroupVelocity>();
-      group.raw().each([&](entt::entity e, const GroupPosition &position,
-                           const GroupVelocity &velocity) {
+      group.raw().each([&](entt::entity e, const GroupPosition &position, const GroupVelocity &velocity) {
         seen.fetch_add(1, std::memory_order_relaxed);
         if (position.owner != number_of(e) || velocity.owner != number_of(e)) {
           mismatches.fetch_add(1, std::memory_order_relaxed);
@@ -190,11 +177,10 @@ TEST_CASE("Registry Group Under Concurrent Writes",
   REQUIRE(mismatches.load() == 0);
 
   auto group = registry.group<GroupPosition, GroupVelocity>();
-  REQUIRE(group.size() == 0);
+  REQUIRE(group.empty());
 }
 
-TEST_CASE("Registry Group Created While Its Components Are In Use",
-          "[ecs][registry][group][threading]") {
+TEST_CASE("Registry Group Created While Its Components Are In Use", "[ecs][registry][group][threading]") {
   // The first group() call moves the components to a shared lock while other
   // threads are in the middle of taking the old ones.
   constexpr size_t count = 256;
@@ -224,8 +210,7 @@ TEST_CASE("Registry Group Created While Its Components Are In Use",
   std::thread reader([&]() {
     while (!stop.load(std::memory_order_relaxed)) {
       auto view = registry.view<GroupPosition, GroupVelocity>();
-      view.raw().each([&](entt::entity e, const GroupPosition &position,
-                          const GroupVelocity &velocity) {
+      view.raw().each([&](entt::entity e, const GroupPosition &position, const GroupVelocity &velocity) {
         if (position.owner != number_of(e) || velocity.owner != number_of(e)) {
           mismatches.fetch_add(1, std::memory_order_relaxed);
         }
@@ -249,10 +234,8 @@ TEST_CASE("Registry Group Created While Its Components Are In Use",
   {
     auto group = registry.group<GroupPosition, GroupVelocity>();
     bool matching = true;
-    group.raw().each([&](entt::entity e, const GroupPosition &position,
-                         const GroupVelocity &velocity) {
-      matching = matching && position.owner == number_of(e) &&
-                 velocity.owner == number_of(e);
+    group.raw().each([&](entt::entity e, const GroupPosition &position, const GroupVelocity &velocity) {
+      matching = matching && position.owner == number_of(e) && velocity.owner == number_of(e);
     });
     REQUIRE(matching);
   }
@@ -279,12 +262,11 @@ TEST_CASE("Registry Overlapping Groups", "[ecs][registry][group][threading]") {
 
   {
     auto first = registry.group<GroupPosition, GroupVelocity>();
-    REQUIRE(first.size() == 0);
+    REQUIRE(first.empty());
   }
   {
-    auto second =
-        registry.group<>(entt::get<GroupVelocity, GroupHealth>);
-    REQUIRE(second.size() == 0);
+    auto second = registry.group<>(entt::get<GroupVelocity, GroupHealth>);
+    REQUIRE(second.empty());
   }
 
   std::atomic<bool> stop{false};
@@ -294,19 +276,15 @@ TEST_CASE("Registry Overlapping Groups", "[ecs][registry][group][threading]") {
     while (!stop.load(std::memory_order_relaxed)) {
       {
         auto first = registry.group<GroupPosition, GroupVelocity>();
-        first.raw().each([&](entt::entity e, const GroupPosition &position,
-                             const GroupVelocity &velocity) {
-          if (position.owner != number_of(e) ||
-              velocity.owner != number_of(e)) {
+        first.raw().each([&](entt::entity e, const GroupPosition &position, const GroupVelocity &velocity) {
+          if (position.owner != number_of(e) || velocity.owner != number_of(e)) {
             mismatches.fetch_add(1, std::memory_order_relaxed);
           }
         });
       }
       {
-        auto second =
-            registry.group<>(entt::get<GroupVelocity, GroupHealth>);
-        second.raw().each([&](entt::entity e, const GroupVelocity &velocity,
-                              const GroupHealth &health) {
+        auto second = registry.group<>(entt::get<GroupVelocity, GroupHealth>);
+        second.raw().each([&](entt::entity e, const GroupVelocity &velocity, const GroupHealth &health) {
           if (velocity.owner != number_of(e) || health.owner != number_of(e)) {
             mismatches.fetch_add(1, std::memory_order_relaxed);
           }

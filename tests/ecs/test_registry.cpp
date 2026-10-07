@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <span>
 #include <thread>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "glm/glm.hpp"
+
 #include "sc/ecs/entity.hpp"
 #include "sc/ecs/registry.hpp"
 #include "sc/ecs/resource.hpp"
@@ -19,93 +21,95 @@
 
 namespace {
 
-struct Position {
-  float x{0.0f};
-  float y{0.0f};
-};
+  struct Position {
+    float x{0.0f};
+    float y{0.0f};
+  };
 
-struct Velocity {
-  float dx{0.0f};
-  float dy{0.0f};
-};
+  struct Velocity {
+    float dx{0.0f};
+    float dy{0.0f};
+  };
 
-struct TransformComponent {
-  glm::mat4 transform{1.0f};
-};
+  struct TransformComponent {
+    glm::mat4 transform{1.0f};
+  };
 
-struct PhysicsComponent {
-  glm::vec3 min{0.0f};
-  glm::vec3 max{0.0f};
-  glm::vec3 velocity{0.0f};
-  float mass{1.0f};
-};
+  struct PhysicsComponent {
+    glm::vec3 min{0.0f};
+    glm::vec3 max{0.0f};
+    glm::vec3 velocity{0.0f};
+    float mass{1.0f};
+  };
 
-struct TagComponent {
-  std::array<char, 32> name{};
-};
+  struct TagComponent {
+    std::array<char, 32> name{};
+  };
 
-struct AIStateComponent {
-  int currentState{0};
-  glm::vec3 targetPos{0.0f};
-  float stamina{100.0f};
-};
+  struct AIStateComponent {
+    int currentState{0};
+    glm::vec3 targetPos{0.0f};
+    float stamina{100.0f};
+  };
 
-struct MeshComponent {
-  sc::ecs::Resource<std::span<const float>> vertices;
-  uint32_t meshId{0};
-};
+  struct MeshComponent {
+    sc::ecs::Resource<std::span<const float>> vertices;
+    uint32_t meshId{0};
+  };
 
-struct MockResource {
-  bool cleared{false};
-  void clear() { cleared = true; }
-};
+  struct MockResource {
+    bool cleared{false};
+    void clear() { cleared = true; }
+  };
 
-struct ComplexComponent {
-  int id{0};
-  MockResource res{};
-};
+  struct ComplexComponent {
+    int id{0};
+    MockResource res{};
+  };
 
-struct MoveCopySpy {
-  static inline std::atomic<size_t> copyCount{0};
-  static inline std::atomic<size_t> moveCount{0};
-  static inline std::atomic<size_t> ctorCount{0};
+  struct MoveCopySpy {
+    static inline std::atomic<size_t> copyCount{0};
+    static inline std::atomic<size_t> moveCount{0};
+    static inline std::atomic<size_t> ctorCount{0};
 
-  float data[4]{0.0f};
+    float data[4]{0.0f};
 
-  MoveCopySpy() { ctorCount++; }
+    MoveCopySpy() { ctorCount++; }
 
-  MoveCopySpy(const MoveCopySpy &other) {
-    copyCount++;
-    for (int i = 0; i < 4; ++i)
-      data[i] = other.data[i];
-  }
-
-  MoveCopySpy(MoveCopySpy &&other) noexcept {
-    moveCount++;
-    for (int i = 0; i < 4; ++i)
-      data[i] = other.data[i];
-  }
-
-  static void reset() {
-    copyCount = 0;
-    moveCount = 0;
-    ctorCount = 0;
-  }
-};
-
-// Index of the first entity that is not the one expected at its position, or
-// the size if there is none. A fresh registry numbers its entities from zero
-// and create() prepares them in blocks, so the entities handed out must be
-// exactly 0 .. n-1: a duplicate or an entity that was prepared but skipped
-// both show up as a gap.
-size_t first_unexpected_entity(const std::vector<entt::entity> &sorted) {
-  for (size_t i = 0; i < sorted.size(); ++i) {
-    if (entt::to_integral(sorted[i]) != i) {
-      return i;
+    MoveCopySpy(const MoveCopySpy &other) {
+      copyCount++;
+      for (int i = 0; i < 4; ++i) {
+        data[i] = other.data[i];
+      }
     }
+
+    MoveCopySpy(MoveCopySpy &&other) noexcept {
+      moveCount++;
+      for (int i = 0; i < 4; ++i) {
+        data[i] = other.data[i];
+      }
+    }
+
+    static void reset() {
+      copyCount = 0;
+      moveCount = 0;
+      ctorCount = 0;
+    }
+  };
+
+  // Index of the first entity that is not the one expected at its position, or
+  // the size if there is none. A fresh registry numbers its entities from zero
+  // and create() prepares them in blocks, so the entities handed out must be
+  // exactly 0 .. n-1: a duplicate or an entity that was prepared but skipped
+  // both show up as a gap.
+  size_t first_unexpected_entity(const std::vector<entt::entity> &sorted) {
+    for (size_t i = 0; i < sorted.size(); ++i) {
+      if (entt::to_integral(sorted[i]) != i) {
+        return i;
+      }
+    }
+    return sorted.size();
   }
-  return sorted.size();
-}
 
 } // namespace
 
@@ -176,9 +180,7 @@ TEST_CASE("Registry Resource Components", "[ecs][registry][resource]") {
     for (size_t i = 0; i < count; ++i) {
       std::array<float, vertex_count> vertices{};
       vertices.fill(static_cast<float>(i));
-      registry.emplace<MeshComponent>(
-          entities[i], std::span<const float>(vertices),
-          static_cast<uint32_t>(i));
+      registry.emplace<MeshComponent>(entities[i], std::span<const float>(vertices), static_cast<uint32_t>(i));
     }
 
     // Erasing moves the last component into the freed slot.
@@ -203,8 +205,7 @@ TEST_CASE("Registry Resource Components", "[ecs][registry][resource]") {
     registries.reserve(registry_count);
 
     for (size_t i = 0; i < registry_count; ++i) {
-      auto &registry = *registries.emplace_back(
-          std::make_unique<sc::ecs::Registry>());
+      auto &registry = *registries.emplace_back(std::make_unique<sc::ecs::Registry>());
       REQUIRE_NOTHROW(registry.reserve<Position>(1));
       REQUIRE_NOTHROW(registry.reserve<MeshComponent>(1));
     }
@@ -237,7 +238,7 @@ TEST_CASE("Registry Access Cache", "[ecs][registry]") {
     constexpr int per_thread = 200;
 
     sc::ecs::Registry registry;
-    std::vector<sc::ecs::Entity> entities(thread_count * per_thread);
+    std::vector<sc::ecs::Entity> entities(static_cast<size_type>(thread_count * per_thread));
     registry.create(entities.begin(), entities.end());
 
     std::atomic<bool> start{false};
@@ -248,7 +249,7 @@ TEST_CASE("Registry Access Cache", "[ecs][registry]") {
           std::this_thread::yield();
         }
         for (int i = 0; i < per_thread; ++i) {
-          const int index = t * per_thread + i;
+          const int index = (t * per_thread) + i;
           registry.emplace<FirstUseComponent>(entities[index], index);
         }
       });
@@ -287,8 +288,7 @@ TEST_CASE("Registry Access Cache", "[ecs][registry]") {
   }
 }
 
-TEST_CASE("Registry Reads Of Several Components In Different Orders",
-          "[ecs][registry]") {
+TEST_CASE("Registry Reads Of Several Components In Different Orders", "[ecs][registry]") {
   // Two readers name the same components in opposite order while writers
   // keep taking the exclusive locks. With locks taken in the order written,
   // a waiting writer could make the two readers block each other for good.
@@ -373,16 +373,14 @@ TEST_CASE("Registry Parallel Entity Creation", "[ecs][registry]") {
   for (const auto &part : created) {
     all.insert(all.end(), part.begin(), part.end());
   }
-  std::sort(all.begin(), all.end());
+  std::ranges::sort(all);
 
   REQUIRE(all.size() == static_cast<size_t>(thread_count) * per_thread);
   // No entity handed out twice ...
-  REQUIRE(std::adjacent_find(all.begin(), all.end()) == all.end());
+  REQUIRE(std::ranges::adjacent_find(all) == all.end());
   // ... and none left out in between.
   REQUIRE(first_unexpected_entity(all) == all.size());
-  REQUIRE(std::none_of(all.begin(), all.end(), [](entt::entity e) {
-    return e == entt::entity{entt::null};
-  }));
+  REQUIRE(std::ranges::none_of(all, [](entt::entity e) { return e == entt::entity{entt::null}; }));
 }
 
 TEST_CASE("Registry Entity Creation From Many Threads", "[ecs][registry]") {
@@ -426,11 +424,11 @@ TEST_CASE("Registry Entity Creation From Many Threads", "[ecs][registry]") {
     for (const auto &part : created) {
       all.insert(all.end(), part.begin(), part.end());
     }
-    std::sort(all.begin(), all.end());
+    std::ranges::sort(all);
 
     REQUIRE(all.size() == static_cast<size_t>(thread_count) * per_thread);
     // No entity handed out twice ...
-    REQUIRE(std::adjacent_find(all.begin(), all.end()) == all.end());
+    REQUIRE(std::ranges::adjacent_find(all) == all.end());
     // ... and none left out in between.
     REQUIRE(first_unexpected_entity(all) == all.size());
   }
@@ -448,7 +446,7 @@ TEST_CASE("Registry Holds More Than 2^20 Entities", "[ecs][registry]") {
   registry.create(entities.begin(), entities.end());
 
   std::vector<entt::entity> all(entities.begin(), entities.end());
-  std::sort(all.begin(), all.end());
+  std::ranges::sort(all);
   REQUIRE(first_unexpected_entity(all) == all.size());
 
   // A component on the last entity, beyond the old limit.
@@ -467,12 +465,10 @@ TEST_CASE("Registry Bulk Entity Creation", "[ecs][registry]") {
   REQUIRE(entities.size() == count);
 
   for (size_t i = 0; i < count; ++i) {
-    registry.emplace<Position>(static_cast<entt::entity>(entities[i]),
-                               static_cast<float>(i), 0.0f);
+    registry.emplace<Position>(static_cast<entt::entity>(entities[i]), static_cast<float>(i), 0.0f);
   }
 
-  auto [lock, pos] =
-      registry.get<Position>(static_cast<entt::entity>(entities[42]));
+  auto [lock, pos] = registry.get<Position>(static_cast<entt::entity>(entities[42]));
   REQUIRE(pos.x == 42.0f);
 }
 
@@ -513,8 +509,7 @@ TEST_CASE("Registry Multi-Threaded Stress Test", "[ecs][registry][threading]") {
           e.add<PhysicsComponent>();
           e.add<TagComponent>();
           e.add<AIStateComponent>();
-          e.add<MeshComponent>(std::span<const float>(rawData, 200),
-                               static_cast<uint32_t>(start + i));
+          e.add<MeshComponent>(std::span<const float>(rawData, 200), static_cast<uint32_t>(start + i));
         }
       },
       nullptr);
@@ -525,8 +520,7 @@ TEST_CASE("Registry Multi-Threaded Stress Test", "[ecs][registry][threading]") {
   REQUIRE(view.size() == total_entities);
 }
 
-TEST_CASE("Registry Range Insert and Move/Copy Behavior",
-          "[ecs][registry][semantics]") {
+TEST_CASE("Registry Range Insert and Move/Copy Behavior", "[ecs][registry][semantics]") {
   constexpr size_t batch_size = 100;
 
   SECTION("Copy Insert") {
@@ -537,8 +531,7 @@ TEST_CASE("Registry Range Insert and Move/Copy Behavior",
     std::vector<sc::ecs::Entity> entities{batch_size};
     registry.create(entities.begin(), entities.end());
 
-    registry.insert<MoveCopySpy>(entities.begin(), entities.end(),
-                                 spies.begin());
+    registry.insert<MoveCopySpy>(entities.begin(), entities.end(), spies.begin());
 
     REQUIRE(MoveCopySpy::copyCount.load() >= batch_size);
   }
@@ -551,8 +544,7 @@ TEST_CASE("Registry Range Insert and Move/Copy Behavior",
     std::vector<sc::ecs::Entity> entities{batch_size};
     registry.create(entities.begin(), entities.end());
 
-    registry.insert<MoveCopySpy>(entities.begin(), entities.end(),
-                                 std::make_move_iterator(spies.begin()));
+    registry.insert<MoveCopySpy>(entities.begin(), entities.end(), std::make_move_iterator(spies.begin()));
 
     REQUIRE(MoveCopySpy::moveCount.load() >= batch_size);
     REQUIRE(MoveCopySpy::copyCount.load() == 0);

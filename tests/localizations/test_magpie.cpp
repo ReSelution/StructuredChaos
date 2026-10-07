@@ -22,36 +22,34 @@
 
 namespace {
 
-using sc::Magpie;
-using sc::MagpieKey;
-using sc::MagpieString;
+  using sc::Magpie;
+  using sc::MagpieKey;
+  using sc::MagpieString;
 
 #ifdef DUMP_MAGPIE
-constexpr bool DumpEnabled = true;
+  constexpr bool DumpEnabled = true;
 #else
-constexpr bool DumpEnabled = false;
+  constexpr bool DumpEnabled = false;
 #endif
 
-Magpie &emptyMagpie() {
-  Magpie::get()->clear();
-  return *Magpie::get();
-}
+  Magpie &emptyMagpie() {
+    Magpie::get()->clear();
+    return *Magpie::get();
+  }
 
-void put(std::string_view ns, std::string_view key, std::string_view text) {
-  MagpieKey k{ns, key};
-  Magpie::get()->insert(k, text, ns, key);
-}
+  void put(std::string_view ns, std::string_view key, std::string_view text) {
+    MagpieKey k{ns, key};
+    Magpie::get()->insert(k, text, ns, key);
+  }
 
-std::string readFile(const std::filesystem::path &path) {
-  std::ifstream in(path, std::ios::binary);
-  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-}
+  std::string readFile(const std::filesystem::path &path) {
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+  }
 
 } // namespace
 
-TEST_CASE("The Dump Option Reaches The Code", "[magpie]") {
-  STATIC_REQUIRE(DumpEnabled == (SC_TEST_EXPECT_DUMP != 0));
-}
+TEST_CASE("The Dump Option Reaches The Code", "[magpie]") { STATIC_REQUIRE(DumpEnabled == (SC_TEST_EXPECT_DUMP != 0)); }
 
 TEST_CASE("Keys Are Made From Namespace And Name", "[magpie][key]") {
   SECTION("Known at compile time") {
@@ -61,13 +59,10 @@ TEST_CASE("Keys Are Made From Namespace And Name", "[magpie][key]") {
   }
 
   SECTION("Texts and their hashes give the same key") {
-    REQUIRE(MagpieKey("menu", "start") ==
-            MagpieKey(sc::hash("menu"), sc::hash("start")));
+    REQUIRE(MagpieKey("menu", "start") == MagpieKey(sc::hash("menu"), sc::hash("start")));
   }
 
-  SECTION("Namespace and name are not interchangeable") {
-    REQUIRE(MagpieKey("a", "b") != MagpieKey("b", "a"));
-  }
+  SECTION("Namespace and name are not interchangeable") { REQUIRE(MagpieKey("a", "b") != MagpieKey("b", "a")); }
 
   SECTION("A name alone is in the namespace 0") {
     REQUIRE(MagpieKey("start") == MagpieKey(0, sc::hash("start")));
@@ -86,13 +81,9 @@ TEST_CASE("The Literal Gives The Same Key As The Texts", "[magpie][string]") {
     REQUIRE("menu:start"_t.key() == MagpieString("menu", "start").key());
   }
 
-  SECTION("Without a namespace") {
-    REQUIRE("start"_t.key() == MagpieKey("start"));
-  }
+  SECTION("Without a namespace") { REQUIRE("start"_t.key() == MagpieKey("start")); }
 
-  SECTION("Only the first colon separates") {
-    REQUIRE("a:b:c"_t.key() == MagpieKey("a", "b:c"));
-  }
+  SECTION("Only the first colon separates") { REQUIRE("a:b:c"_t.key() == MagpieKey("a", "b:c")); }
 
   SECTION("Known at compile time") {
     constexpr MagpieString text = "menu:start"_t;
@@ -100,10 +91,8 @@ TEST_CASE("The Literal Gives The Same Key As The Texts", "[magpie][string]") {
   }
 
   SECTION("From hashes") {
-    REQUIRE(MagpieString(sc::hash("menu"), sc::hash("start")).key() ==
-            MagpieKey("menu", "start"));
-    REQUIRE(MagpieString(MagpieKey("menu", "start")).key() ==
-            MagpieKey("menu", "start"));
+    REQUIRE(MagpieString(sc::hash("menu"), sc::hash("start")).key() == MagpieKey("menu", "start"));
+    REQUIRE(MagpieString(MagpieKey("menu", "start")).key() == MagpieKey("menu", "start"));
   }
 }
 
@@ -111,8 +100,7 @@ TEST_CASE("Unknown Texts Are Reported As Missing", "[magpie]") {
   auto &magpie = emptyMagpie();
 
   REQUIRE(magpie.size() == 0);
-  REQUIRE(magpie.translate(MagpieKey("menu", "start")) ==
-          Magpie::MissingString);
+  REQUIRE(magpie.translate(MagpieKey("menu", "start")) == Magpie::MissingString);
   REQUIRE_FALSE(magpie.find(MagpieKey("menu", "start")).has_value());
   REQUIRE("menu:start"_t.view() == Magpie::MissingString);
   REQUIRE(MagpieString().view() == Magpie::MissingString);
@@ -195,8 +183,7 @@ TEST_CASE("A Text Can Be Its Own Key", "[magpie][string]") {
   }
 }
 
-TEST_CASE("The Source Text Stands In For A Missing Translation",
-          "[magpie][string]") {
+TEST_CASE("The Source Text Stands In For A Missing Translation", "[magpie][string]") {
   emptyMagpie();
 
   SECTION("Without a translation") {
@@ -229,7 +216,7 @@ TEST_CASE("Stored Strings Are Copies With A Terminator", "[magpie][store]") {
     source = "XXXXXXX";
 
     REQUIRE(stored == "Starten");
-    REQUIRE(stored.data()[stored.size()] == '\0');
+    REQUIRE(stored[stored.size()] == '\0');
   }
 
   SECTION("An empty text") {
@@ -241,7 +228,7 @@ TEST_CASE("Stored Strings Are Copies With A Terminator", "[magpie][store]") {
   }
 
   SECTION("A text of several megabytes") {
-    const std::string big(3 * 1024 * 1024, 'x');
+    const std::string big(static_cast<size_type>(3 * 1024 * 1024), 'x');
     const auto stored = magpie.storeStr(big);
 
     REQUIRE(stored == big);
@@ -264,7 +251,7 @@ TEST_CASE("UTF-16 Is Stored As UTF-8", "[magpie][store]") {
 
     REQUIRE(stored == "Start");
     REQUIRE(stored.size() == 5);
-    REQUIRE(stored.data()[stored.size()] == '\0');
+    REQUIRE(stored[stored.size()] == '\0');
   }
 
   SECTION("Umlauts, the euro sign and a surrogate pair") {
@@ -273,7 +260,7 @@ TEST_CASE("UTF-16 Is Stored As UTF-8", "[magpie][store]") {
 
     REQUIRE(stored == "Gr\xC3\xBC\xC3\x9F"
                       "e \xE2\x82\xAC \xF0\x9F\x98\x80");
-    REQUIRE(stored.data()[stored.size()] == '\0');
+    REQUIRE(stored[stored.size()] == '\0');
   }
 
   SECTION("Nothing") {
@@ -287,7 +274,7 @@ TEST_CASE("UTF-16 Is Stored As UTF-8", "[magpie][store]") {
     const auto stored = magpie.storeStrUTF16(source, 3);
 
     REQUIRE(stored.empty());
-    REQUIRE(stored.data()[0] == '\0');
+    REQUIRE(stored[0] == '\0');
   }
 }
 
@@ -358,9 +345,7 @@ TEST_CASE("Many Threads Fill The Table", "[magpie][threads]") {
   constexpr size_t Threads = 8;
   constexpr size_t PerThread = 2000;
 
-  const auto name = [](size_t thread, size_t i) {
-    return "t" + std::to_string(thread) + "_" + std::to_string(i);
-  };
+  const auto name = [](size_t thread, size_t i) { return "t" + std::to_string(thread) + "_" + std::to_string(i); };
 
   SECTION("Each with its own list") {
     std::vector<std::thread> workers;
@@ -369,8 +354,7 @@ TEST_CASE("Many Threads Fill The Table", "[magpie][threads]") {
         Magpie::mt_reserve(PerThread);
         for (size_t i = 0; i < PerThread; ++i) {
           const std::string text = name(t, i);
-          magpie.mt_InsertStored(MagpieKey("load", text), magpie.storeStr(text),
-                                 "load", text);
+          magpie.mt_InsertStored(MagpieKey("load", text), magpie.storeStr(text), "load", text);
         }
         magpie.mt_Merge(false);
       });
@@ -397,8 +381,7 @@ TEST_CASE("Many Threads Fill The Table", "[magpie][threads]") {
           MagpieKey key("load", text);
           magpie.insert(key, text, "load", text);
           // Either missing or complete, never half written.
-          const auto found =
-              magpie.translate(MagpieKey("load", name(0, i / 2)));
+          const auto found = magpie.translate(MagpieKey("load", name(0, i / 2)));
           if (found != Magpie::MissingString && found != name(0, i / 2)) {
             FAIL_CHECK("read a damaged text");
           }
@@ -477,8 +460,7 @@ TEST_CASE("The Dump Lists The Texts By Namespace", "[magpie][dump]") {
     put("menu", "quit", "Sag \"Tsch\xC3\xBCss\"\n");
     put("hud", "path", "C:\\spiel\t1");
     // Found again under a key that carries no texts.
-    REQUIRE(magpie.translate(MagpieKey(sc::hash("hud"), sc::hash("path"))) ==
-            "C:\\spiel\t1");
+    REQUIRE(magpie.translate(MagpieKey(sc::hash("hud"), sc::hash("path"))) == "C:\\spiel\t1");
 
     magpie.dumpToFile(file.string());
 

@@ -1,0 +1,7 @@
+# Catch2 sections re-enter the test body, which these checks misread.
+InheritParentConfig: true
+Checks: >
+  -bugprone-use-after-move,
+  -performance-inefficient-vector-operation,
+  -performance-unnecessary-value-param,
+  -misc-unused-parameters

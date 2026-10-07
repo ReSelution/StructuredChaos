@@ -13,52 +13,47 @@
 
 namespace {
 
-constexpr size_t MAX_LENGTH = 300;
+  constexpr size_t MAX_LENGTH = 300;
 
-// Mixed case, digits and punctuation around the letters in the ASCII table,
-// repeated up to MAX_LENGTH characters.
-constexpr std::array<char, MAX_LENGTH> make_text() {
-  constexpr std::string_view pattern = "Hello, World! @[`{ AZaz 0123456789 /Game/FactoryGame/Buildable_C ";
-  std::array<char, MAX_LENGTH> text{};
-  for (size_t i = 0; i < MAX_LENGTH; ++i) {
-    text[i] = pattern[i % pattern.size()];
+  // Mixed case, digits and punctuation around the letters in the ASCII table,
+  // repeated up to MAX_LENGTH characters.
+  constexpr std::array<char, MAX_LENGTH> make_text() {
+    constexpr std::string_view pattern = "Hello, World! @[`{ AZaz 0123456789 /Game/FactoryGame/Buildable_C ";
+    std::array<char, MAX_LENGTH> text{};
+    for (size_t i = 0; i < MAX_LENGTH; ++i) {
+      text[i] = pattern[i % pattern.size()];
+    }
+    return text;
   }
-  return text;
-}
 
-constexpr std::array<char, MAX_LENGTH> TEXT = make_text();
+  constexpr std::array<char, MAX_LENGTH> TEXT = make_text();
 
-constexpr char lower(char c) {
-  return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
-}
+  constexpr char lower(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; }
 
-constexpr std::array<char, MAX_LENGTH> make_lower_text() {
-  std::array<char, MAX_LENGTH> text = TEXT;
-  for (char &c : text) {
-    c = lower(c);
+  constexpr std::array<char, MAX_LENGTH> make_lower_text() {
+    std::array<char, MAX_LENGTH> text = TEXT;
+    for (char &c : text) {
+      c = lower(c);
+    }
+    return text;
   }
-  return text;
-}
 
-constexpr std::array<char, MAX_LENGTH> LOWER_TEXT = make_lower_text();
+  constexpr std::array<char, MAX_LENGTH> LOWER_TEXT = make_lower_text();
 
-// The hash of every prefix of a text, computed while compiling.
-template <typename Hash>
-constexpr std::array<sc::h64, MAX_LENGTH + 1>
-hash_prefixes(const std::array<char, MAX_LENGTH> &text, Hash hash) {
-  std::array<sc::h64, MAX_LENGTH + 1> result{};
-  for (size_t length = 0; length <= MAX_LENGTH; ++length) {
-    result[length] = hash(std::string_view{text.data(), length});
+  // The hash of every prefix of a text, computed while compiling.
+  template <typename Hash>
+  constexpr std::array<sc::h64, MAX_LENGTH + 1> hash_prefixes(const std::array<char, MAX_LENGTH> &text, Hash hash) {
+    std::array<sc::h64, MAX_LENGTH + 1> result{};
+    for (size_t length = 0; length <= MAX_LENGTH; ++length) {
+      result[length] = hash(std::string_view{text.data(), length});
+    }
+    return result;
   }
-  return result;
-}
 
-constexpr auto COMPILED_HASHES =
-    hash_prefixes(TEXT, [](std::string_view s) { return sc::hash(s); });
-constexpr auto COMPILED_LOWER_HASHES = hash_prefixes(
-    TEXT, [](std::string_view s) { return sc::hash_lowercase(s); });
+  constexpr auto COMPILED_HASHES = hash_prefixes(TEXT, [](std::string_view s) { return sc::hash(s); });
+  constexpr auto COMPILED_LOWER_HASHES = hash_prefixes(TEXT, [](std::string_view s) { return sc::hash_lowercase(s); });
 
-enum class TypedHash : sc::h64 {};
+  enum class TypedHash : sc::h64 {};
 
 } // namespace
 
@@ -69,8 +64,7 @@ TEST_CASE("Hash Is The Same At Compile Time And At Run Time", "[hash]") {
 
     size_t first_difference = MAX_LENGTH + 1;
     for (size_t length = 0; length <= MAX_LENGTH; ++length) {
-      if (sc::hash(std::string_view{text.data(), length}) !=
-          COMPILED_HASHES[length]) {
+      if (sc::hash(std::string_view{text.data(), length}) != COMPILED_HASHES[length]) {
         first_difference = length;
         break;
       }
@@ -111,7 +105,8 @@ TEST_CASE("Hash Is The Same At Compile Time And At Run Time", "[hash]") {
     constexpr sc::h64 compiled = sc::hash(uint64_t{1}, uint64_t{2});
     constexpr sc::h64 compiledMixed = sc::hash(uint32_t{7}, uint64_t{9});
 
-    uint64_t a = 1, b = 2;
+    uint64_t a = 1;
+    uint64_t b = 2;
     uint32_t c = 7;
     uint64_t d = 9;
 
@@ -163,7 +158,7 @@ TEST_CASE("Hash Basics", "[hash]") {
   }
 
   SECTION("Typed Hash") {
-    constexpr TypedHash typed = sc::hash<TypedHash>(std::string_view{"abc"});
+    constexpr auto typed = sc::hash<TypedHash>(std::string_view{"abc"});
     REQUIRE(static_cast<sc::h64>(typed) == sc::hash(std::string_view{"abc"}));
   }
 }
@@ -187,8 +182,7 @@ TEST_CASE("Lowercase Hash", "[hash]") {
   SECTION("Is The Same At Compile Time And At Run Time") {
     size_t first_difference = MAX_LENGTH + 1;
     for (size_t length = 0; length <= MAX_LENGTH; ++length) {
-      if (sc::hash_lowercase(std::string_view{text.data(), length}) !=
-          COMPILED_LOWER_HASHES[length]) {
+      if (sc::hash_lowercase(std::string_view{text.data(), length}) != COMPILED_LOWER_HASHES[length]) {
         first_difference = length;
         break;
       }
@@ -200,12 +194,11 @@ TEST_CASE("Lowercase Hash", "[hash]") {
     static constexpr auto LONG_TEXT = [] {
       std::array<char, 2000> long_text{};
       for (size_t i = 0; i < long_text.size(); ++i) {
-        long_text[i] = static_cast<char>('A' + i % 26);
+        long_text[i] = static_cast<char>('A' + (i % 26));
       }
       return long_text;
     }();
-    constexpr sc::h64 compiled =
-        sc::hash_lowercase(std::string_view{LONG_TEXT.data(), LONG_TEXT.size()});
+    constexpr sc::h64 compiled = sc::hash_lowercase(std::string_view{LONG_TEXT.data(), LONG_TEXT.size()});
 
     const std::string long_text(LONG_TEXT.data(), LONG_TEXT.size());
     REQUIRE(sc::hash_lowercase(std::string_view{long_text}) == compiled);
@@ -217,15 +210,13 @@ TEST_CASE("Lowercase Hash", "[hash]") {
     int differences = 0;
     for (int value = 0; value < 256; ++value) {
       const char c = static_cast<char>(value);
-      for (const std::string &sample :
-           {std::string(1, c), std::string("x") + c, std::string("xy") + c,
-            std::string("0123456") + c, std::string(40, 'q') + c}) {
+      for (const std::string &sample : {std::string(1, c), std::string("x") + c, std::string("xy") + c,
+                                        std::string("0123456") + c, std::string(40, 'q') + c}) {
         std::string expected = sample;
         for (char &e : expected) {
           e = lower(e);
         }
-        if (sc::hash_lowercase(std::string_view{sample}) !=
-            sc::hash(std::string_view{expected})) {
+        if (sc::hash_lowercase(std::string_view{sample}) != sc::hash(std::string_view{expected})) {
           ++differences;
         }
       }

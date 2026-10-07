@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "entt/entt.hpp"
+
 #include "sc/ecs/entity.hpp"
 #include "sc/ecs/registry.hpp"
 #include "sc/threading/threading.hpp"
@@ -20,70 +21,68 @@
 
 namespace {
 
-constexpr size_t ENTITY_COUNT = 10'000;
+  constexpr size_t ENTITY_COUNT = 10'000;
 
-struct BenchPosition {
-  float x{0.0f};
-  float y{0.0f};
-};
+  struct BenchPosition {
+    float x{0.0f};
+    float y{0.0f};
+  };
 
-struct BenchVelocity {
-  float dx{0.0f};
-  float dy{0.0f};
-};
+  struct BenchVelocity {
+    float dx{0.0f};
+    float dy{0.0f};
+  };
 
-struct BenchHealth {
-  int value{100};
-};
+  struct BenchHealth {
+    int value{100};
+  };
 
-struct BenchTeam {
-  int id{0};
-};
+  struct BenchTeam {
+    int id{0};
+  };
 
-// One fresh registry per run of a sample, built outside the timing. Only used
-// for entity creation, where the registries hold no components.
-template <typename Registry>
-std::vector<std::unique_ptr<Registry>> make_registries(int count) {
-  std::vector<std::unique_ptr<Registry>> registries;
-  registries.reserve(static_cast<size_t>(count));
-  for (int i = 0; i < count; ++i) {
-    registries.push_back(std::make_unique<Registry>());
-  }
-  return registries;
-}
-
-struct ScWorld {
-  sc::ecs::Registry registry;
-  std::vector<sc::ecs::Entity> entities{ENTITY_COUNT};
-
-  ScWorld() { registry.create(entities.begin(), entities.end()); }
-
-  void fill() {
-    for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-      registry.emplace<BenchPosition>(entities[i], static_cast<float>(i), 1.0f);
-      registry.emplace<BenchVelocity>(entities[i], 1.0f, 2.0f);
+  // One fresh registry per run of a sample, built outside the timing. Only used
+  // for entity creation, where the registries hold no components.
+  template <typename Registry> std::vector<std::unique_ptr<Registry>> make_registries(int count) {
+    std::vector<std::unique_ptr<Registry>> registries;
+    registries.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+      registries.push_back(std::make_unique<Registry>());
     }
+    return registries;
   }
-};
 
-struct EnttWorld {
-  entt::registry registry;
-  std::vector<entt::entity> entities{ENTITY_COUNT};
+  struct ScWorld {
+    sc::ecs::Registry registry;
+    std::vector<sc::ecs::Entity> entities{ENTITY_COUNT};
 
-  EnttWorld() { registry.create(entities.begin(), entities.end()); }
+    ScWorld() { registry.create(entities.begin(), entities.end()); }
 
-  void fill() {
-    for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-      registry.emplace<BenchPosition>(entities[i], static_cast<float>(i), 1.0f);
-      registry.emplace<BenchVelocity>(entities[i], 1.0f, 2.0f);
+    void fill() {
+      for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+        registry.emplace<BenchPosition>(entities[i], static_cast<float>(i), 1.0f);
+        registry.emplace<BenchVelocity>(entities[i], 1.0f, 2.0f);
+      }
     }
-  }
-};
+  };
+
+  struct EnttWorld {
+    entt::registry registry;
+    std::vector<entt::entity> entities{ENTITY_COUNT};
+
+    EnttWorld() { registry.create(entities.begin(), entities.end()); }
+
+    void fill() {
+      for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+        registry.emplace<BenchPosition>(entities[i], static_cast<float>(i), 1.0f);
+        registry.emplace<BenchVelocity>(entities[i], 1.0f, 2.0f);
+      }
+    }
+  };
 
 } // namespace
 
-TEST_CASE("Registry Benchmarks: Entity Creation",
-          "[ecs][registry][!benchmark]") {
+TEST_CASE("Registry Benchmarks: Entity Creation", "[ecs][registry][!benchmark]") {
   BENCHMARK_ADVANCED("sc: create one by one")
   (Catch::Benchmark::Chronometer meter) {
     auto registries = make_registries<sc::ecs::Registry>(meter.runs());
@@ -115,8 +114,7 @@ TEST_CASE("Registry Benchmarks: Entity Creation",
     auto registries = make_registries<sc::ecs::Registry>(meter.runs());
     std::vector<sc::ecs::Entity> entities(ENTITY_COUNT);
     meter.measure([&](int run) {
-      registries[static_cast<size_t>(run)]->create(entities.begin(),
-                                                   entities.end());
+      registries[static_cast<size_t>(run)]->create(entities.begin(), entities.end());
       return entities.back().entity;
     });
   };
@@ -126,8 +124,7 @@ TEST_CASE("Registry Benchmarks: Entity Creation",
     auto registries = make_registries<entt::registry>(meter.runs());
     std::vector<entt::entity> entities(ENTITY_COUNT);
     meter.measure([&](int run) {
-      registries[static_cast<size_t>(run)]->create(entities.begin(),
-                                                   entities.end());
+      registries[static_cast<size_t>(run)]->create(entities.begin(), entities.end());
       return entities.back();
     });
   };
@@ -137,16 +134,14 @@ TEST_CASE("Registry Benchmarks: Entity Creation",
 // run on one registry any number of times. A registry per run is not an
 // option: every component of every registry holds a thread-local key, and
 // a process only has about a thousand of them.
-TEST_CASE("Registry Benchmarks: Component Writes",
-          "[ecs][registry][!benchmark]") {
+TEST_CASE("Registry Benchmarks: Component Writes", "[ecs][registry][!benchmark]") {
   ScWorld sc_world;
   EnttWorld entt_world;
   const std::vector<BenchPosition> data(ENTITY_COUNT);
 
   BENCHMARK("sc: emplace + erase") {
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-      sc_world.registry.emplace<BenchPosition>(sc_world.entities[i],
-                                               static_cast<float>(i), 1.0f);
+      sc_world.registry.emplace<BenchPosition>(sc_world.entities[i], static_cast<float>(i), 1.0f);
     }
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
       sc_world.registry.erase<BenchPosition>(sc_world.entities[i]);
@@ -155,8 +150,7 @@ TEST_CASE("Registry Benchmarks: Component Writes",
 
   BENCHMARK("entt: emplace + erase") {
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-      entt_world.registry.emplace<BenchPosition>(entt_world.entities[i],
-                                                 static_cast<float>(i), 1.0f);
+      entt_world.registry.emplace<BenchPosition>(entt_world.entities[i], static_cast<float>(i), 1.0f);
     }
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
       entt_world.registry.erase<BenchPosition>(entt_world.entities[i]);
@@ -164,24 +158,21 @@ TEST_CASE("Registry Benchmarks: Component Writes",
   };
 
   BENCHMARK("sc: insert range + erase") {
-    sc_world.registry.insert<BenchPosition>(
-        sc_world.entities.begin(), sc_world.entities.end(), data.begin());
+    sc_world.registry.insert<BenchPosition>(sc_world.entities.begin(), sc_world.entities.end(), data.begin());
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
       sc_world.registry.erase<BenchPosition>(sc_world.entities[i]);
     }
   };
 
   BENCHMARK("entt: insert range + erase") {
-    entt_world.registry.insert<BenchPosition>(
-        entt_world.entities.begin(), entt_world.entities.end(), data.begin());
+    entt_world.registry.insert<BenchPosition>(entt_world.entities.begin(), entt_world.entities.end(), data.begin());
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
       entt_world.registry.erase<BenchPosition>(entt_world.entities[i]);
     }
   };
 }
 
-TEST_CASE("Registry Benchmarks: Component Reads",
-          "[ecs][registry][!benchmark]") {
+TEST_CASE("Registry Benchmarks: Component Reads", "[ecs][registry][!benchmark]") {
   ScWorld sc_world;
   sc_world.fill();
   EnttWorld entt_world;
@@ -190,8 +181,7 @@ TEST_CASE("Registry Benchmarks: Component Reads",
   BENCHMARK("sc: get 1 component") {
     float sum = 0.0f;
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-      auto [lock, position] =
-          sc_world.registry.get<BenchPosition>(sc_world.entities[i]);
+      auto [lock, position] = sc_world.registry.get<BenchPosition>(sc_world.entities[i]);
       sum += position.x;
     }
     return sum;
@@ -208,9 +198,7 @@ TEST_CASE("Registry Benchmarks: Component Reads",
   BENCHMARK("sc: get 2 components") {
     float sum = 0.0f;
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-      auto [lock, position, velocity] =
-          sc_world.registry.get<BenchPosition, BenchVelocity>(
-              sc_world.entities[i]);
+      auto [lock, position, velocity] = sc_world.registry.get<BenchPosition, BenchVelocity>(sc_world.entities[i]);
       sum += position.x + velocity.dx;
     }
     return sum;
@@ -219,9 +207,7 @@ TEST_CASE("Registry Benchmarks: Component Reads",
   BENCHMARK("entt: get 2 components") {
     float sum = 0.0f;
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-      auto [position, velocity] =
-          entt_world.registry.get<BenchPosition, BenchVelocity>(
-              entt_world.entities[i]);
+      auto [position, velocity] = entt_world.registry.get<BenchPosition, BenchVelocity>(entt_world.entities[i]);
       sum += position.x + velocity.dx;
     }
     return sum;
@@ -231,18 +217,14 @@ TEST_CASE("Registry Benchmarks: Component Reads",
     float sum = 0.0f;
     auto view = sc_world.registry.view<BenchPosition, BenchVelocity>();
     view.raw().each(
-        [&sum](const BenchPosition &position, const BenchVelocity &velocity) {
-          sum += position.x + velocity.dx;
-        });
+        [&sum](const BenchPosition &position, const BenchVelocity &velocity) { sum += position.x + velocity.dx; });
     return sum;
   };
 
   BENCHMARK("entt: iterate view, 2 components") {
     float sum = 0.0f;
     entt_world.registry.view<BenchPosition, BenchVelocity>().each(
-        [&sum](const BenchPosition &position, const BenchVelocity &velocity) {
-          sum += position.x + velocity.dx;
-        });
+        [&sum](const BenchPosition &position, const BenchVelocity &velocity) { sum += position.x + velocity.dx; });
     return sum;
   };
 }
@@ -264,18 +246,14 @@ TEST_CASE("Registry Benchmarks: Groups", "[ecs][registry][!benchmark]") {
     float sum = 0.0f;
     auto group = sc_world.registry.group<BenchPosition, BenchVelocity>();
     group.raw().each(
-        [&sum](const BenchPosition &position, const BenchVelocity &velocity) {
-          sum += position.x + velocity.dx;
-        });
+        [&sum](const BenchPosition &position, const BenchVelocity &velocity) { sum += position.x + velocity.dx; });
     return sum;
   };
 
   BENCHMARK("entt: iterate group, 2 components") {
     float sum = 0.0f;
     entt_world.registry.group<BenchPosition, BenchVelocity>().each(
-        [&sum](const BenchPosition &position, const BenchVelocity &velocity) {
-          sum += position.x + velocity.dx;
-        });
+        [&sum](const BenchPosition &position, const BenchVelocity &velocity) { sum += position.x + velocity.dx; });
     return sum;
   };
 
@@ -285,8 +263,7 @@ TEST_CASE("Registry Benchmarks: Groups", "[ecs][registry][!benchmark]") {
       sc_world.registry.erase<BenchVelocity>(sc_world.entities[i]);
     }
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-      sc_world.registry.emplace<BenchVelocity>(sc_world.entities[i], 1.0f,
-                                               2.0f);
+      sc_world.registry.emplace<BenchVelocity>(sc_world.entities[i], 1.0f, 2.0f);
     }
   };
 
@@ -295,14 +272,12 @@ TEST_CASE("Registry Benchmarks: Groups", "[ecs][registry][!benchmark]") {
       entt_world.registry.erase<BenchVelocity>(entt_world.entities[i]);
     }
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-      entt_world.registry.emplace<BenchVelocity>(entt_world.entities[i], 1.0f,
-                                                 2.0f);
+      entt_world.registry.emplace<BenchVelocity>(entt_world.entities[i], 1.0f, 2.0f);
     }
   };
 }
 
-TEST_CASE("Registry Benchmarks: Parallel Reads",
-          "[ecs][registry][threading][!benchmark]") {
+TEST_CASE("Registry Benchmarks: Parallel Reads", "[ecs][registry][threading][!benchmark]") {
   sc::threading::init();
 
   constexpr int TASK_COUNT = 10;
@@ -319,9 +294,7 @@ TEST_CASE("Registry Benchmarks: Parallel Reads",
         [&](int thread_id, int task) {
           float sum = 0.0f;
           for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-            auto [lock, position, velocity] =
-                sc_world.registry.get<BenchPosition, BenchVelocity>(
-                    sc_world.entities[i]);
+            auto [lock, position, velocity] = sc_world.registry.get<BenchPosition, BenchVelocity>(sc_world.entities[i]);
             sum += position.x + velocity.dx;
           }
           volatile float sink = sum;
@@ -338,8 +311,7 @@ TEST_CASE("Registry Benchmarks: Parallel Reads",
         [&](int thread_id, int task) {
           float sum = 0.0f;
           auto view = sc_world.registry.view<BenchPosition, BenchVelocity>();
-          view.raw().each([&sum](const BenchPosition &position,
-                                 const BenchVelocity &velocity) {
+          view.raw().each([&sum](const BenchPosition &position, const BenchVelocity &velocity) {
             sum += position.x + velocity.dx;
           });
           volatile float sink = sum;
@@ -350,8 +322,7 @@ TEST_CASE("Registry Benchmarks: Parallel Reads",
   };
 }
 
-TEST_CASE("Registry Benchmarks: Parallel Writes",
-          "[ecs][registry][threading][!benchmark]") {
+TEST_CASE("Registry Benchmarks: Parallel Writes", "[ecs][registry][threading][!benchmark]") {
   sc::threading::init();
 
   constexpr int BATCH_COUNT = 10;
@@ -438,14 +409,10 @@ TEST_CASE("Registry Benchmarks: Parallel Writes",
   const auto write_batch = [&](sc::ecs::Registry &registry) {
     std::vector<sc::ecs::Entity> entities(BATCH_SIZE);
     registry.create(entities.begin(), entities.end());
-    registry.insert<BenchPosition>(entities.begin(), entities.end(),
-                                   positions.begin());
-    registry.insert<BenchVelocity>(entities.begin(), entities.end(),
-                                   velocities.begin());
-    registry.insert<BenchHealth>(entities.begin(), entities.end(),
-                                 healths.begin());
-    registry.insert<BenchTeam>(entities.begin(), entities.end(),
-                               teams.begin());
+    registry.insert<BenchPosition>(entities.begin(), entities.end(), positions.begin());
+    registry.insert<BenchVelocity>(entities.begin(), entities.end(), velocities.begin());
+    registry.insert<BenchHealth>(entities.begin(), entities.end(), healths.begin());
+    registry.insert<BenchTeam>(entities.begin(), entities.end(), teams.begin());
   };
 
   BENCHMARK("sc: batched, 10 pool tasks") {
@@ -453,9 +420,7 @@ TEST_CASE("Registry Benchmarks: Parallel Writes",
     reserve_all(registry);
 
     std::vector<int> batches(BATCH_COUNT);
-    sc::threading::detachBatch(
-        std::move(batches),
-        [&](int thread_id, int batch) { write_batch(registry); }, nullptr);
+    sc::threading::detachBatch(std::move(batches), [&](int thread_id, int batch) { write_batch(registry); }, nullptr);
     sc::threading::wait_until_finished();
   };
 
@@ -478,14 +443,10 @@ TEST_CASE("Registry Benchmarks: Parallel Writes",
     for (int batch = 0; batch < BATCH_COUNT; ++batch) {
       std::vector<entt::entity> entities(BATCH_SIZE);
       registry.create(entities.begin(), entities.end());
-      registry.insert<BenchPosition>(entities.begin(), entities.end(),
-                                     positions.begin());
-      registry.insert<BenchVelocity>(entities.begin(), entities.end(),
-                                     velocities.begin());
-      registry.insert<BenchHealth>(entities.begin(), entities.end(),
-                                   healths.begin());
-      registry.insert<BenchTeam>(entities.begin(), entities.end(),
-                                 teams.begin());
+      registry.insert<BenchPosition>(entities.begin(), entities.end(), positions.begin());
+      registry.insert<BenchVelocity>(entities.begin(), entities.end(), velocities.begin());
+      registry.insert<BenchHealth>(entities.begin(), entities.end(), healths.begin());
+      registry.insert<BenchTeam>(entities.begin(), entities.end(), teams.begin());
     }
   };
 
@@ -506,14 +467,10 @@ TEST_CASE("Registry Benchmarks: Parallel Writes",
   };
 
   BENCHMARK("sc: 1 task per component") {
-    sc::threading::detach(
-        [&](int thread_id) { round_trip(sc_world, BenchPosition{}); });
-    sc::threading::detach(
-        [&](int thread_id) { round_trip(sc_world, BenchVelocity{}); });
-    sc::threading::detach(
-        [&](int thread_id) { round_trip(sc_world, BenchHealth{}); });
-    sc::threading::detach(
-        [&](int thread_id) { round_trip(sc_world, BenchTeam{}); });
+    sc::threading::detach([&](int thread_id) { round_trip(sc_world, BenchPosition{}); });
+    sc::threading::detach([&](int thread_id) { round_trip(sc_world, BenchVelocity{}); });
+    sc::threading::detach([&](int thread_id) { round_trip(sc_world, BenchHealth{}); });
+    sc::threading::detach([&](int thread_id) { round_trip(sc_world, BenchTeam{}); });
     sc::threading::wait_until_finished();
   };
 
