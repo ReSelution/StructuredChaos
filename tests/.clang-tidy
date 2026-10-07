@@ -1,6 +1,8 @@
-# Catch2 sections re-enter the test body, which these checks misread.
+# Catch2 sections re-enter the test body, which these checks misread. The
+# analyzer check fires inside the Catch2 assertion macros.
 InheritParentConfig: true
 Checks: >
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
   -bugprone-use-after-move,
   -performance-inefficient-vector-operation,
   -performance-unnecessary-value-param,

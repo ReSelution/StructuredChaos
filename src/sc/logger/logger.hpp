@@ -85,7 +85,7 @@ namespace sc {
         fileSink->set_formatter(std::move(formatter));
 
         sink = std::move(fileSink);
-      } catch (const spdlog::spdlog_ex &) {
+      } catch (const spdlog::spdlog_ex &) { // NOLINT(bugprone-empty-catch)
         // Logging must not take the program down because a directory is missing
         // or read-only.
       }

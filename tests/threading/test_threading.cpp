@@ -102,6 +102,7 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
       executed_counter.fetch_add(1, std::memory_order_relaxed);
     });
 
+    future.get();
     sc::threading::wait_until_finished();
 
     REQUIRE(executed_counter.load() == task_count);

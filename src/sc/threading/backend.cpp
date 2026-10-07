@@ -57,7 +57,7 @@ namespace sc::threading::impl {
     }
     threadId = 0;
   }
-  void signalWork(size_t count) { pool_sema.release(count); }
+  void signalWork(size_t count) { pool_sema.release(static_cast<std::ptrdiff_t>(count)); }
 
   void shutdown() {
     {
@@ -98,13 +98,14 @@ namespace sc::threading::impl {
 
   void set_thread_name([[maybe_unused]] std::string_view name) {
 #ifdef _WIN32
+    // A string_view is not necessarily terminated, so its length is passed on.
     wchar_t wName[64];
-    swprintf(wName, 64, L"%hs", name.data());
+    swprintf(wName, 64, L"%.*hs", static_cast<int>(name.size()), name.data());
     SetThreadDescription(GetCurrentThread(), wName);
 #elif __linux__
-    char shortName[16];
-    std::strncpy(shortName, name.data(), 15);
-    shortName[15] = '\0';
+    // Linux allows 15 characters plus the terminator.
+    char shortName[16]{};
+    name.copy(shortName, sizeof(shortName) - 1);
     pthread_setname_np(pthread_self(), shortName);
 #endif
   }

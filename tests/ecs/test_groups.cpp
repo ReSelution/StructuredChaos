@@ -71,7 +71,7 @@ TEST_CASE("Registry Groups", "[ecs][registry][group]") {
     registry.erase<GroupVelocity>(entities[2]);
 
     auto group = registry.group<GroupPosition, GroupVelocity>();
-    REQUIRE(group.size() == count / 2 - 1);
+    REQUIRE(group.size() == (count / 2) - 1);
 
     bool matching = true;
     group.raw().each([&](entt::entity e, const GroupPosition &position, const GroupVelocity &velocity) {
@@ -100,7 +100,7 @@ TEST_CASE("Registry Groups", "[ecs][registry][group]") {
     registry.emplace<GroupVelocity>(entities[1], number_of(entities[1]));
 
     auto again = registry.group<>(entt::get<GroupPosition>, entt::exclude<GroupVelocity>);
-    REQUIRE(again.size() == count / 2 - 1);
+    REQUIRE(again.size() == (count / 2) - 1);
   }
 
   SECTION("View Over Components Of A Group") {

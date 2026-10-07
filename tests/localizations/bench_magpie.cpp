@@ -93,7 +93,7 @@ TEST_CASE("Benchmark: filling the table from several threads", "[!benchmark][mag
         workers.emplace_back([&, t] {
           Magpie::mt_reserve(PER_THREAD);
           for (const Text &text : texts[t]) {
-            magpie.mt_InsertStored(MagpieKey("bench", text.key), magpie.storeStr(text.value), "bench", text.key);
+            Magpie::mt_InsertStored(MagpieKey("bench", text.key), magpie.storeStr(text.value), "bench", text.key);
           }
           magpie.mt_Merge(false);
         });

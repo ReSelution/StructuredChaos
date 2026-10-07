@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -33,12 +34,7 @@ namespace sc::threading::impl {
     }
 
     [[nodiscard]] bool was_empty() const {
-      for (const auto &q : pQueues) {
-        if (!q.empty()) {
-          return false;
-        }
-      }
-      return true;
+      return std::ranges::all_of(pQueues, [](const auto &q) { return q.empty(); });
     }
 
     template <Priority p> void enqueue(MoveOnlyFunction &&task) {

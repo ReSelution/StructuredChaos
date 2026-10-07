@@ -23,7 +23,8 @@ namespace sc::threading::impl {
       queues.emplace<P>([f = std::forward<F>(f), ... args = std::forward<Args>(args)](int id) mutable {
         try {
           f(id, std::forward<Args>(args)...);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
+          // Nobody waits for a detached task, so there is no one to report to.
         }
       });
     } else {
@@ -34,7 +35,8 @@ namespace sc::threading::impl {
         auto &base_args = std::get<1>(*ctx);
         try {
           std::apply([&](auto &&...unpacked) { func(id, std::forward<decltype(unpacked)>(unpacked)...); }, base_args);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
+          // Nobody waits for a detached task, so there is no one to report to.
         }
       });
     }
@@ -97,7 +99,8 @@ namespace sc::threading::impl {
         try {
           std::apply([&](auto &&...unpacked) { f(id, std::move(shared->payload[i]), unpacked...); },
                      shared->saved_args);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
+          // Nobody waits for a detached task, so there is no one to report to.
         }
       });
     }

@@ -60,6 +60,7 @@ namespace {
     size_t allocations = 0;
     size_t deallocations = 0;
 
+  private:
     void *do_allocate(size_t bytes, size_t alignment) override {
       ++allocations;
       return std::pmr::new_delete_resource()->allocate(bytes, alignment);

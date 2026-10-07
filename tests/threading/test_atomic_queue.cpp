@@ -74,7 +74,7 @@ TEST_CASE("AtomicQueue Basic Operations", "[threading][atomic_queue]") {
     constexpr int count = 10;
 
     for (int i = 0; i < count; ++i) {
-      queue.push(std::move(i));
+      queue.push(std::move(i)); // NOLINT(performance-move-const-arg): push only takes rvalues
     }
 
     for (int i = 0; i < count; ++i) {
@@ -121,7 +121,7 @@ TEST_CASE("AtomicQueue Stress and Wrap-Around", "[threading][atomic_queue]") {
 
     constexpr int total_iterations = 1000;
     for (int i = 0; i < total_iterations; ++i) {
-      queue.push(std::move(i));
+      queue.push(std::move(i)); // NOLINT(performance-move-const-arg): push only takes rvalues
       int out = -1;
       REQUIRE(queue.try_pop(out, 0));
       REQUIRE(out == i);

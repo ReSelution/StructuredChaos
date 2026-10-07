@@ -216,7 +216,7 @@ TEST_CASE("Stored Strings Are Copies With A Terminator", "[magpie][store]") {
     source = "XXXXXXX";
 
     REQUIRE(stored == "Starten");
-    REQUIRE(stored[stored.size()] == '\0');
+    REQUIRE(stored.data()[stored.size()] == '\0');
   }
 
   SECTION("An empty text") {
@@ -228,7 +228,7 @@ TEST_CASE("Stored Strings Are Copies With A Terminator", "[magpie][store]") {
   }
 
   SECTION("A text of several megabytes") {
-    const std::string big(static_cast<size_type>(3 * 1024 * 1024), 'x');
+    const std::string big(size_t{3} * 1024 * 1024, 'x');
     const auto stored = magpie.storeStr(big);
 
     REQUIRE(stored == big);
@@ -251,7 +251,7 @@ TEST_CASE("UTF-16 Is Stored As UTF-8", "[magpie][store]") {
 
     REQUIRE(stored == "Start");
     REQUIRE(stored.size() == 5);
-    REQUIRE(stored[stored.size()] == '\0');
+    REQUIRE(stored.data()[stored.size()] == '\0');
   }
 
   SECTION("Umlauts, the euro sign and a surrogate pair") {
@@ -260,7 +260,7 @@ TEST_CASE("UTF-16 Is Stored As UTF-8", "[magpie][store]") {
 
     REQUIRE(stored == "Gr\xC3\xBC\xC3\x9F"
                       "e \xE2\x82\xAC \xF0\x9F\x98\x80");
-    REQUIRE(stored[stored.size()] == '\0');
+    REQUIRE(stored.data()[stored.size()] == '\0');
   }
 
   SECTION("Nothing") {
@@ -274,7 +274,7 @@ TEST_CASE("UTF-16 Is Stored As UTF-8", "[magpie][store]") {
     const auto stored = magpie.storeStrUTF16(source, 3);
 
     REQUIRE(stored.empty());
-    REQUIRE(stored[0] == '\0');
+    REQUIRE(stored.data()[0] == '\0');
   }
 }
 
@@ -283,7 +283,7 @@ TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {
   const MagpieKey key("menu", "start");
 
   SECTION("Not before") {
-    magpie.mt_InsertStored(key, magpie.storeStr("Starten"), "menu", "start");
+    Magpie::mt_InsertStored(key, magpie.storeStr("Starten"), "menu", "start");
 
     REQUIRE(magpie.size() == 0);
     REQUIRE_FALSE(magpie.find(key).has_value());
@@ -296,7 +296,7 @@ TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {
 
   SECTION("Without override the existing text stays") {
     put("menu", "start", "Starten");
-    magpie.mt_InsertStored(key, magpie.storeStr("Anfangen"), "menu", "start");
+    Magpie::mt_InsertStored(key, magpie.storeStr("Anfangen"), "menu", "start");
     magpie.mt_Merge(false);
 
     REQUIRE(magpie.size() == 1);
@@ -305,7 +305,7 @@ TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {
 
   SECTION("With override the new text replaces it") {
     put("menu", "start", "Starten");
-    magpie.mt_InsertStored(key, magpie.storeStr("Anfangen"), "menu", "start");
+    Magpie::mt_InsertStored(key, magpie.storeStr("Anfangen"), "menu", "start");
     magpie.mt_Merge(true);
 
     REQUIRE(magpie.size() == 1);
@@ -314,14 +314,14 @@ TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {
 
   SECTION("The text is taken as it is, not copied") {
     const auto stored = magpie.storeStrUTF16(u"Gr\u00FC\u00DFe", 5);
-    magpie.mt_InsertStored(key, stored, "menu", "start");
+    Magpie::mt_InsertStored(key, stored, "menu", "start");
     magpie.mt_Merge(false);
 
     REQUIRE(magpie.translate(key).data() == stored.data());
   }
 
   SECTION("A merge empties the thread's list") {
-    magpie.mt_InsertStored(key, magpie.storeStr("Starten"), "menu", "start");
+    Magpie::mt_InsertStored(key, magpie.storeStr("Starten"), "menu", "start");
     magpie.mt_Merge(false);
     magpie.clear();
     magpie.mt_Merge(true);
@@ -332,7 +332,7 @@ TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {
   SECTION("Another thread's list is not merged") {
     std::thread([&] {
       Magpie::mt_reserve(1);
-      magpie.mt_InsertStored(key, magpie.storeStr("Starten"), "menu", "start");
+      Magpie::mt_InsertStored(key, magpie.storeStr("Starten"), "menu", "start");
     }).join();
     magpie.mt_Merge(false);
 
@@ -354,7 +354,7 @@ TEST_CASE("Many Threads Fill The Table", "[magpie][threads]") {
         Magpie::mt_reserve(PerThread);
         for (size_t i = 0; i < PerThread; ++i) {
           const std::string text = name(t, i);
-          magpie.mt_InsertStored(MagpieKey("load", text), magpie.storeStr(text), "load", text);
+          Magpie::mt_InsertStored(MagpieKey("load", text), magpie.storeStr(text), "load", text);
         }
         magpie.mt_Merge(false);
       });

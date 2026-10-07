@@ -236,9 +236,10 @@ TEST_CASE("Registry Access Cache", "[ecs][registry]") {
 
     constexpr int thread_count = 8;
     constexpr int per_thread = 200;
+    constexpr int entity_count = thread_count * per_thread;
 
     sc::ecs::Registry registry;
-    std::vector<sc::ecs::Entity> entities(static_cast<size_type>(thread_count * per_thread));
+    std::vector<sc::ecs::Entity> entities(static_cast<size_t>(entity_count));
     registry.create(entities.begin(), entities.end());
 
     std::atomic<bool> start{false};
@@ -263,7 +264,7 @@ TEST_CASE("Registry Access Cache", "[ecs][registry]") {
     REQUIRE(view.size() == entities.size());
 
     auto [lock, last] = registry.get<FirstUseComponent>(entities.back());
-    REQUIRE(last.value == thread_count * per_thread - 1);
+    REQUIRE(last.value == entity_count - 1);
   }
 
   SECTION("Two Registries Used Alternately") {

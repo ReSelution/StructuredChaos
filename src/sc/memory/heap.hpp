@@ -86,7 +86,10 @@ namespace sc {
     // The mimalloc heap, for the mi_heap_* functions.
     [[nodiscard]] mi_heap_t *get() const noexcept { return m_heap; }
 
-    // For an alignment that is only known at run time.
+    // For an alignment that is only known at run time. Hides the function of
+    // the same name in memory_resource, which would do the same through a
+    // virtual call.
+    // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
     [[nodiscard]] void *allocate(size_t size, size_t align = alignof(std::max_align_t)) {
       return checked(align <= alignof(std::max_align_t) ? mi_heap_malloc(m_heap, size)
                                                         : mi_heap_malloc_aligned(m_heap, size, align));
@@ -169,7 +172,7 @@ namespace sc {
       m_heap = create();
     }
 
-  protected:
+  private:
     void *do_allocate(size_t bytes, size_t alignment) override { return allocate(bytes, alignment); }
 
     void do_deallocate(void *ptr, size_t, size_t) override { mi_free(ptr); }
@@ -178,7 +181,6 @@ namespace sc {
       return this == &other;
     }
 
-  private:
     // Room for an object and the node behind it.
     template <typename T> void *allocateWithNode() {
       constexpr size_t Align = std::max(alignof(T), alignof(CleanupNode));

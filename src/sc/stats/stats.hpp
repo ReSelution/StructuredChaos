@@ -70,6 +70,7 @@ namespace sc::stats {
     // register itself.
     static void ensureRegistered() noexcept { (void)&m_registrar; }
 
+  public:
     void internal_reset() override { reset(); }
     [[nodiscard]] std::string internal_str() const override { return str(); }
     [[nodiscard]] std::string_view internal_name() const override { return name(); }

@@ -14,6 +14,7 @@ Checks: >
   -misc-non-private-member-variables-in-classes,
   -misc-use-anonymous-namespace,
   modernize-*,
+  -modernize-avoid-c-arrays,
   -modernize-use-trailing-return-type,
   performance-*,
   -performance-enum-size,
@@ -22,6 +23,7 @@ Checks: >
   -readability-identifier-length,
   -readability-magic-numbers,
   -readability-named-parameter,
+  -readability-simplify-subscript-expr,
   -readability-uppercase-literal-suffix
 HeaderFilterRegex: '(^|/)src/sc/'
 ExcludeHeaderFilterRegex: '(^|/)subprojects/'

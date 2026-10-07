@@ -220,6 +220,7 @@ namespace sc {
     // surrogate.
     if (size != requiredSize) [[unlikely]] {
       target[0] = '\0';
+      // NOLINTNEXTLINE(bugprone-string-constructor): empty, but still pointing at the stored terminator
       return {target, 0};
     }
     target[requiredSize] = '\0';
