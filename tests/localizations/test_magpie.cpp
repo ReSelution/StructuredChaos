@@ -240,7 +240,7 @@ TEST_CASE("Stored Strings Are Copies With A Terminator", "[magpie][store]") {
     REQUIRE(*stored.data() == '\0');
   }
 
-  SECTION("A text larger than the storage's first block") {
+  SECTION("A text of several megabytes") {
     const std::string big(3 * 1024 * 1024, 'x');
     const auto stored = magpie.storeStr(big);
 
@@ -432,6 +432,31 @@ TEST_CASE("Clear Forgets Everything", "[magpie]") {
     put("menu", "start", "Anfangen");
 
     REQUIRE("menu:start"_t.view() == "Anfangen");
+  }
+
+  SECTION("Again and again") {
+    for (int round = 0; round < 200; ++round) {
+      const std::string text = "Runde " + std::to_string(round);
+      put("menu", "start", text);
+      REQUIRE(magpie.storeStr(text) == text);
+      REQUIRE("menu:start"_t.view() == text);
+      magpie.clear();
+    }
+
+    REQUIRE(magpie.size() == 0);
+  }
+
+  SECTION("From another thread than the one that stored") {
+    std::thread([&] {
+      put("menu", "start", "Starten");
+      (void)magpie.storeStr(std::string(100'000, 'x'));
+    }).join();
+    REQUIRE(magpie.size() == 1);
+
+    std::thread([&] { magpie.clear(); }).join();
+
+    REQUIRE(magpie.size() == 0);
+    REQUIRE(magpie.storeStr("danach") == "danach");
   }
 }
 

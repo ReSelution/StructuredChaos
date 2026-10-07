@@ -11,27 +11,23 @@
 #include <mutex>
 #include <vector>
 
+#include "simdutf.h"
+
 namespace sc {
 #ifdef DUMP_MAGPIE
 struct NamespaceDeduplicator {
   std::mutex mutex;
-  // We store string_view; the characters are owned by Magpie's m_storage arena
+  // We store string_view; the characters are owned by Magpie's storage
   ankerl::unordered_dense::set<std::string_view> storage;
 
-  std::string_view get(std::string_view ns, Arena &arena) {
+  std::string_view get(std::string_view ns, Magpie &magpie) {
     if (ns.empty())
       return "";
 
     std::lock_guard guard(mutex);
     auto it = storage.find(ns);
     if (it == storage.end()) {
-      // Allocate space in the arena and copy the namespace string
-      auto s = arena.allocateSpan<char>(ns.size() + 1);
-      memcpy(s.data(), ns.data(), ns.size());
-      s[ns.size()] = '\0';
-
-      std::string_view persistentNS{s.data(), ns.size()};
-      it = storage.insert(persistentNS).first;
+      it = storage.insert(magpie.storeStr(ns)).first;
     }
     return *it;
   }
@@ -220,7 +216,17 @@ std::string_view Magpie::storeStr(std::string_view str) {
 }
 
 std::string_view Magpie::storeStrUTF16(const char16_t *start, size_t length) {
-  return m_storage.utf16ToUtf8({start, length});
+  size_t requiredSize = simdutf::utf8_length_from_utf16(start, length);
+  char *target = m_storage.allocateSpan<char>(requiredSize + 1).data();
+  auto size = simdutf::convert_utf16_to_utf8(start, length, target);
+  // simdutf writes nothing and returns 0 for invalid input, e.g. a lone
+  // surrogate.
+  if (size != requiredSize) [[unlikely]] {
+    target[0] = '\0';
+    return {target, 0};
+  }
+  target[requiredSize] = '\0';
+  return {target, requiredSize};
 }
 
 thread_local magpieMAP Magpie::tl_map{};
@@ -232,7 +238,7 @@ void Magpie::insert(MagpieKey &key, std::string_view valueStr,
     auto it = entries.find(key);
     if (it != entries.end()) {
 #ifdef DUMP_MAGPIE
-      key.ns_str = g_nsDeduplicator.get(ns, m_storage);
+      key.ns_str = g_nsDeduplicator.get(ns, *this);
       key.key_str = storeStr(keyStr);
 #else
       (void)keyStr;
@@ -242,7 +248,7 @@ void Magpie::insert(MagpieKey &key, std::string_view valueStr,
     }
   }
 #ifdef DUMP_MAGPIE
-  key.ns_str = g_nsDeduplicator.get(ns, m_storage);
+  key.ns_str = g_nsDeduplicator.get(ns, *this);
   key.key_str = storeStr(keyStr);
 #else
   (void)keyStr;
@@ -258,7 +264,7 @@ void Magpie::insert(MagpieKey &key, std::string_view valueStr,
 void Magpie::mt_InsertStored(MagpieKey key, std::string_view storedValue,
                              std::string_view ns, std::string_view keyStr) {
 #ifdef DUMP_MAGPIE
-  key.ns_str = g_nsDeduplicator.get(ns, m_storage);
+  key.ns_str = g_nsDeduplicator.get(ns, *this);
   key.key_str = storeStr(keyStr);
 #else
   (void)ns;

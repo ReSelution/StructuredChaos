@@ -84,6 +84,7 @@ test('Stats Tests', test_stats)
 test_magpie = executable(
   'test_magpie',
   sources: [
+    'localizations/bench_magpie.cpp',
     'localizations/test_magpie.cpp',
   ],
   # Tells the test what was configured, so it can check that the option
@@ -96,12 +97,18 @@ test_magpie = executable(
 )
 
 test('Magpie Tests', test_magpie)
+benchmark(
+  'Magpie Benchmarks',
+  test_magpie,
+  args: ['[!benchmark]'],
+  timeout: 300,
+)
 
 test_memory = executable(
   'test_memory',
   sources: [
-    'memory/test_arena.cpp',
-    'memory/test_monotonic_resource.cpp',
+    'memory/bench_heap.cpp',
+    'memory/test_heap.cpp',
   ],
   dependencies: [
     catch2_dep,
@@ -110,3 +117,9 @@ test_memory = executable(
 )
 
 test('Memory Tests', test_memory)
+benchmark(
+  'Memory Benchmarks',
+  test_memory,
+  args: ['[!benchmark]'],
+  timeout: 300,
+)

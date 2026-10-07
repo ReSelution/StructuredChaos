@@ -14,7 +14,7 @@
 #include "ankerl/unordered_dense.h"
 #include "sc/config/config.h"
 #include "sc/hash/hash.hpp"
-#include "sc/memory/arena.hpp"
+#include "sc/memory/heap.hpp"
 #include "sc/stats/stats.hpp"
 #include "sc/stats/throughput.hpp"
 
@@ -95,6 +95,7 @@ public:
     return entries.size();
   }
 
+  // Frees all stored texts. Must not run while another thread stores one.
   void clear() noexcept;
   void dump() noexcept;
   void dumpToFile(std::string_view file) noexcept;
@@ -106,6 +107,7 @@ private:
   // MINGWs problem: static inline thread_local magpieMAP tl_map{};
   alignas(64) mutable std::shared_mutex sh_mtx;
   magpieMAP entries{};
-  Arena m_storage{1024 * 1024};
+  // Owns every stored text.
+  Heap m_storage;
 };
 } // namespace sc
