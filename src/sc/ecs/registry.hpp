@@ -108,6 +108,9 @@ struct ComponentAccessBase {
   // its components whenever one of them changes, so they all have to share a
   // single lock. Only changed while the old lock is held exclusively.
   std::atomic<ComponentLock *> lock{&ownLock};
+  // The component's storage without its type, for operations that have to
+  // visit every component of a registry.
+  entt::sparse_set *storageBase = nullptr;
 };
 
 // Takes the lock of a component exclusively and returns it. The lock may be
@@ -133,6 +136,10 @@ template <typename T>
 concept Mutable = !std::is_const_v<T>;
 
 // Shared locks on several components, held for as long as the object lives.
+//
+// While a thread holds one, it must not ask for another lock on the same
+// components (a second view, a get, a group that contains them): a writer
+// waiting in between would block the second request for good.
 //
 // The locks are always taken in the order of their addresses. Two readers
 // that name the same components in a different order therefore cannot block
@@ -191,10 +198,12 @@ template <typename... Components> struct [[nodiscard]] Lock {
       } else if constexpr (COUNT > 2) {
         std::sort(mutexes.begin(), mutexes.end(), std::less<>{});
       }
-      // Components of one group share a lock, which is then simply taken
-      // once per component.
-      for (internal::ComponentLock *mutex : mutexes) {
-        mutex->lock_shared();
+      // Components of one group share a lock. It shows up several times in
+      // a row then and must only be taken once.
+      for (size_t i = 0; i < COUNT; ++i) {
+        if (i == 0 || mutexes[i] != mutexes[i - 1]) {
+          mutexes[i]->lock_shared();
+        }
       }
 
       // A component may have been moved to another lock while this thread
@@ -220,7 +229,9 @@ template <typename... Components> struct [[nodiscard]] Lock {
 private:
   void release() {
     for (size_t i = COUNT; i-- > 0;) {
-      mutexes[i]->unlock_shared();
+      if (i == 0 || mutexes[i] != mutexes[i - 1]) {
+        mutexes[i]->unlock_shared();
+      }
     }
   }
 };
@@ -303,6 +314,22 @@ public:
     executeWrite<Component>([&](auto &storage) { storage.erase(e); });
   }
 
+  // Whether the entity exists, that is, was created and not destroyed since.
+  bool valid(entt::entity e) const;
+
+  // Removes the entity together with all of its components. Returns false if
+  // the entity does not exist (any more).
+  //
+  // Takes every component of the registry exclusively, one after the other,
+  // so it must not be called while holding a lock of this registry. Nothing
+  // else may use the entity while it is being destroyed. Its number is handed
+  // out again by a later create, with a new version: handles to the destroyed
+  // entity stay invalid.
+  bool destroy(entt::entity e);
+
+  // The same for a range of entities, taking each component only once.
+  template <typename It> void destroy(It first, It last);
+
   template <typename... Components> decltype(auto) get(entt::entity e);
 
   template <typename... Components> decltype(auto) cget(entt::entity e) const;
@@ -359,7 +386,8 @@ private:
   // The access object of every component type used with this registry, at
   // internal::componentIndex<Component>(). Read without a lock by all threads;
   // an entry is written once, under m_contextMutex, and never changes after.
-  mutable std::array<std::atomic<void *>, internal::MAX_COMPONENT_TYPES>
+  mutable std::array<std::atomic<internal::ComponentAccessBase *>,
+                     internal::MAX_COMPONENT_TYPES>
       m_access{};
 
   // Like m_access for groups, at internal::groupIndex<GroupType>().
@@ -376,7 +404,7 @@ private:
   // changes the tables of m_reg. Taken after component locks.
   alignas(64) mutable std::mutex m_contextMutex;
   // Guards m_reg's entity storage and the refilling of m_entities.
-  alignas(64) std::mutex m_entityMutex;
+  alignas(64) mutable std::mutex m_entityMutex;
 
   // Entities created in advance for create(), handed out one index at a time
   // and refilled in place once all of them are gone.
@@ -403,6 +431,33 @@ void Registry::create(It begin, It end) {
   }
 
   Entities::record(std::distance(begin, end));
+}
+
+template <typename It> void Registry::destroy(It first, It last) {
+  const size_t componentCount =
+      std::min(internal::nextComponentIndex.load(std::memory_order_acquire),
+               internal::MAX_COMPONENT_TYPES);
+  for (size_t i = 0; i < componentCount; ++i) {
+    internal::ComponentAccessBase *access =
+        m_access[i].load(std::memory_order_acquire);
+    if (access == nullptr) {
+      continue; // this registry does not use the component
+    }
+    std::unique_lock<internal::ComponentLock> lock(
+        *internal::lockExclusive(*access), std::adopt_lock);
+    for (It it = first; it != last; ++it) {
+      access->storageBase->remove(static_cast<entt::entity>(*it));
+    }
+  }
+
+  std::lock_guard lock{m_entityMutex};
+  auto &entities = m_reg.storage<entt::entity>();
+  for (It it = first; it != last; ++it) {
+    const auto e = static_cast<entt::entity>(*it);
+    if (m_reg.valid(e)) {
+      entities.erase(e);
+    }
+  }
 }
 
 template <typename... Components> decltype(auto) Registry::get(entt::entity e) {
@@ -521,8 +576,9 @@ template <typename Component> auto *Registry::getComponentAccess() const {
   static_assert(!std::is_const_v<Component>);
   using AccessType = ComponentAccess<Component>;
 
-  void *access = m_access[internal::componentIndex<Component>()].load(
-      std::memory_order_acquire);
+  internal::ComponentAccessBase *access =
+      m_access[internal::componentIndex<Component>()].load(
+          std::memory_order_acquire);
   if (access == nullptr) [[unlikely]] {
     return findOrCreateComponentAccess<Component>();
   }
@@ -532,10 +588,12 @@ template <typename Component> auto *Registry::getComponentAccess() const {
 template <typename Component>
 auto *Registry::findOrCreateComponentAccess() const {
   using AccessType = ComponentAccess<Component>;
-  std::atomic<void *> &slot = m_access[internal::componentIndex<Component>()];
+  std::atomic<internal::ComponentAccessBase *> &slot =
+      m_access[internal::componentIndex<Component>()];
 
   std::lock_guard lock(m_contextMutex);
-  if (void *access = slot.load(std::memory_order_relaxed)) {
+  if (internal::ComponentAccessBase *access =
+          slot.load(std::memory_order_relaxed)) {
     return static_cast<AccessType *>(access);
   }
 
@@ -547,6 +605,7 @@ auto *Registry::findOrCreateComponentAccess() const {
   auto uptr = std::make_unique<AccessType>();
   auto *ptr = uptr.get();
   ptr->storage = &storage;
+  ptr->storageBase = &storage;
   if constexpr (hasResource<std::remove_const_t<Component>>) {
     ptr->heap = mi_heap_new();
   }

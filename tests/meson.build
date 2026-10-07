@@ -6,6 +6,9 @@ test_registry = executable(
   'test_registry',
   sources: [
     'ecs/bench_registry.cpp',
+    'ecs/test_component_lock.cpp',
+    'ecs/test_destroy.cpp',
+    'ecs/test_groups.cpp',
     'ecs/test_registry.cpp',
   ],
   dependencies: [
