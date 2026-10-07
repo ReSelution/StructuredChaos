@@ -287,6 +287,61 @@ TEST_CASE("Registry Access Cache", "[ecs][registry]") {
   }
 }
 
+TEST_CASE("Registry Reads Of Several Components In Different Orders",
+          "[ecs][registry]") {
+  // Two readers name the same components in opposite order while writers
+  // keep taking the exclusive locks. With locks taken in the order written,
+  // a waiting writer could make the two readers block each other for good.
+  constexpr int iterations = 20'000;
+
+  sc::ecs::Registry registry;
+  auto e = registry.create();
+  registry.emplace<Position>(e, 1.0f, 2.0f);
+  registry.emplace<Velocity>(e, 3.0f, 4.0f);
+
+  std::atomic<bool> stop{false};
+  std::atomic<int> mismatches{0};
+
+  std::thread position_first([&]() {
+    for (int i = 0; i < iterations; ++i) {
+      auto [lock, pos, vel] = registry.get<Position, Velocity>(e);
+      if (pos.x != 1.0f || vel.dx != 3.0f) {
+        mismatches.fetch_add(1);
+      }
+    }
+  });
+  std::thread velocity_first([&]() {
+    for (int i = 0; i < iterations; ++i) {
+      auto [lock, vel, pos] = registry.get<Velocity, Position>(e);
+      if (pos.x != 1.0f || vel.dx != 3.0f) {
+        mismatches.fetch_add(1);
+      }
+    }
+  });
+  // Writers on another entity, so the values read above never change.
+  auto other = registry.create();
+  std::thread position_writer([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      registry.emplace<Position>(other, 0.0f, 0.0f);
+      registry.erase<Position>(other);
+    }
+  });
+  std::thread velocity_writer([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      registry.emplace<Velocity>(other, 0.0f, 0.0f);
+      registry.erase<Velocity>(other);
+    }
+  });
+
+  position_first.join();
+  velocity_first.join();
+  stop.store(true);
+  position_writer.join();
+  velocity_writer.join();
+
+  REQUIRE(mismatches.load() == 0);
+}
+
 TEST_CASE("Registry Parallel Entity Creation", "[ecs][registry]") {
   constexpr int thread_count = 8;
   // Not a multiple of the block size, so the threads run out of prepared

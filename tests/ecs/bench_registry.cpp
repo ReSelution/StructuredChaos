@@ -247,6 +247,55 @@ TEST_CASE("Registry Benchmarks: Component Reads",
   };
 }
 
+TEST_CASE("Registry Benchmarks: Parallel Reads",
+          "[ecs][registry][threading][!benchmark]") {
+  sc::threading::init();
+
+  constexpr int TASK_COUNT = 10;
+
+  ScWorld sc_world;
+  sc_world.fill();
+
+  // Every task reads two components of all entities. With get() a task takes
+  // and releases both shared locks once per entity, with a view once in all.
+  BENCHMARK("sc: get 2 components, 10 pool tasks") {
+    std::vector<int> tasks(TASK_COUNT);
+    sc::threading::detachBatch(
+        std::move(tasks),
+        [&](int thread_id, int task) {
+          float sum = 0.0f;
+          for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+            auto [lock, position, velocity] =
+                sc_world.registry.get<BenchPosition, BenchVelocity>(
+                    sc_world.entities[i]);
+            sum += position.x + velocity.dx;
+          }
+          volatile float sink = sum;
+          (void)sink;
+        },
+        nullptr);
+    sc::threading::wait_until_finished();
+  };
+
+  BENCHMARK("sc: view, 2 components, 10 pool tasks") {
+    std::vector<int> tasks(TASK_COUNT);
+    sc::threading::detachBatch(
+        std::move(tasks),
+        [&](int thread_id, int task) {
+          float sum = 0.0f;
+          auto view = sc_world.registry.view<BenchPosition, BenchVelocity>();
+          view.raw().each([&sum](const BenchPosition &position,
+                                 const BenchVelocity &velocity) {
+            sum += position.x + velocity.dx;
+          });
+          volatile float sink = sum;
+          (void)sink;
+        },
+        nullptr);
+    sc::threading::wait_until_finished();
+  };
+}
+
 TEST_CASE("Registry Benchmarks: Parallel Writes",
           "[ecs][registry][threading][!benchmark]") {
   sc::threading::init();
