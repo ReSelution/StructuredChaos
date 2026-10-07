@@ -36,6 +36,7 @@ test_threading = executable(
   'test_threading',
   sources: [
     'threading/test_atomic_queue.cpp',
+    'threading/test_future_group.cpp',
     'threading/test_threading.cpp',
   ],
   dependencies: [
@@ -130,3 +131,16 @@ benchmark(
   args: ['[!benchmark]'],
   timeout: 300,
 )
+
+test_util = executable(
+  'test_util',
+  sources: [
+    'util/test_fixed_string.cpp',
+  ],
+  dependencies: [
+    catch2_dep,
+    sc_dep,
+  ],
+)
+
+test('Util Tests', test_util, env: test_env, timeout: test_timeout)

@@ -186,7 +186,7 @@ auto enqueueBatchSfoNonVoid(R &&r, size_t size, F &&f, TupleArgs &&arg_tuple) {
 
   for (auto &&item : r) {
     std::promise<RetType> p;
-    futures.push_back(p.get_future());
+    futures.push(p.get_future());
     queues.emplace<P>(make_nonvoid_individual(
         f, std::forward<decltype(item)>(item), arg_tuple, std::move(p)));
   }
@@ -253,7 +253,7 @@ auto enqueueBatchMergedNonVoid(R &&r, F &&f, Args &&...args) {
   FutureGroup<RetType> futures;
   futures.reserve(size);
   for (auto &p : shared->promises) {
-    futures.push_back(p.get_future());
+    futures.push(p.get_future());
   }
 
   for (size_t i = 0; i < size; ++i) {

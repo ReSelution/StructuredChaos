@@ -1,9 +1,11 @@
-
+#pragma once
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <exception>
 #include <future>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -60,20 +62,39 @@ public:
            static_cast<float>(futures_.size());
   }
 
+  /// @brief Collects every result. All futures are consumed even if a task
+  /// threw; the first exception in push order is rethrown afterwards.
   auto get() {
+    std::exception_ptr first_error;
+    auto consume = [&first_error](auto &&take) {
+      try {
+        take();
+      } catch (...) {
+        if (!first_error) {
+          first_error = std::current_exception();
+        }
+      }
+    };
+
     if constexpr (std::is_void_v<T>) {
       for (auto &f : futures_) {
         if (f.valid()) {
-          f.get();
+          consume([&f] { f.get(); });
         }
+      }
+      if (first_error) {
+        std::rethrow_exception(first_error);
       }
     } else {
       std::vector<T> results;
       results.reserve(futures_.size());
       for (auto &f : futures_) {
         if (f.valid()) {
-          results.push_back(f.get());
+          consume([&f, &results] { results.push_back(f.get()); });
         }
+      }
+      if (first_error) {
+        std::rethrow_exception(first_error);
       }
       return results;
     }
