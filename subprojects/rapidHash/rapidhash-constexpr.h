@@ -40,6 +40,12 @@
 #include <utility>
 #include "rapidhash.h"
 
+/*
+ *  Everything in this header is meant to run while compiling, so its functions
+ *  are constexpr on every compiler. RAPIDHASH_INLINE_CONSTEXPR is not: it
+ *  leaves constexpr out for MSVC, where the run-time code uses intrinsics.
+ */
+#define RAPIDHASH_COMPILE_TIME inline constexpr
 
 namespace rapid::constExpr {
 /*
@@ -93,7 +99,7 @@ namespace rapid::constExpr {
  *  Xors and overwrites A contents with C's low 64 bits.
  *  Xors and overwrites B contents with C's high 64 bits.
  */
-    RAPIDHASH_INLINE_CONSTEXPR void rapid_mum(uint64_t *A, uint64_t *B) RAPIDHASH_NOEXCEPT {
+    RAPIDHASH_COMPILE_TIME void rapid_mum(uint64_t *A, uint64_t *B) RAPIDHASH_NOEXCEPT {
 #if defined(__SIZEOF_INT128__)
         __uint128_t r = *A;
         r *= *B;
@@ -103,7 +109,7 @@ namespace rapid::constExpr {
         *A = (uint64_t) r;
         *B = (uint64_t) (r >> 64);
 #endif
-#elif defined(_MSC_VER) && (defined(_WIN64) || defined(_M_HYBRID_CHPE_ARM64))
+#elif 0 /* The MSVC intrinsics (_umul128, __umulh) are not constexpr; the portable code below is used instead. */
 #if defined(_M_X64)
 #ifdef RAPIDHASH_PROTECTED
         uint64_t a, b;
@@ -147,7 +153,7 @@ namespace rapid::constExpr {
  *  Calculates 128-bit C = A * B.
  *  Returns 64-bit xor between high and low 64 bits of C.
  */
-    RAPIDHASH_INLINE_CONSTEXPR uint64_t rapid_mix(uint64_t A, uint64_t B) RAPIDHASH_NOEXCEPT {
+    RAPIDHASH_COMPILE_TIME uint64_t rapid_mix(uint64_t A, uint64_t B) RAPIDHASH_NOEXCEPT {
         rapid_mum(&A, &B);
         return A ^ B;
     }
@@ -158,7 +164,7 @@ namespace rapid::constExpr {
 #ifdef RAPIDHASH_LITTLE_ENDIAN
 
     template<ByteType T>
-    RAPIDHASH_INLINE_CONSTEXPR uint64_t rapid_read64(const T *p) RAPIDHASH_NOEXCEPT {
+    RAPIDHASH_COMPILE_TIME uint64_t rapid_read64(const T *p) RAPIDHASH_NOEXCEPT {
         return (static_cast<uint64_t>(static_cast<uint8_t>(p[0])) << 0) |
                (static_cast<uint64_t>(static_cast<uint8_t>(p[1])) << 8) |
                (static_cast<uint64_t>(static_cast<uint8_t>(p[2])) << 16) |
@@ -171,7 +177,7 @@ namespace rapid::constExpr {
     }
 
     template<ByteType T>
-    RAPIDHASH_INLINE_CONSTEXPR uint64_t rapid_read32(const T *p) RAPIDHASH_NOEXCEPT {
+    RAPIDHASH_COMPILE_TIME uint64_t rapid_read32(const T *p) RAPIDHASH_NOEXCEPT {
         return (static_cast<uint32_t>(static_cast<uint8_t>(p[0])) << 0) |
                (static_cast<uint32_t>(static_cast<uint8_t>(p[1])) << 8) |
                (static_cast<uint32_t>(static_cast<uint8_t>(p[2])) << 16) |
@@ -207,7 +213,7 @@ namespace rapid::constExpr {
  */
 
     template<ByteType T>
-    RAPIDHASH_INLINE_CONSTEXPR uint64_t
+    RAPIDHASH_COMPILE_TIME uint64_t
     rapidhash_internal_constexpr(const T *key, size_t len, uint64_t seed, const uint64_t *secret) RAPIDHASH_NOEXCEPT {
         const T *p = key;
         seed ^= rapid_mix(seed ^ secret[2], secret[1]);
@@ -325,7 +331,7 @@ namespace rapid::constExpr {
  *  Returns a 64-bit hash.
  */
     template<ByteType T>
-    RAPIDHASH_INLINE_CONSTEXPR uint64_t
+    RAPIDHASH_COMPILE_TIME uint64_t
     rapidhash_withSeed(const T *key, size_t len, uint64_t seed) RAPIDHASH_NOEXCEPT {
         return rapidhash_internal_constexpr(key, len, seed, rapid_secret);
     }
@@ -341,7 +347,7 @@ namespace rapid::constExpr {
  *  Returns a 64-bit hash.
  */
     template<ByteType T>
-    RAPIDHASH_INLINE_CONSTEXPR uint64_t rapidhash(const T *key, size_t len) RAPIDHASH_NOEXCEPT {
+    RAPIDHASH_COMPILE_TIME uint64_t rapidhash(const T *key, size_t len) RAPIDHASH_NOEXCEPT {
         return rapidhash_withSeed(key, len, 0);
     }
 

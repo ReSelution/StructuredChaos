@@ -356,14 +356,20 @@ RAPIDHASH_INLINE uint64_t rapid_read64_lowercase(const char *p) RAPIDHASH_NOEXCE
   // The MSB (Most Significant Bit) of each byte in the 64-bit word.
   constexpr uint64_t msb_mask = 0x8080808080808080ULL;
 
-  // Trick: Check if a byte is in range ['A', 'Z'] by leveraging integer underflow/overflow.
+  // Only the low 7 bits of every byte take part in the range check. With the
+  // MSB included, a byte of 0xC1 or more would carry into its neighbour and
+  // be taken for a letter itself.
+  const uint64_t low7 = chunk & ~msb_mask;
+
+  // Trick: Check if a byte is in range ['A', 'Z'] by leveraging integer overflow into the MSB.
   // 1. If byte >= 'A' (0x41), adding (0x80 - 0x41) will set the MSB to 1.
   // 2. If byte >= 'Z' + 1 (0x5B), adding (0x80 - 0x5B) will set the MSB to 1.
-  uint64_t at_least_A = chunk + (msb_mask - 0x4141414141414141ULL);
-  uint64_t beyond_Z   = chunk + (msb_mask - 0x5B5B5B5B5B5B5B5BULL);
+  uint64_t at_least_A = low7 + (msb_mask - 0x4141414141414141ULL);
+  uint64_t beyond_Z   = low7 + (msb_mask - 0x5B5B5B5B5B5B5B5BULL);
 
   // XOR the results: The MSB is now 1 ONLY if the byte was >= 'A' AND < 'Z'+1.
-  uint64_t uppercase_mask = (at_least_A ^ beyond_Z) & msb_mask;
+  // Bytes that had their MSB set are not ASCII and stay as they are.
+  uint64_t uppercase_mask = (at_least_A ^ beyond_Z) & msb_mask & ~chunk;
 
   // ASCII 'A' (0x41) to 'a' (0x61) is a flip of the 6th bit (0x20).
   // Shift our MSB (0x80) mask 2 bits to the right to target the 0x20 bit.
@@ -379,11 +385,12 @@ RAPIDHASH_INLINE uint32_t rapid_read32_lowercase(const char *p) RAPIDHASH_NOEXCE
   std::memcpy(&chunk, p, sizeof(uint32_t));
 
   const uint32_t msb_mask = 0x80808080;
+  const uint32_t low7 = chunk & ~msb_mask;
 
-  uint32_t at_least_A = chunk + (msb_mask - 0x41414141);
-  uint32_t beyond_Z   = chunk + (msb_mask - 0x5B5B5B5B);
+  uint32_t at_least_A = low7 + (msb_mask - 0x41414141);
+  uint32_t beyond_Z   = low7 + (msb_mask - 0x5B5B5B5B);
 
-  uint32_t uppercase_mask = (at_least_A ^ beyond_Z) & msb_mask;
+  uint32_t uppercase_mask = (at_least_A ^ beyond_Z) & msb_mask & ~chunk;
 
   return chunk | (uppercase_mask >> 2);
 }
@@ -435,8 +442,10 @@ RAPIDHASH_INLINE_CONSTEXPR uint64_t rapidhash_internal_lowercase(const char *key
                 b = rapid_read32_lowercase(plast);
             }
         } else if (len > 0) {
-            a = (((uint64_t)to_lower(p[0]))<<45)|p[len-1];
-            b = to_lower(p[len>>1]);
+            // All three bytes as unsigned, lowercased values: a plain char
+            // would be sign-extended and the last one was left as it was.
+            a = (((uint64_t)to_lower((uint8_t)p[0]))<<45)|to_lower((uint8_t)p[len-1]);
+            b = to_lower((uint8_t)p[len>>1]);
         } else
             a = b = 0;
     } else {
