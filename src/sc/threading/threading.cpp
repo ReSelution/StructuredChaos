@@ -1,4 +1,5 @@
 #include "threading.hpp"
+
 #include <cstdint>
 void sc::threading::init(uint32_t threads) { impl::init_impl(threads); }
 

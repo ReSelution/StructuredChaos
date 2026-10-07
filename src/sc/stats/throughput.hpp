@@ -1,77 +1,74 @@
 #pragma once
-#include "units.hpp"
 #include <atomic>
 #include <chrono>
 #include <format>
 #include <string>
 #include <string_view>
 
+#include "units.hpp"
+
 namespace sc::stats {
 
-template <typename UnitSystem = DataUnits> struct Throughput {
-  using DurationNS = std::chrono::nanoseconds;
-  // A clock that never jumps: with the system clock a correction of the time
-  // in between would show up as a negative or huge duration.
-  using Clock = std::chrono::steady_clock;
-  using TimePoint = Clock::time_point;
+  template <typename UnitSystem = DataUnits> struct Throughput {
+    using DurationNS = std::chrono::nanoseconds;
+    // A clock that never jumps: with the system clock a correction of the time
+    // in between would show up as a negative or huge duration.
+    using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
 
-  struct alignas(64) Storage {
-    const std::string_view name;
-    std::atomic<uint64_t> value{0};
-    std::atomic<DurationNS::rep> accumulated_ns{0};
-    std::atomic<TimePoint::duration::rep> startTimeTicks{0};
-    std::atomic<bool> running{false};
+    struct alignas(64) Storage {
+      const std::string_view name;
+      std::atomic<uint64_t> value{0};
+      std::atomic<DurationNS::rep> accumulated_ns{0};
+      std::atomic<TimePoint::duration::rep> startTimeTicks{0};
+      std::atomic<bool> running{false};
+    };
+
+    static void start(Storage &s) {
+      if (!s.running.exchange(true, std::memory_order_acquire)) {
+        auto now = Clock::now();
+        s.startTimeTicks.store(now.time_since_epoch().count(), std::memory_order_release);
+      }
+    }
+
+    static void record(Storage &s, uint64_t b) {
+      start(s);
+      s.value.fetch_add(b, std::memory_order_relaxed);
+    }
+
+    static void stop(Storage &s) {
+      if (s.running.exchange(false, std::memory_order_acq_rel)) {
+        auto end = Clock::now();
+        auto startTicks = s.startTimeTicks.load(std::memory_order_acquire);
+        TimePoint startPoint{TimePoint::duration{startTicks}};
+
+        auto diff = std::chrono::duration_cast<DurationNS>(end - startPoint);
+        s.accumulated_ns.fetch_add(diff.count(), std::memory_order_relaxed);
+      }
+    }
+
+    static void reset(Storage &s) {
+      s.value.store(0, std::memory_order_relaxed);
+      s.accumulated_ns.store(0, std::memory_order_relaxed);
+      s.running.store(false, std::memory_order_relaxed);
+    }
+
+    static std::string format(const Storage &s) {
+      uint64_t raw_val = s.value.load(std::memory_order_relaxed);
+      DurationNS dur{s.accumulated_ns.load(std::memory_order_relaxed)};
+
+      if (s.running.load(std::memory_order_acquire)) {
+        auto startTicks = s.startTimeTicks.load(std::memory_order_acquire);
+        TimePoint startPoint{TimePoint::duration{startTicks}};
+        dur += std::chrono::duration_cast<DurationNS>(Clock::now() - startPoint);
+      }
+
+      double secs = std::chrono::duration<double>(dur).count();
+      double val_per_sec = (secs > 0) ? (static_cast<double>(raw_val) / secs) : 0.0;
+
+      return std::format("{} total | {}/s", ChaosFormatter<UnitSystem>::format(static_cast<double>(raw_val)),
+                         ChaosFormatter<UnitSystem>::format(val_per_sec));
+    }
   };
-
-  static void start(Storage &s) {
-    if (!s.running.exchange(true, std::memory_order_acquire)) {
-      auto now = Clock::now();
-      s.startTimeTicks.store(now.time_since_epoch().count(),
-                             std::memory_order_release);
-    }
-  }
-
-  static void record(Storage &s, uint64_t b) {
-    start(s);
-    s.value.fetch_add(b, std::memory_order_relaxed);
-  }
-
-  static void stop(Storage &s) {
-    if (s.running.exchange(false, std::memory_order_acq_rel)) {
-      auto end = Clock::now();
-      auto startTicks = s.startTimeTicks.load(std::memory_order_acquire);
-      TimePoint startPoint{TimePoint::duration{startTicks}};
-
-      auto diff = std::chrono::duration_cast<DurationNS>(end - startPoint);
-      s.accumulated_ns.fetch_add(diff.count(), std::memory_order_relaxed);
-    }
-  }
-
-  static void reset(Storage &s) {
-    s.value.store(0, std::memory_order_relaxed);
-    s.accumulated_ns.store(0, std::memory_order_relaxed);
-    s.running.store(false, std::memory_order_relaxed);
-  }
-
-  static std::string format(const Storage &s) {
-    uint64_t raw_val = s.value.load(std::memory_order_relaxed);
-    DurationNS dur{s.accumulated_ns.load(std::memory_order_relaxed)};
-
-    if (s.running.load(std::memory_order_acquire)) {
-      auto startTicks = s.startTimeTicks.load(std::memory_order_acquire);
-      TimePoint startPoint{TimePoint::duration{startTicks}};
-      dur += std::chrono::duration_cast<DurationNS>(Clock::now() - startPoint);
-    }
-
-    double secs = std::chrono::duration<double>(dur).count();
-    double val_per_sec =
-        (secs > 0) ? (static_cast<double>(raw_val) / secs) : 0.0;
-
-    return std::format(
-        "{} total | {}/s",
-        ChaosFormatter<UnitSystem>::format(static_cast<double>(raw_val)),
-        ChaosFormatter<UnitSystem>::format(val_per_sec));
-  }
-};
 
 } // namespace sc::stats
