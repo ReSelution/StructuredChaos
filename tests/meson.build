@@ -51,3 +51,16 @@ test_hash = executable(
 )
 
 test('Hash Tests', test_hash)
+
+test_logger = executable(
+  'test_logger',
+  sources: [
+    'logger/test_logger.cpp',
+  ],
+  dependencies: [
+    catch2_dep,
+    sc_dep,
+  ],
+)
+
+test('Logger Tests', test_logger)
