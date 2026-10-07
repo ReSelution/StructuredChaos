@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -112,4 +113,55 @@ TEST_CASE("ComponentLock Readers Never See A Writer At Work", "[ecs][lock]") {
   REQUIRE(first == static_cast<long>(writer_count) * writes_per_thread);
   REQUIRE(second == first);
   REQUIRE(reads.load() > 0);
+}
+
+TEST_CASE("ComponentLock Writer Gets In Between Overlapping Readers",
+          "[ecs][lock]") {
+  // Every reader holds the lock much longer than it stays away from it, so
+  // with eight of them the lock is practically never free on its own. A
+  // writer only gets its turn because new readers stay out while it waits.
+  constexpr int reader_count = 8;
+  constexpr int writes = 50;
+  constexpr auto hold_time = std::chrono::microseconds(200);
+
+  ComponentLock lock;
+  std::atomic<bool> stop{false};
+  std::atomic<int> written{0};
+
+  std::vector<std::thread> readers;
+  for (int t = 0; t < reader_count; ++t) {
+    readers.emplace_back([&]() {
+      while (!stop.load(std::memory_order_relaxed)) {
+        lock.lock_shared();
+        std::this_thread::sleep_for(hold_time);
+        lock.unlock_shared();
+      }
+    });
+  }
+
+  std::thread writer([&]() {
+    for (int i = 0; i < writes; ++i) {
+      lock.lock();
+      written.fetch_add(1, std::memory_order_relaxed);
+      lock.unlock();
+    }
+  });
+
+  // Generous limit: with the waiting mark this takes a few hundredths of a
+  // second. Once the readers stop, the writer finishes either way.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (written.load(std::memory_order_relaxed) < writes &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const int reached = written.load();
+
+  stop.store(true);
+  for (auto &thread : readers) {
+    thread.join();
+  }
+  writer.join();
+
+  REQUIRE(reached == writes);
 }
