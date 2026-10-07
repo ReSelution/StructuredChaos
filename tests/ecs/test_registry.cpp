@@ -436,6 +436,27 @@ TEST_CASE("Registry Entity Creation From Many Threads", "[ecs][registry]") {
   }
 }
 
+TEST_CASE("Registry Holds More Than 2^20 Entities", "[ecs][registry]") {
+  // The limit of 32-bit entity ids. The project builds EnTT with 64-bit ids,
+  // which leaves 32 bits for the entity number.
+  STATIC_REQUIRE(sizeof(entt::entity) == 8);
+
+  constexpr size_t count = (size_t{1} << 20) + 1000;
+
+  sc::ecs::Registry registry;
+  std::vector<sc::ecs::Entity> entities(count);
+  registry.create(entities.begin(), entities.end());
+
+  std::vector<entt::entity> all(entities.begin(), entities.end());
+  std::sort(all.begin(), all.end());
+  REQUIRE(first_unexpected_entity(all) == all.size());
+
+  // A component on the last entity, beyond the old limit.
+  registry.emplace<Position>(entities.back(), 1.0f, 2.0f);
+  auto [lock, pos] = registry.get<Position>(entities.back());
+  REQUIRE(pos.y == 2.0f);
+}
+
 TEST_CASE("Registry Bulk Entity Creation", "[ecs][registry]") {
   sc::ecs::Registry registry;
   constexpr size_t count = 100;
