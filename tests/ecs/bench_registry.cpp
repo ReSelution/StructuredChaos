@@ -247,6 +247,60 @@ TEST_CASE("Registry Benchmarks: Component Reads",
   };
 }
 
+TEST_CASE("Registry Benchmarks: Groups", "[ecs][registry][!benchmark]") {
+  // Own worlds: a group reorders the storages of its components.
+  ScWorld sc_world;
+  sc_world.fill();
+  EnttWorld entt_world;
+  entt_world.fill();
+
+  {
+    // Create the groups outside of the timing.
+    auto group = sc_world.registry.group<BenchPosition, BenchVelocity>();
+    (void)entt_world.registry.group<BenchPosition, BenchVelocity>();
+  }
+
+  BENCHMARK("sc: iterate group, 2 components") {
+    float sum = 0.0f;
+    auto group = sc_world.registry.group<BenchPosition, BenchVelocity>();
+    group.raw().each(
+        [&sum](const BenchPosition &position, const BenchVelocity &velocity) {
+          sum += position.x + velocity.dx;
+        });
+    return sum;
+  };
+
+  BENCHMARK("entt: iterate group, 2 components") {
+    float sum = 0.0f;
+    entt_world.registry.group<BenchPosition, BenchVelocity>().each(
+        [&sum](const BenchPosition &position, const BenchVelocity &velocity) {
+          sum += position.x + velocity.dx;
+        });
+    return sum;
+  };
+
+  // Writing a component of a group also moves the other one into place.
+  BENCHMARK("sc: emplace + erase in a group") {
+    for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+      sc_world.registry.erase<BenchVelocity>(sc_world.entities[i]);
+    }
+    for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+      sc_world.registry.emplace<BenchVelocity>(sc_world.entities[i], 1.0f,
+                                               2.0f);
+    }
+  };
+
+  BENCHMARK("entt: emplace + erase in a group") {
+    for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+      entt_world.registry.erase<BenchVelocity>(entt_world.entities[i]);
+    }
+    for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+      entt_world.registry.emplace<BenchVelocity>(entt_world.entities[i], 1.0f,
+                                                 2.0f);
+    }
+  };
+}
+
 TEST_CASE("Registry Benchmarks: Parallel Reads",
           "[ecs][registry][threading][!benchmark]") {
   sc::threading::init();
