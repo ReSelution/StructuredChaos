@@ -5,14 +5,18 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string_view>
 
 #include "ankerl/unordered_dense.h"
-#include "hash/hash.hpp"
-#include "memory/arena.hpp"
-#include "stats/stats.hpp"
-#include "stats/throughput.hpp"
+#include "sc/config/config.h"
+#include "sc/hash/hash.hpp"
+#include "sc/memory/arena.hpp"
+#include "sc/stats/stats.hpp"
+#include "sc/stats/throughput.hpp"
 
 namespace sc {
 using MagpieInsert =
@@ -38,7 +42,9 @@ struct MagpieKey {
 
   constexpr MagpieKey(const uint64_t ns, uint64_t k) : key(sc::hash(ns, k)) {}
 
-  bool operator==(const MagpieKey &other) const = default;
+  constexpr bool operator==(const MagpieKey &other) const noexcept {
+    return key == other.key;
+  }
 };
 
 struct MagpieKeyHasher {
@@ -57,12 +63,18 @@ public:
     return &magpie;
   }
 
-  std::string_view translate(const MagpieKey key) noexcept {
+  static constexpr std::string_view MissingString = "<Magpie missing String>";
+
+  std::optional<std::string_view> find(const MagpieKey key) noexcept {
     std::shared_lock lock(sh_mtx);
     if (auto it = entries.find(key); it != entries.end()) [[likely]] {
       return it->second;
     }
-    return "<Magpie missing String>";
+    return std::nullopt;
+  }
+
+  std::string_view translate(const MagpieKey key) noexcept {
+    return find(key).value_or(MissingString);
   }
 
   static void mt_reserve(size_t size) { tl_map.reserve(size); }
@@ -70,23 +82,29 @@ public:
   void insert(MagpieKey &key, std::string_view valueStr, std::string_view ns,
               std::string_view keyStr);
 
-  void mt_Insert(MagpieKey key, std::string_view valueStr, std::string_view ns,
-                 std::string_view keyStr);
+  // Keeps the view as it is instead of copying the text, so that a text can
+  // be converted straight into the storage (storeStr, storeStrUTF16) without
+  // a temporary. The text has to live until the next clear().
+  void mt_InsertStored(MagpieKey key, std::string_view storedValue,
+                       std::string_view ns, std::string_view keyStr);
 
   void mt_Merge(bool override);
 
-  [[nodiscard]] size_t size() const noexcept { return entries.size(); }
+  [[nodiscard]] size_t size() const noexcept {
+    std::shared_lock lock(sh_mtx);
+    return entries.size();
+  }
 
   void clear() noexcept;
   void dump() noexcept;
   void dumpToFile(std::string_view file) noexcept;
   std::string_view storeStr(std::string_view str);
-  std::string_view storeStrUTF16(const char16_t *start, size_t lengfth);
+  std::string_view storeStrUTF16(const char16_t *start, size_t length);
 
 private:
   static thread_local magpieMAP tl_map; // Because MINGW
   // MINGWs problem: static inline thread_local magpieMAP tl_map{};
-  alignas(64) std::shared_mutex sh_mtx;
+  alignas(64) mutable std::shared_mutex sh_mtx;
   magpieMAP entries{};
   Arena m_storage{1024 * 1024};
 };

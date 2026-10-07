@@ -3,6 +3,7 @@
 //
 
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -32,11 +33,11 @@ public:
 #endif
 
     auto sep = sv.find(':');
+    // The same keys as the constructors that take the texts at run time.
     if (sep == std::string_view::npos) {
-      m_key = MagpieKey{hash(sv.data(), sv.size())};
+      m_key = MagpieKey{sv};
     } else {
-      m_key = MagpieKey{hash(sv.data(), sep),
-                        hash(sv.data() + sep + 1, len - sep - 1)};
+      m_key = MagpieKey{sv.substr(0, sep), sv.substr(sep + 1)};
     }
   }
 
@@ -46,13 +47,21 @@ public:
     return MagpieString(key);
   };
 
+  // The translation, or the source text as long as there is none.
   [[nodiscard]] std::string_view view() const noexcept {
-    return Magpie::get()->translate(m_key);
+    auto *magpie = Magpie::get();
+    if (auto text = magpie->find(m_key)) [[likely]] {
+      return *text;
+    }
+    if (m_srcKey != MagpieKey{}) {
+      return magpie->translate(m_srcKey);
+    }
+    return Magpie::MissingString;
   }
 
   operator std::string_view() const { return view(); }
 
-  [[nodiscard]] MagpieKey key() const { return m_key; }
+  [[nodiscard]] constexpr MagpieKey key() const { return m_key; }
   [[nodiscard]] const char *data() const noexcept { return view().data(); }
   [[nodiscard]] size_t size() const noexcept { return view().size(); }
 

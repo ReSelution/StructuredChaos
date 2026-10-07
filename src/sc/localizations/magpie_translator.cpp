@@ -5,19 +5,26 @@
 #include "magpie_translator.hpp"
 
 #include "simdutf.h"
+#include <algorithm>
 #include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <mutex>
+#include <vector>
+
 namespace sc {
 #ifdef DUMP_MAGPIE
 struct NamespaceDeduplicator {
-  SC::ChaosSpinLock spinlock;
+  std::mutex mutex;
   // We store string_view; the characters are owned by Magpie's m_storage arena
   ankerl::unordered_dense::set<std::string_view> storage;
 
-  std::string_view get(std::string_view ns, SC::ChaosBumpArena &arena) {
+  std::string_view get(std::string_view ns, Arena &arena) {
     if (ns.empty())
       return "";
 
-    std::lock_guard guard(spinlock);
+    std::lock_guard guard(mutex);
     auto it = storage.find(ns);
     if (it == storage.end()) {
       // Allocate space in the arena and copy the namespace string
@@ -30,14 +37,24 @@ struct NamespaceDeduplicator {
     }
     return *it;
   }
+
+  void clear() {
+    std::lock_guard guard(mutex);
+    storage.clear();
+  }
 };
 static NamespaceDeduplicator g_nsDeduplicator;
 #endif
 
 void Magpie::clear() noexcept {
+  std::unique_lock lock(sh_mtx);
   MagpieInsert::reset();
   MagpieMEM::reset();
   entries.clear();
+#ifdef DUMP_MAGPIE
+  // Its namespaces live in the storage that is released below.
+  g_nsDeduplicator.clear();
+#endif
   m_storage.reset();
 }
 
@@ -86,7 +103,8 @@ void Magpie::dump() noexcept {
 #endif
 }
 
-void writeEscaped(FILE *f, std::string_view s) {
+#ifdef DUMP_MAGPIE
+static void writeEscaped(FILE *f, std::string_view s) {
   for (char c : s) {
     switch (c) {
     case '\"':
@@ -119,6 +137,7 @@ void writeEscaped(FILE *f, std::string_view s) {
     }
   }
 }
+#endif
 
 void Magpie::dumpToFile(std::string_view file) noexcept {
 #ifdef DUMP_MAGPIE
@@ -208,7 +227,7 @@ std::string_view Magpie::storeStrUTF16(const char16_t *start, size_t length) {
   auto size = simdutf::convert_utf16_to_utf8(start, length, target.data());
   assert(size == requiredSize);
   target[requiredSize] = '\0';
-  return {target.data(), target.size()};
+  return {target.data(), requiredSize};
 }
 
 thread_local magpieMAP Magpie::tl_map{};
@@ -243,8 +262,8 @@ void Magpie::insert(MagpieKey &key, std::string_view valueStr,
   }
 }
 
-void Magpie::mt_Insert(MagpieKey key, std::string_view valueStr,
-                       std::string_view ns, std::string_view keyStr) {
+void Magpie::mt_InsertStored(MagpieKey key, std::string_view storedValue,
+                             std::string_view ns, std::string_view keyStr) {
 #ifdef DUMP_MAGPIE
   key.ns_str = g_nsDeduplicator.get(ns, m_storage);
   key.key_str = storeStr(keyStr);
@@ -253,8 +272,8 @@ void Magpie::mt_Insert(MagpieKey key, std::string_view valueStr,
   (void)keyStr;
 #endif
 
-  tl_map.emplace(key, valueStr);
-  MagpieMEM::record(valueStr.size());
+  tl_map.emplace(key, storedValue);
+  MagpieMEM::record(storedValue.size());
 }
 
 void Magpie::mt_Merge(bool override) {
