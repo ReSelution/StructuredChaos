@@ -1,4 +1,9 @@
 #pragma once
+// Defines CHAOS_STATS_ENABLED when the project is configured with
+// -Denable_chaos_stats=true. Has to come first: without it the switch below
+// would always read "off".
+#include "sc/config/config.h"
+
 #include <optional>
 #include <ranges>
 #include <string>
@@ -23,8 +28,7 @@ public:
   [[nodiscard]] virtual std::string_view internal_name() const = 0;
 };
 
-// Interne Registry-Zugriffsfunktion (bleibt im Namespace, aber nicht
-// exportiert)
+// The list of all stats, by name. Internal.
 inline std::unordered_map<std::string_view, IStat *> &reg() {
   static std::unordered_map<std::string_view, IStat *> registry{};
   return registry;

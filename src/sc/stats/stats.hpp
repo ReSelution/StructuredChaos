@@ -11,29 +11,33 @@ namespace sc::stats {
 template <FixedString Name, typename ChaosTracker, bool AllowReset = true>
 class Stat : public IStat {
 public:
-  // Nutzen wir nur, wenn Stats auch an sind
+  // Only used when stats are enabled.
   static inline typename ChaosTracker::Storage m_storage{Name.text()};
 
   static void record(auto &&...args) {
     if constexpr (StatsEnabled) {
+      ensureRegistered();
       ChaosTracker::record(m_storage, std::forward<decltype(args)>(args)...);
     }
   }
 
   static void start(auto &&...args) {
     if constexpr (StatsEnabled) {
+      ensureRegistered();
       ChaosTracker::start(m_storage, std::forward<decltype(args)>(args)...);
     }
   }
 
   static void stop(auto &&...args) {
     if constexpr (StatsEnabled) {
+      ensureRegistered();
       ChaosTracker::stop(m_storage, std::forward<decltype(args)>(args)...);
     }
   }
 
   static void reset() {
     if constexpr (StatsEnabled && AllowReset) {
+      ensureRegistered();
       ChaosTracker::reset(m_storage);
     }
   }
@@ -41,24 +45,31 @@ public:
   static constexpr std::string_view name() { return Name.text(); }
 
   static std::string str() {
-    if constexpr (StatsEnabled)
+    if constexpr (StatsEnabled) {
+      ensureRegistered();
       return ChaosTracker::format(m_storage);
+    }
     return "";
   }
 
 private:
-  // 1. Instanz-Getter zuerst definieren, damit er für m_registrar sichtbar ist
+  // Defined before m_registrar, which needs it.
   static Stat *get_instance() {
     static Stat instance;
     return &instance;
   }
 
-  // 2. Registrierungs-Struktur
+  // Adds the stat to the list of all stats when it is constructed.
   struct AutoReg {
     AutoReg(IStat *ptr) { stats::register_stat(ptr); }
   };
 
   static inline AutoReg m_registrar{get_instance()};
+
+  // A static member of a class template only exists once something uses it.
+  // Nothing else refers to m_registrar, so without this no stat would ever
+  // register itself.
+  static void ensureRegistered() noexcept { (void)&m_registrar; }
 
   void internal_reset() override { reset(); }
   std::string internal_str() const override { return str(); }
@@ -70,6 +81,10 @@ template <typename StatsType> struct ScopeGuard {
     StatsType::start(std::forward<decltype(args)>(args)...);
   }
   ~ScopeGuard() { StatsType::stop(); }
+
+  // A copy would stop the stat a second time.
+  ScopeGuard(const ScopeGuard &) = delete;
+  ScopeGuard &operator=(const ScopeGuard &) = delete;
 };
 
 } // namespace sc::stats

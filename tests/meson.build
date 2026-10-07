@@ -64,3 +64,19 @@ test_logger = executable(
 )
 
 test('Logger Tests', test_logger)
+
+test_stats = executable(
+  'test_stats',
+  sources: [
+    'stats/test_stats.cpp',
+  ],
+  # Tells the test what was configured, so it can check that the option
+  # actually reaches the code.
+  cpp_args: ['-DSC_TEST_EXPECT_STATS=' + get_option('enable_chaos_stats').to_int().to_string()],
+  dependencies: [
+    catch2_dep,
+    sc_dep,
+  ],
+)
+
+test('Stats Tests', test_stats)

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <array>
-#include <cmath> // Für std::abs
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -17,7 +17,7 @@ struct DataUnits {
 struct MetricUnits {
   static constexpr double base = 1000.0;
   static constexpr std::array suffixes{"", "K", "M", "B",
-                                       "T"}; // Für Counts (1K, 1M...)
+                                       "T"}; // for counts (1K, 1M...)
 };
 
 template <typename System> struct ChaosFormatter {
@@ -26,13 +26,22 @@ template <typename System> struct ChaosFormatter {
     size_t i = 0;
     double v = value;
 
-    // Nutze std::abs aus <cmath>
-    while (std::abs(v) >= System::base && i < System::suffixes.size() - 1) {
+    // Compared as it will be printed: 999.999 shows as "1000.00" and belongs
+    // to the next unit already.
+    const auto printed = [](double x) {
+      return std::round(std::abs(x) * 100.0) / 100.0;
+    };
+    while (printed(v) >= System::base && i < System::suffixes.size() - 1) {
       v /= System::base;
       i++;
     }
 
-    return std::format("{:.2f} {}{}", v, System::suffixes[i], time_suffix);
+    const std::string_view suffix = System::suffixes[i];
+    if (suffix.empty() && time_suffix.empty()) {
+      // No unit, so no space after the number either.
+      return std::format("{:.2f}", v);
+    }
+    return std::format("{:.2f} {}{}", v, suffix, time_suffix);
   }
 };
 

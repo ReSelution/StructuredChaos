@@ -8,14 +8,12 @@
 
 namespace sc::stats {
 
-struct DataUnits;
-template <typename T> struct Formatter {
-  static std::string format(double v) { return std::to_string(v); }
-};
-
 template <typename UnitSystem = DataUnits> struct Throughput {
   using DurationNS = std::chrono::nanoseconds;
-  using TimePoint = std::chrono::high_resolution_clock::time_point;
+  // A clock that never jumps: with the system clock a correction of the time
+  // in between would show up as a negative or huge duration.
+  using Clock = std::chrono::steady_clock;
+  using TimePoint = Clock::time_point;
 
   struct alignas(64) Storage {
     const std::string_view name;
@@ -27,7 +25,7 @@ template <typename UnitSystem = DataUnits> struct Throughput {
 
   static void start(Storage &s) {
     if (!s.running.exchange(true, std::memory_order_acquire)) {
-      auto now = std::chrono::high_resolution_clock::now();
+      auto now = Clock::now();
       s.startTimeTicks.store(now.time_since_epoch().count(),
                              std::memory_order_release);
     }
@@ -40,7 +38,7 @@ template <typename UnitSystem = DataUnits> struct Throughput {
 
   static void stop(Storage &s) {
     if (s.running.exchange(false, std::memory_order_acq_rel)) {
-      auto end = std::chrono::high_resolution_clock::now();
+      auto end = Clock::now();
       auto startTicks = s.startTimeTicks.load(std::memory_order_acquire);
       TimePoint startPoint{TimePoint::duration{startTicks}};
 
@@ -61,9 +59,8 @@ template <typename UnitSystem = DataUnits> struct Throughput {
 
     if (s.running.load(std::memory_order_acquire)) {
       auto startTicks = s.startTimeTicks.load(std::memory_order_acquire);
-      auto startPoint = std::chrono::high_resolution_clock::time_point{
-          std::chrono::high_resolution_clock::duration{startTicks}};
-      dur += (std::chrono::high_resolution_clock::now() - startPoint);
+      TimePoint startPoint{TimePoint::duration{startTicks}};
+      dur += std::chrono::duration_cast<DurationNS>(Clock::now() - startPoint);
     }
 
     double secs = std::chrono::duration<double>(dur).count();

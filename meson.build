@@ -17,12 +17,9 @@ if get_option('dump_magpie')
   conf_data.set('DUMP_MAGPIE', 1)
 endif
 
-config_h = configure_file(
-  input: 'src/sc/config/config.h.in',
-  output: 'config.h',
-  configuration: conf_data,
-  install: false,
-)
+# Generated next to its template, so that it is found as "sc/config/config.h"
+# through the same include directory as every other header.
+subdir('src/sc/config')
 
 inc_src = include_directories('src')
 

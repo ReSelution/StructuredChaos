@@ -3,8 +3,9 @@
 
 
 #include <chrono>
+#include <concepts>
 #include <ratio>
-#include <string_view> // Explizit für std::string_view
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -19,18 +20,20 @@ struct TimeResult {
 
 template <typename Func> class Timer {
 public:
-  [[nodiscard]] explicit Timer(Func &&callback, const Unit unit = Unit::Auto)
-      : m_unit(unit), m_callback(std::forward<Func>(callback)),
+  // Takes the callback by value or by reference: Func is the decayed type, so
+  // a parameter of type Func&& would only accept temporaries.
+  template <typename F>
+    requires std::constructible_from<Func, F>
+  [[nodiscard]] explicit Timer(F &&callback, const Unit unit = Unit::Auto)
+      : m_unit(unit), m_callback(std::forward<F>(callback)),
         m_start(std::chrono::steady_clock::now()) {}
 
-  // Move-Konstruktor
   Timer(Timer &&other) noexcept
       : m_unit(other.m_unit), m_callback(std::move(other.m_callback)),
         m_start(other.m_start), m_stopped(other.m_stopped) {
     other.m_stopped = true;
   }
 
-  // Move-Assignment
   Timer &operator=(Timer &&other) noexcept {
     if (this != &other) {
       stop();
@@ -43,7 +46,7 @@ public:
     return *this;
   }
 
-  // Kopieren verbieten (Verhindert doppelte Callbacks)
+  // No copies: the callback would run twice.
   Timer(const Timer &) = delete;
   Timer &operator=(const Timer &) = delete;
 
@@ -53,8 +56,6 @@ public:
     if (m_stopped)
       return;
 
-    // C++26 erlaubt hier oft eine noch präzisere Auflösung, steady_clock ist
-    // meist sicherer als high_resolution_clock
     auto end = std::chrono::steady_clock::now();
     auto diff = end - m_start;
 
@@ -90,13 +91,11 @@ private:
 
   Unit m_unit;
   Func m_callback;
-  std::chrono::time_point<std::chrono::steady_clock>
-      m_start; // steady_clock empfohlen
+  std::chrono::time_point<std::chrono::steady_clock> m_start;
   bool m_stopped = false;
 };
 
-// --- C++17/20/26 Deduction Guide ---
-// Erlaubt es, die 'make_timer'-Helfer komplett wegzulassen!
+// Lets Timer(callback) work without naming the type of the callback.
 template <typename Func>
 Timer(Func &&, Unit = Unit::Auto) -> Timer<std::decay_t<Func>>;
 
