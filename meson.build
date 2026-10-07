@@ -2,13 +2,21 @@ project(
   'StructuredChaos',
   'cpp',
   version: '0.1.0',
-  default_options: ['cpp_std=c++23'],
+  default_options: ['cpp_std=c++23', 'warning_level=3'],
   meson_version: '>= 1.1.0',
 )
+
+# Sanitizer builds are selected with the built-in option, for example
+#   meson setup build-asan -Db_sanitize=address,undefined
+#   meson setup build-tsan -Db_sanitize=thread
+sc_sanitizers = get_option('b_sanitize')
+sc_asan = 'address' in sc_sanitizers
+sc_tsan = 'thread' in sc_sanitizers
+
 subdir('external')
 #Config
 conf_data = configuration_data()
-
+conf_data.set_quoted('PROJECT_VERSION', meson.project_version())
 if get_option('enable_chaos_stats')
   conf_data.set('CHAOS_STATS_ENABLED', 1)
 endif

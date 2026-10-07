@@ -1,6 +1,13 @@
 # Catch2 Dependency
 catch2_dep = dependency('catch2-with-main', fallback: ['catch2', 'catch2_with_main_dep'])
 
+# UBSan only prints by default, which would leave a failing run green.
+test_env = environment()
+test_env.set('UBSAN_OPTIONS', 'halt_on_error=1:print_stacktrace=1')
+
+# Instrumented binaries are several times slower.
+test_timeout = sc_asan or sc_tsan ? 300 : 30
+
 # Registry Test Executable
 test_registry = executable(
   'test_registry',
@@ -17,7 +24,7 @@ test_registry = executable(
   ],
 )
 
-test('ECS Registry Tests', test_registry)
+test('ECS Registry Tests', test_registry, env: test_env, timeout: test_timeout)
 benchmark(
   'ECS Registry Benchmarks',
   test_registry,
@@ -37,7 +44,7 @@ test_threading = executable(
   ],
 )
 
-test('threading Tests', test_threading)
+test('threading Tests', test_threading, env: test_env, timeout: test_timeout)
 
 test_hash = executable(
   'test_hash',
@@ -50,7 +57,7 @@ test_hash = executable(
   ],
 )
 
-test('Hash Tests', test_hash)
+test('Hash Tests', test_hash, env: test_env, timeout: test_timeout)
 
 test_logger = executable(
   'test_logger',
@@ -63,7 +70,7 @@ test_logger = executable(
   ],
 )
 
-test('Logger Tests', test_logger)
+test('Logger Tests', test_logger, env: test_env, timeout: test_timeout)
 
 test_stats = executable(
   'test_stats',
@@ -79,7 +86,7 @@ test_stats = executable(
   ],
 )
 
-test('Stats Tests', test_stats)
+test('Stats Tests', test_stats, env: test_env, timeout: test_timeout)
 
 test_magpie = executable(
   'test_magpie',
@@ -96,7 +103,7 @@ test_magpie = executable(
   ],
 )
 
-test('Magpie Tests', test_magpie)
+test('Magpie Tests', test_magpie, env: test_env, timeout: test_timeout)
 benchmark(
   'Magpie Benchmarks',
   test_magpie,
@@ -116,7 +123,7 @@ test_memory = executable(
   ],
 )
 
-test('Memory Tests', test_memory)
+test('Memory Tests', test_memory, env: test_env, timeout: test_timeout)
 benchmark(
   'Memory Benchmarks',
   test_memory,

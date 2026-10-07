@@ -15,16 +15,30 @@ unordered_dense_dep = dependency(
   fallback: ['unordered_dense', 'unordered_dense_dep'],
 )
 
+mimalloc_options = [
+  'mi_build_shared=false',
+  'mi_build_object=false',
+  'mi_build_tests=false',
+]
+
+# Sanitizer runtimes interpose malloc themselves, so mimalloc must not override
+# it. The heaps are still used directly and report their blocks to the runtime.
+if sc_asan or sc_tsan
+  mimalloc_options += 'mi_override=false'
+endif
+if sc_asan
+  mimalloc_options += 'mi_track=asan'
+endif
+if sc_tsan
+  mimalloc_options += 'mi_debug_tsan=true'
+endif
+
 # The ECS uses first-class mimalloc heaps, which are not reliable before 3.5.3.
 mimalloc_dep = dependency(
   'mimalloc',
   version: '>=3.5.3',
   fallback: ['mimalloc', 'mimalloc_static_dep'],
-  default_options: [
-    'mi_build_shared=false',
-    'mi_build_object=false',
-    'mi_build_tests=false',
-  ],
+  default_options: mimalloc_options,
 )
 
 glm_dep = dependency('glm', fallback: ['glm', 'glm_dep'])

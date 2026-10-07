@@ -21,6 +21,21 @@ meson compile -C build
 meson test -C build
 ```
 
+## Sanitizers
+
+Sanitizer builds are selected with Meson's built-in `b_sanitize` option and need Clang.
+mimalloc is reconfigured to match automatically.
+
+```bash
+# AddressSanitizer + UndefinedBehaviorSanitizer
+meson setup build-asan --native-file cross/linux-clang.ini -Db_sanitize=address,undefined
+meson test -C build-asan
+
+# ThreadSanitizer
+meson setup build-tsan --native-file cross/linux-clang.ini -Db_sanitize=thread
+meson test -C build-tsan
+```
+
 ## Dependencies
 
 Key external dependencies
