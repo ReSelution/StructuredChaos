@@ -38,3 +38,16 @@ test_threading = executable(
 )
 
 test('threading Tests', test_threading)
+
+test_hash = executable(
+  'test_hash',
+  sources: [
+    'hash/test_hash.cpp',
+  ],
+  dependencies: [
+    catch2_dep,
+    sc_dep,
+  ],
+)
+
+test('Hash Tests', test_hash)

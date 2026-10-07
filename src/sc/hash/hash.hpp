@@ -2,10 +2,9 @@
 
 #include "rapidhash-constexpr.h"
 #include "rapidhash.h"
-#include <algorithm>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 #include <string>
 #include <string_view>
@@ -13,12 +12,21 @@
 #include <utility>
 
 #if defined(_MSC_VER)
-#define FORCE_INLINE __forceinline
+#define SC_FORCE_INLINE __forceinline
 #elif defined(__GNUC__) || defined(__clang__)
-#define FORCE_INLINE inline __attribute__((always_inline))
+#define SC_FORCE_INLINE inline __attribute__((always_inline))
 #else
-#define FORCE_INLINE inline
+#define SC_FORCE_INLINE inline
 #endif
+
+// sc::hash hashes one of:
+//   - an integer
+//   - two integers
+//   - a pointer to bytes and their number
+//   - anything with data() and size() over single bytes, such as
+//     std::string_view, std::string or std::vector<uint8_t>
+//   - a string literal or a C string, up to its terminator
+// Every form gives the same result at compile time and at run time.
 
 namespace sc {
 
@@ -33,98 +41,102 @@ concept SizedBuffer = requires(T a) {
   { a.size() } -> std::convertible_to<std::size_t>;
 };
 
-template <typename... Args> FORCE_INLINE constexpr h64 hash(Args &&...args) {
-  if constexpr (sizeof...(Args) == 2) {
-    auto [a1, a2] = std::forward_as_tuple(std::forward<Args>(args)...);
-    using T1 = std::decay_t<decltype(a1)>;
-    using T2 = std::decay_t<decltype(a2)>;
+namespace internal {
 
-    if constexpr (std::is_integral_v<T1> && std::is_integral_v<T2>) {
-      uint8_t buffer[16]{};
-      size_t len = 0;
+template <typename T>
+concept Byte = sizeof(T) == 1 && (std::integral<T> || std::same_as<T, std::byte>);
 
-      if consteval {
-        auto copy = [&](auto val) {
-          using U = std::make_unsigned_t<decltype(val)>;
-          U uval = static_cast<U>(val);
-          for (size_t i = 0; i < sizeof(val); ++i)
-            buffer[len++] = static_cast<uint8_t>((uval >> (i * 8)) & 0xFF);
-        };
-        copy(a1);
-        copy(a2);
-        return rapid::constExpr::rapidhash(buffer, len);
-      } else {
-        std::memcpy(buffer, &a1, sizeof(a1));
-        std::memcpy(buffer + sizeof(a1), &a2, sizeof(a2));
-        return ::rapidhash(buffer, sizeof(a1) + sizeof(a2));
-      }
-    } else if constexpr (std::is_pointer_v<T1> && std::is_integral_v<T2>) {
-      if consteval {
-        return rapid::constExpr::rapidhash(a1, static_cast<size_t>(a2));
-      } else {
-        return ::rapidhash(reinterpret_cast<const uint8_t *>(a1),
-                           static_cast<size_t>(a2));
-      }
-    }
-    static_assert((std::is_pointer_v<T1> && std::is_integral_v<T2>) ||
-                  (std::is_integral_v<T1> && std::is_integral_v<T2>));
-  } else if constexpr (sizeof...(Args) == 1) {
-    auto &&arg =
-        std::get<0>(std::forward_as_tuple(std::forward<Args>(args)...));
-    using T = std::decay_t<decltype(arg)>;
-
-    if constexpr (std::is_integral_v<T>) {
-      static_assert(sizeof(T) <= sizeof(uint64_t),
-                    "T must be uint64_t or Lower");
-      if consteval {
-        uint8_t b[sizeof(T)];
-        using U = std::make_unsigned_t<T>;
-        U uarg = static_cast<U>(arg);
-        for (size_t i = 0; i < sizeof(T); ++i) {
-          b[i] = static_cast<uint8_t>((uarg >> (i * 8)) & 0xFF);
-        }
-        return rapid::constExpr::rapidhash(b, sizeof(T));
-      } else {
-        return ::rapidhash(reinterpret_cast<const uint8_t *>(&arg), sizeof(T));
-      }
-    } else if constexpr (SizedBuffer<T>) {
-      if consteval {
-        return rapid::constExpr::rapidhash(arg.data(), arg.size());
-      } else {
-        return ::rapidhash(reinterpret_cast<const uint8_t *>(arg.data()),
-                           arg.size());
-      }
-    }
+// The one place that picks between the two implementations of rapidhash: the
+// run-time one cannot be evaluated by the compiler.
+template <Byte T>
+SC_FORCE_INLINE constexpr h64 hashBytes(const T *data, size_t length) noexcept {
+  if consteval {
+    return rapid::constExpr::rapidhash(data, length);
+  } else {
+    return ::rapidhash(data, length);
   }
-  return 0;
 }
 
-FORCE_INLINE constexpr h64 hash_lowercase(std::string_view str) {
-  if consteval {
-    constexpr size_t MAX_STR_LEN = 512;
-    uint8_t buffer[MAX_STR_LEN];
-    const size_t len = std::min<size_t>(str.length(), MAX_STR_LEN);
+// Writes an integer in little-endian order and returns its size. Hashing
+// these bytes instead of the integer's memory keeps the result independent
+// of the platform, and lets the compiler do it as well.
+template <std::integral T>
+SC_FORCE_INLINE constexpr size_t storeBytes(uint8_t *out, T value) noexcept {
+  static_assert(sizeof(T) <= sizeof(uint64_t));
+  // Widening keeps the low bytes of a negative number as they are in memory.
+  const auto bits = static_cast<uint64_t>(value);
+  for (size_t i = 0; i < sizeof(T); ++i) {
+    out[i] = static_cast<uint8_t>(bits >> (i * 8));
+  }
+  return sizeof(T);
+}
 
-    for (size_t i = 0; i < len; ++i) {
-      const auto c = static_cast<uint8_t>(str[i]);
-      buffer[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32)
-                                         : static_cast<char>(c);
+} // namespace internal
+
+template <std::integral T> SC_FORCE_INLINE constexpr h64 hash(T value) noexcept {
+  uint8_t bytes[sizeof(T)]{};
+  internal::storeBytes(bytes, value);
+  return internal::hashBytes(bytes, sizeof(T));
+}
+
+template <std::integral A, std::integral B>
+SC_FORCE_INLINE constexpr h64 hash(A first, B second) noexcept {
+  uint8_t bytes[sizeof(A) + sizeof(B)]{};
+  const size_t offset = internal::storeBytes(bytes, first);
+  internal::storeBytes(bytes + offset, second);
+  return internal::hashBytes(bytes, sizeof(bytes));
+}
+
+template <internal::Byte T>
+SC_FORCE_INLINE constexpr h64 hash(const T *data,
+                                   std::integral auto length) noexcept {
+  return internal::hashBytes(data, static_cast<size_t>(length));
+}
+
+template <SizedBuffer T>
+SC_FORCE_INLINE constexpr h64 hash(const T &buffer) noexcept {
+  static_assert(sizeof(*buffer.data()) == 1,
+                "hash() of a buffer needs elements of one byte; pass a "
+                "pointer and the length in bytes for anything else");
+  return internal::hashBytes(buffer.data(), buffer.size());
+}
+
+// A string literal or a C string. Without this overload they would be taken
+// for neither a number nor a buffer.
+SC_FORCE_INLINE constexpr h64 hash(const char *text) noexcept {
+  return hash(std::string_view{text});
+}
+
+// Like hash(), but for a strongly typed hash value:
+//   enum class ItemId : sc::h64 {};
+//   ItemId id = sc::hash<ItemId>(name);
+template <typename T, typename... Args>
+  requires std::is_enum_v<T> && std::same_as<h64, std::underlying_type_t<T>>
+SC_FORCE_INLINE constexpr T hash(Args &&...args) noexcept {
+  return static_cast<T>(hash(std::forward<Args>(args)...));
+}
+
+// The hash of the text with the letters A to Z turned to lowercase.
+SC_FORCE_INLINE constexpr h64 hash_lowercase(std::string_view str) {
+  if consteval {
+    // A plain array instead of std::string: the checked iterators of some
+    // standard libraries use up the compiler's evaluation budget quickly.
+    const size_t length = str.size();
+    char *const lowered = new char[length + 1];
+    for (size_t i = 0; i < length; ++i) {
+      const char c = str[i];
+      lowered[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
     }
-    return rapid::constExpr::rapidhash(buffer, len);
+    const h64 result = rapid::constExpr::rapidhash(lowered, length);
+    delete[] lowered;
+    return result;
   } else {
     return ::rapidhash_lowercase(str.data(), str.size());
   }
 }
 
-template <typename T, typename... Args>
-FORCE_INLINE constexpr T hash(Args &&...args) {
-  static_assert(std::is_enum_v<T>, "T must be an enum");
-  static_assert(std::is_same_v<h64, std::underlying_type_t<T>>,
-                "Enum must underlie uint64_t");
-  return static_cast<T>(hash(std::forward<Args>(args)...));
-}
-
-// Transparent Hash-Infrastruktur für std::unordered_map
+// Transparent hasher for maps whose keys are hashes already, or strings that
+// are looked up by std::string_view.
 struct IdentityHash {
   using is_transparent = void;
 
@@ -144,8 +156,8 @@ struct IdentityHash {
 
 } // namespace sc
 
-// User Defined Literals müssen im globalen oder einem exportierten Namespace
-// liegen
+// User-defined literals have to live in the global or an inline namespace to
+// be found without a using directive.
 inline namespace literals {
 constexpr sc::h64 operator""_h(const char *s, size_t len) {
   return sc::hash(s, len);
