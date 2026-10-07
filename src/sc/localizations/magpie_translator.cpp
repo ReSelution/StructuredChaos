@@ -4,9 +4,7 @@
 
 #include "magpie_translator.hpp"
 
-#include "simdutf.h"
 #include <algorithm>
-#include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -222,12 +220,7 @@ std::string_view Magpie::storeStr(std::string_view str) {
 }
 
 std::string_view Magpie::storeStrUTF16(const char16_t *start, size_t length) {
-  size_t requiredSize = simdutf::utf8_length_from_utf16(start, length);
-  auto target = m_storage.allocateSpan<char>(requiredSize + 1);
-  auto size = simdutf::convert_utf16_to_utf8(start, length, target.data());
-  assert(size == requiredSize);
-  target[requiredSize] = '\0';
-  return {target.data(), requiredSize};
+  return m_storage.utf16ToUtf8({start, length});
 }
 
 thread_local magpieMAP Magpie::tl_map{};

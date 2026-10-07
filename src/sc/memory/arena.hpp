@@ -4,26 +4,19 @@
 
 #pragma once
 
-#include "memory/monotonic_resource.hpp"
+#include "sc/memory/monotonic_resource.hpp"
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <memory_resource>
+#include <new>
 #include <span>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 
 namespace sc {
-
-template <typename T, typename = void>
-struct is_pmr_container : std::false_type {};
-
-template <typename T>
-struct is_pmr_container<T, std::void_t<typename T::allocator_type>> {
-  static constexpr bool value =
-      std::is_same_v<typename T::allocator_type,
-                     std::pmr::polymorphic_allocator<typename T::value_type>>;
-};
-
-template <typename T>
-inline constexpr bool is_pmr_container_v = is_pmr_container<T>::value;
 
 class Arena {
   struct CleanupNode {
@@ -33,8 +26,6 @@ class Arena {
     CleanupNode *next;
   };
 
-  static inline std::atomic<uint64_t> m_idGenerator{0};
-
 public:
   explicit Arena(size_t size = 8 * 1024);
 
@@ -42,14 +33,22 @@ public:
 
   Arena &operator=(const Arena &) = delete;
 
+  ~Arena() { reset(); }
+
   std::pmr::memory_resource *resource() { return &m_pool; }
 
   template <typename T, typename... Args> T *make(Args &&...args) {
+    // Allocated before the object exists: if this throws, nothing is left
+    // behind that would need its destructor run.
+    void *nodeMem = nullptr;
+    if constexpr (!std::is_trivially_destructible_v<T>) {
+      nodeMem = allocate(sizeof(CleanupNode), alignof(CleanupNode));
+    }
+
     void *mem = allocate(sizeof(T), alignof(T));
     T *obj = new (mem) T(std::forward<Args>(args)...);
 
     if constexpr (!std::is_trivially_destructible_v<T>) {
-      void *nodeMem = allocate(sizeof(CleanupNode), alignof(CleanupNode));
       auto *newNode = new (nodeMem)
           CleanupNode{.destroyer = [](void *p) { static_cast<T *>(p)->~T(); },
                       .object = obj,
@@ -76,6 +75,7 @@ public:
     return std::span<T>(static_cast<T *>(ptr), count);
   }
 
+  // Null-terminated UTF-8 copy of input. Empty if input is not valid UTF-16.
   std::string_view utf16ToUtf8(std::span<const char16_t> input);
 
   void *allocate(size_t size, size_t align);

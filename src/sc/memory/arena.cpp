@@ -4,7 +4,6 @@
 
 #include "arena.hpp"
 #include "simdutf.h"
-#include <cassert>
 
 namespace sc {
 Arena::Arena(size_t size)
@@ -21,7 +20,12 @@ std::string_view Arena::utf16ToUtf8(const std::span<const char16_t> input) {
   char *target = static_cast<char *>(allocate(requiredSize + 1, alignof(char)));
   auto size =
       simdutf::convert_utf16_to_utf8(input.data(), input.size(), target);
-  assert(size == requiredSize);
+  // simdutf writes nothing and returns 0 for invalid input, e.g. a lone
+  // surrogate.
+  if (size != requiredSize) [[unlikely]] {
+    target[0] = '\0';
+    return {target, 0};
+  }
   target[requiredSize] = '\0';
   return {target, requiredSize};
 }

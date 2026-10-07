@@ -80,3 +80,33 @@ test_stats = executable(
 )
 
 test('Stats Tests', test_stats)
+
+test_magpie = executable(
+  'test_magpie',
+  sources: [
+    'localizations/test_magpie.cpp',
+  ],
+  # Tells the test what was configured, so it can check that the option
+  # actually reaches the code.
+  cpp_args: ['-DSC_TEST_EXPECT_DUMP=' + get_option('dump_magpie').to_int().to_string()],
+  dependencies: [
+    catch2_dep,
+    sc_dep,
+  ],
+)
+
+test('Magpie Tests', test_magpie)
+
+test_memory = executable(
+  'test_memory',
+  sources: [
+    'memory/test_arena.cpp',
+    'memory/test_monotonic_resource.cpp',
+  ],
+  dependencies: [
+    catch2_dep,
+    sc_dep,
+  ],
+)
+
+test('Memory Tests', test_memory)

@@ -281,6 +281,14 @@ TEST_CASE("UTF-16 Is Stored As UTF-8", "[magpie][store]") {
 
     REQUIRE(stored.empty());
   }
+
+  SECTION("Invalid UTF-16 gives an empty string") {
+    const char16_t source[] = {u'a', 0xD800, u'b'};
+    const auto stored = magpie.storeStrUTF16(source, 3);
+
+    REQUIRE(stored.empty());
+    REQUIRE(stored.data()[0] == '\0');
+  }
 }
 
 TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {

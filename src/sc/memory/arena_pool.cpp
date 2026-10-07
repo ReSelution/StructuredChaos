@@ -7,13 +7,17 @@
 #include "arena.hpp"
 #include "logger/logger.hpp"
 #include "monotonic_resource.hpp"
+#include <mutex>
 
 namespace sc {
 using PoolLogger = sc::Logger<"Mem">;
 void ArenaPool::init(const size_t poolSize, const size_t arenaSize) {
-  MonotonicResource res;
-  if (!res.checkLockFree()) {
-    PoolLogger::warn("ChaosMemoryResource BlockRange is not LockFree");
+  std::lock_guard<std::mutex> lock(m_initLock);
+  if (m_storage.capacity() > 0) [[unlikely]] {
+    return;
+  }
+  if (!MonotonicResource::checkLockFree()) {
+    PoolLogger::warn("MonotonicResource BlockRange is not lock-free");
   }
 
   m_defaultSize = arenaSize;
@@ -24,17 +28,16 @@ void ArenaPool::init(const size_t poolSize, const size_t arenaSize) {
 }
 
 std::unique_ptr<Arena> ArenaPool::acquire() {
-  ArenaPool::m_lock.lock();
-  if (m_storage.empty()) {
-    ArenaPool::m_lock.unlock();
-
-    return std::make_unique<Arena>(m_defaultSize);
+  {
+    SpinLockGuard guard(m_lock);
+    if (!m_storage.empty()) {
+      auto arena = std::move(m_storage.back());
+      m_storage.pop_back();
+      return arena;
+    }
   }
 
-  auto arena = std::move(m_storage.back());
-  m_storage.pop_back();
-  ArenaPool::m_lock.unlock();
-  return arena;
+  return std::make_unique<Arena>(m_defaultSize);
 }
 
 void ArenaPool::release(std::unique_ptr<Arena> &arena) {
@@ -42,15 +45,16 @@ void ArenaPool::release(std::unique_ptr<Arena> &arena) {
     return;
   arena->reset();
 
-  m_lock.lock();
-  if (m_storage.size() >= MAX_LOADED_ARENAS) {
-    arena.reset();
-    m_lock.unlock();
-    return;
+  {
+    SpinLockGuard guard(m_lock);
+    if (m_storage.size() < MAX_LOADED_ARENAS) {
+      m_storage.push_back(std::move(arena));
+      return;
+    }
   }
 
-  m_storage.push_back(std::move(arena));
-  m_lock.unlock();
+  // The pool is full. Freed outside the lock.
+  arena.reset();
 }
 
 size_t ArenaPool::getBufferSize() { return m_defaultSize; }

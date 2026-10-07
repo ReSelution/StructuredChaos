@@ -4,10 +4,11 @@
 
 #pragma once
 #include <memory>
+#include <mutex>
 #include <vector>
 
-#include "arena.hpp"
-#include "threading/spin_lock.hpp"
+#include "sc/memory/arena.hpp"
+#include "sc/threading/spin_lock.hpp"
 
 namespace sc {
 
@@ -27,5 +28,6 @@ private:
   static inline std::vector<std::unique_ptr<Arena>> m_storage;
   static inline SpinLock m_lock;
   static inline size_t m_defaultSize = DEFAULT_SIZE;
+  static inline std::mutex m_initLock;
 };
 } // namespace sc

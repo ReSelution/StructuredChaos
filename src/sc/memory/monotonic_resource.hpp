@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory_resource>
 #include <mutex>
 #include <vector>
@@ -12,6 +13,8 @@ class MonotonicResource : public std::pmr::memory_resource {
   struct Block {
     std::byte *ptr;
     size_t size;
+    // Has to be handed back to the upstream exactly as it was requested.
+    size_t alignment;
   };
 
   struct BlockRange {
@@ -20,10 +23,9 @@ class MonotonicResource : public std::pmr::memory_resource {
   };
 
   alignas(64) std::atomic<BlockRange> m_range;
-  std::atomic<size_t> usedBytes;
   alignas(64) std::mutex m_block_mutex;
   std::vector<Block> m_blocks;
-  Block m_initial_block;
+  Block m_initial_block{};
   memory_resource *m_upstream;
   size_t m_next_block_size;
 
@@ -38,7 +40,8 @@ public:
   explicit MonotonicResource(
       void *buffer, size_t size,
       memory_resource *upstream = std::pmr::get_default_resource())
-      : m_initial_block(static_cast<std::byte *>(buffer), size),
+      : m_initial_block(static_cast<std::byte *>(buffer), size,
+                        alignof(std::max_align_t)),
         m_upstream(upstream), m_next_block_size(size * 2) {
     m_range.store({m_initial_block.ptr, m_initial_block.ptr + size},
                   std::memory_order_release);
@@ -50,35 +53,29 @@ public:
 
   void release() noexcept;
 
-  [[nodiscard]] bool checkLockFree() const { return m_range.is_lock_free(); }
+  [[nodiscard]] static bool checkLockFree() {
+    return std::atomic<BlockRange>{}.is_lock_free();
+  }
 
 protected:
   void *do_allocate(size_t bytes, size_t alignment) override {
     while (true) {
       auto block = m_range.load(std::memory_order::acquire);
-      if (!block.current) {
-        handle_full_block(bytes, alignment);
-        continue;
-      }
-      auto curr_addr = reinterpret_cast<uintptr_t>(block.current);
-      uintptr_t aligned_addr = (curr_addr + alignment - 1) & ~(alignment - 1);
-      auto aligned_ptr = reinterpret_cast<std::byte *>(aligned_addr);
-      BlockRange next{.current = aligned_ptr + bytes, .end = block.end};
-
-      if (next.current <= block.end) {
+      if (std::byte *aligned_ptr = fit(block, bytes, alignment)) {
+        BlockRange next{.current = aligned_ptr + bytes, .end = block.end};
         if (m_range.compare_exchange_weak(block, next,
                                           std::memory_order_acq_rel)) {
 
           return aligned_ptr;
         }
-      } else {
-        if (bytes < m_next_block_size) {
-          handle_full_block(bytes, alignment);
-        } else {
-
-          return allocate_custom_block(bytes, alignment);
-        }
+        continue;
       }
+
+      if (!fits_new_block(bytes, alignment)) {
+
+        return allocate_custom_block(bytes, alignment);
+      }
+      handle_full_block(bytes, alignment);
     }
   }
 
@@ -90,6 +87,37 @@ protected:
   }
 
 private:
+  // Start of the allocation inside the range, or nullptr if it does not fit.
+  // Compares sizes instead of pointers, because current + bytes can wrap
+  // around for huge requests.
+  [[nodiscard]] static std::byte *fit(const BlockRange &range, size_t bytes,
+                                      size_t alignment) noexcept {
+    if (!range.current) {
+      return nullptr;
+    }
+    auto curr_addr = reinterpret_cast<uintptr_t>(range.current);
+    auto end_addr = reinterpret_cast<uintptr_t>(range.end);
+    uintptr_t aligned_addr = (curr_addr + alignment - 1) & ~(alignment - 1);
+    if (aligned_addr < curr_addr || aligned_addr > end_addr ||
+        bytes > end_addr - aligned_addr) {
+      return nullptr;
+    }
+    return range.current + (aligned_addr - curr_addr);
+  }
+
+  // New blocks are only aligned to max_align_t, so a stricter request can
+  // lose up to alignment bytes of a fresh block to padding.
+  [[nodiscard]] bool fits_new_block(size_t bytes,
+                                    size_t alignment) const noexcept {
+    if (bytes >= m_next_block_size) {
+      return false;
+    }
+    return alignment <= alignof(std::max_align_t) ||
+           alignment <= m_next_block_size - bytes;
+  }
+
+  // Gets a block from the upstream and records it for release().
+  std::byte *allocate_block(size_t size, size_t alignment);
   void handle_full_block(size_t bytes, size_t alignment);
   void *allocate_custom_block(size_t size, size_t alignment);
   void allocate_new_block(size_t size);

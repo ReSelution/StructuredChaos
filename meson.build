@@ -23,7 +23,18 @@ subdir('src/sc/config')
 
 inc_src = include_directories('src')
 
-chaos_config_dep = declare_dependency(sources: config_h, include_directories: inc_src)
+# Without cmpxchg16b the 16 byte atomic in MonotonicResource is not lock-free.
+# Part of the dependency, because the allocation path is inline in the header.
+sc_cpu_args = []
+if host_machine.cpu_family() == 'x86_64'
+  sc_cpu_args = meson.get_compiler('cpp').get_supported_arguments('-mcx16')
+endif
+
+chaos_config_dep = declare_dependency(
+  sources: config_h,
+  include_directories: inc_src,
+  compile_args: sc_cpu_args,
+)
 
 subdir('src')
 
