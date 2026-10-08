@@ -13,21 +13,16 @@ concurrency:
 permissions:
   contents: read
 
-# Fedora ships the same Clang major as the development machines, which keeps
-# clang-format and clang-tidy results identical to a local run.
+# Clang comes from apt.llvm.org in the same major version as on the development
+# machines, which keeps clang-format and clang-tidy results identical to a
+# local run.
 env:
-  PACKAGES: >-
-    clang clang-tools-extra compiler-rt llvm gcc-c++ mold meson ninja-build git
-    findutils
+  LLVM_VERSION: 22
 
 jobs:
   test:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
-    container:
-      image: fedora:44
-      # The sanitizer runtimes need ptrace and personality().
-      options: --security-opt seccomp=unconfined
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -41,10 +36,17 @@ jobs:
           - name: tsan
             setup: -Db_sanitize=thread
     steps:
-      - name: Install toolchain
-        run: dnf install -y --setopt=install_weak_deps=False $PACKAGES
-
       - uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-$LLVM_VERSION main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-$LLVM_VERSION clang-tidy-$LLVM_VERSION clang-format-$LLVM_VERSION \
+            llvm-$LLVM_VERSION libclang-rt-$LLVM_VERSION-dev g++-14 mold meson ninja-build
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
 
       - name: Cache subprojects
         uses: actions/cache@v4
@@ -125,14 +127,19 @@ jobs:
 
   lint:
     name: format + tidy
-    runs-on: ubuntu-latest
-    container:
-      image: fedora:44
+    runs-on: ubuntu-24.04
     steps:
-      - name: Install toolchain
-        run: dnf install -y --setopt=install_weak_deps=False $PACKAGES
-
       - uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-$LLVM_VERSION main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-$LLVM_VERSION clang-tidy-$LLVM_VERSION clang-format-$LLVM_VERSION \
+            llvm-$LLVM_VERSION libclang-rt-$LLVM_VERSION-dev g++-14 mold meson ninja-build
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
 
       - name: Cache subprojects
         uses: actions/cache@v4
