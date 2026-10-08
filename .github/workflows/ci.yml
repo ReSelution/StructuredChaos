@@ -35,6 +35,9 @@ jobs:
             setup: -Db_sanitize=address,undefined
           - name: tsan
             setup: -Db_sanitize=thread
+    env:
+      CCACHE_DIR: /home/runner/.cache/ccache
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@v5
 
@@ -45,7 +48,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang-$LLVM_VERSION clang-tidy-$LLVM_VERSION clang-format-$LLVM_VERSION \
-            llvm-$LLVM_VERSION libclang-rt-$LLVM_VERSION-dev g++-14 mold meson ninja-build
+            llvm-$LLVM_VERSION libclang-rt-$LLVM_VERSION-dev g++-14 mold meson ninja-build ccache
           echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
 
       - name: Cache subprojects
@@ -57,11 +60,25 @@ jobs:
             !subprojects/rapidHash/
           key: subprojects-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
 
+      # The key is unique per commit so every run saves its updated cache; the
+      # restore key picks up the most recent one of the same configuration.
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ matrix.name }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-${{ matrix.name }}-
+
       - name: Configure
-        run: meson setup build --native-file cross/linux-clang.ini ${{ matrix.setup }}
+        run: >-
+          meson setup build --native-file cross/linux-clang.ini
+          --native-file cross/ccache.ini ${{ matrix.setup }}
 
       - name: Build
-        run: meson compile -C build
+        run: |
+          ccache --zero-stats
+          meson compile -C build
+          ccache --show-stats
 
       - name: Test
         run: meson test -C build --suite StructuredChaos --print-errorlogs
@@ -83,10 +100,12 @@ jobs:
       matrix:
         buildtype: [debug, release]
     env:
-      CC: clang-cl
-      CXX: clang-cl
+      CC: sccache clang-cl
+      CXX: sccache clang-cl
       CC_LD: lld-link
       CXX_LD: lld-link
+      SCCACHE_DIR: C:\sccache
+      SCCACHE_CACHE_SIZE: 500M
     steps:
       - uses: actions/checkout@v5
 
@@ -98,6 +117,9 @@ jobs:
       - name: Install Meson
         run: pip install meson ninja
 
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Cache subprojects
         uses: actions/cache@v4
         with:
@@ -107,6 +129,13 @@ jobs:
             !subprojects/rapidHash/
           key: subprojects-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
 
+      - name: Cache sccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-${{ runner.os }}-${{ matrix.buildtype }}-${{ github.sha }}
+          restore-keys: sccache-${{ runner.os }}-${{ matrix.buildtype }}-
+
       - name: Configure
         run: >-
           meson setup build --buildtype=${{ matrix.buildtype }}
@@ -114,6 +143,10 @@ jobs:
 
       - name: Build
         run: meson compile -C build
+
+      - name: sccache statistics
+        if: always()
+        run: sccache --show-stats
 
       - name: Test
         run: meson test -C build --suite StructuredChaos --print-errorlogs
