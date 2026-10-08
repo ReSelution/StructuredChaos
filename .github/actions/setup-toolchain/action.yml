@@ -1,0 +1,23 @@
+name: Set up toolchain
+description: Installs Clang from apt.llvm.org together with Meson, Ninja, mold and ccache.
+
+inputs:
+  llvm-version:
+    description: Major version of the LLVM toolchain
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain
+      shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.llvm-version }}
+      run: |
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-$LLVM_VERSION main" | sudo tee /etc/apt/sources.list.d/llvm.list
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          clang-$LLVM_VERSION clang-tidy-$LLVM_VERSION clang-format-$LLVM_VERSION \
+          llvm-$LLVM_VERSION libclang-rt-$LLVM_VERSION-dev g++-14 mold meson ninja-build ccache
+        echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
