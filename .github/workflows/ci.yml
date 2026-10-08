@@ -71,8 +71,7 @@ jobs:
 
       - name: Configure
         run: >-
-          meson setup build --native-file cross/linux-clang.ini
-          --native-file cross/ccache.ini ${{ matrix.setup }}
+          meson setup build --native-file cross/linux-clang.ini ${{ matrix.setup }}
 
       - name: Build
         run: |
@@ -100,8 +99,8 @@ jobs:
       matrix:
         buildtype: [debug, release]
     env:
-      CC: sccache clang-cl
-      CXX: sccache clang-cl
+      CC: clang-cl
+      CXX: clang-cl
       CC_LD: lld-link
       CXX_LD: lld-link
       SCCACHE_DIR: C:\sccache
@@ -119,6 +118,16 @@ jobs:
 
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.9
+
+      # Meson drops a compiler cache prefix for clang-cl, so sccache goes in
+      # front of it on PATH as a copy named clang-cl instead. Invoked under a
+      # foreign name it forwards to the next clang-cl on PATH.
+      - name: Wrap clang-cl with sccache
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'sccache-wrap'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item (Get-Command sccache).Source (Join-Path $dir 'clang-cl.exe')
+          Add-Content $env:GITHUB_PATH $dir
 
       - name: Cache subprojects
         uses: actions/cache@v4
