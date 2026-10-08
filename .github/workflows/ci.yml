@@ -53,7 +53,7 @@ jobs:
             subprojects/*/
             !subprojects/packagefiles/
             !subprojects/rapidHash/
-          key: subprojects-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
+          key: subprojects-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
 
       - name: Configure
         run: meson setup build --native-file cross/linux-clang.ini ${{ matrix.setup }}
@@ -69,6 +69,58 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: testlog-${{ matrix.name }}
+          path: build/meson-logs/testlog.txt
+
+  # Native counterpart of cross/win64-clang-cl.ini: clang-cl with lld-link
+  # against the MSVC runtime.
+  windows:
+    name: windows-${{ matrix.buildtype }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        buildtype: [debug, release]
+    env:
+      CC: clang-cl
+      CXX: clang-cl
+      CC_LD: lld-link
+      CXX_LD: lld-link
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Meson
+        run: pip install meson ninja
+
+      - name: Cache subprojects
+        uses: actions/cache@v4
+        with:
+          path: |
+            subprojects/*/
+            !subprojects/packagefiles/
+            !subprojects/rapidHash/
+          key: subprojects-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
+
+      - name: Configure
+        run: >-
+          meson setup build --buildtype=${{ matrix.buildtype }}
+          -Dcpp_std=c++latest -Db_vscrt=static_from_buildtype
+
+      - name: Build
+        run: meson compile -C build
+
+      - name: Test
+        run: meson test -C build --suite StructuredChaos --print-errorlogs
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlog-windows-${{ matrix.buildtype }}
           path: build/meson-logs/testlog.txt
 
   lint:
@@ -89,7 +141,7 @@ jobs:
             subprojects/*/
             !subprojects/packagefiles/
             !subprojects/rapidHash/
-          key: subprojects-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
+          key: subprojects-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
 
       - name: Configure
         run: meson setup build --native-file cross/linux-clang.ini
@@ -98,20 +150,5 @@ jobs:
         run: ninja -C build clang-format-check
 
       # No build needed: the config header is generated at configure time.
-      # clang-tidy 22 sporadically crashes while tearing down after a clean
-      # run, so a file is retried when it dies from a signal.
       - name: clang-tidy
-        run: |
-          python3 -c "
-          import json
-          for entry in json.load(open('build/compile_commands.json')):
-              if entry['file'].startswith(('../src/', '../tests/')):
-                  print('build/' + entry['file'])
-          " | xargs -P "$(nproc)" -I{} sh -c '
-            for attempt in 1 2 3; do
-              clang-tidy -p build --quiet --warnings-as-errors="*" "$1"
-              rc=$?
-              [ "$rc" -lt 128 ] && exit "$rc"
-              echo "clang-tidy crashed on $1 (attempt $attempt)" >&2
-            done
-            exit "$rc"' _ {}
+        run: run-clang-tidy -quiet -p build -warnings-as-errors='*' "^$PWD/(src|tests)/"

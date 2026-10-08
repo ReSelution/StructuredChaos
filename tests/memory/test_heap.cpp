@@ -358,11 +358,13 @@ TEST_CASE("Heap: make destroys every pmr container it created", "[memory][heap]"
       REQUIRE(heaps->size() == 3);
       CHECK((*heaps)[2] == &heap);
       CHECK(heaps->get_allocator().resource() == &counting);
-      CHECK(counting.allocations == 1);
+      // Not exactly one: the debug MSVC standard library allocates an iterator
+      // proxy next to the elements.
+      CHECK(counting.allocations >= 1);
       CHECK(counting.deallocations == 0);
     }
     std::pmr::set_default_resource(before);
-    CHECK(counting.deallocations == 1);
+    CHECK(counting.deallocations == counting.allocations);
   }
 
   SECTION("containers in the heap work all the same") {
