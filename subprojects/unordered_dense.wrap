@@ -1,6 +1,6 @@
 [wrap-git]
 url = https://github.com/martinus/unordered_dense.git
-revision = v4.8.1
+revision = v5.3.1
 depth = 1
 
 directory = unordered_dense
