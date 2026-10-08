@@ -15,7 +15,7 @@ sc_lib = static_library(
   dependencies: [chaos_config_dep, all_deps],
 )
 
-# Wiederverwendbares Dependency-Objekt für Konsumenten
+# Reusable dependency object for consumers
 sc_dep_sources = []
 if host_machine.system() == 'windows'
   sc_dep_sources += files('sc/memory/mi_new_delete.cpp')

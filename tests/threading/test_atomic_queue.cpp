@@ -103,11 +103,11 @@ TEST_CASE("AtomicQueue Lifetime Management", "[threading][atomic_queue]") {
       REQUIRE(LifetimeTracker::instances.load() == 3);
 
       LifetimeTracker dummy(0);
-      queue.try_pop(dummy, 0); // Zerstört ein Element vorzeitig
+      queue.try_pop(dummy, 0); // Destroys one element early
     }
 
-    // Beim Verlassen des Scope muss der Queue-Destruktor die verbliebenen 2
-    // Elemente aufräumen
+    // On leaving the scope the queue destructor has to clean up the
+    // remaining 2 elements
     REQUIRE(LifetimeTracker::instances.load() == 0);
   }
 }
@@ -173,7 +173,7 @@ TEST_CASE("AtomicQueue Stress and Wrap-Around", "[threading][atomic_queue]") {
 
     REQUIRE(consumed_count.load() == total_items);
 
-    // Summen-Abgleich zur Verifizierung der Datenintegrität
+    // Compare sums to verify data integrity
     int64_t expected_sum = 0;
     for (int i = 0; i < total_items; ++i) {
       expected_sum += i;
@@ -193,8 +193,8 @@ TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
   using QueueType = AtomicQueue<LargeTask, capacity>;
 
   SECTION("Block Cycle Wrap-Around") {
-    // Verifiziert, dass der Release-Counter-Mechanismus über mehrere
-    // Zyklen hinweg exakt synchron mit den Pushes/Pops läuft
+    // Verifies that the release counter mechanism stays exactly in sync
+    // with the pushes/pops across several cycles
     QueueType queue;
     constexpr size_t items = QueueType::slots_per_block() * 2;
 

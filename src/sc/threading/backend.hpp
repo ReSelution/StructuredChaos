@@ -69,7 +69,7 @@ namespace sc::threading::impl {
   // task right away, and it must not find the counter without that task.
   inline void on_task_enqueued(size_t count = 1) {
     outstanding_tasks.fetch_add(count, std::memory_order_relaxed);
-    QueueSize::record(count); // Stat existiert oder ist No-Op
+    QueueSize::record(count); // stat exists or is a no-op
   }
 
   MoveOnlyFunction helpThread(int id);

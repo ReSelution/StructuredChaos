@@ -43,7 +43,7 @@ namespace sc::threading::impl {
     signalWork(1);
   }
 
-  // Case 1: Fast Path OHNE Callback (Finished == nullptr_t)
+  // Case 1: Fast Path WITHOUT Callback (Finished == nullptr_t)
   template <Priority P, typename R, typename F, typename... Args>
   void detachBatchSfoNoCallback(R &&r, F &&f, Args &&...args) {
     for (auto &&item : r) {
@@ -57,7 +57,7 @@ namespace sc::threading::impl {
     }
   }
 
-  // Case 2: Fast Path MIT Callback
+  // Case 2: Fast Path WITH Callback
   template <Priority P, typename R, typename F, typename Finished, typename... Args>
   void detachBatchSfoWithCallback(R &&r, F &&f, Finished &&finished, size_t count, Args &&...args) {
 
@@ -84,10 +84,10 @@ namespace sc::threading::impl {
   }
 
   // =========================================================================
-  // HEAP PATH: Daten werden in einem MergedState auf den Heap ausgelagert
+  // HEAP PATH: data is moved to the heap in a MergedState
   // =========================================================================
 
-  // Case 3: Heap Path OHNE Callback (Finished == nullptr_t)
+  // Case 3: Heap Path WITHOUT Callback (Finished == nullptr_t)
   template <Priority P, typename R, typename F, typename... Args>
   void detachBatchHeapNoCallback(R &&r, F &&f, size_t count, Args &&...args) {
 
@@ -105,7 +105,7 @@ namespace sc::threading::impl {
     }
   }
 
-  // Case 4: Heap Path MIT Callback
+  // Case 4: Heap Path WITH Callback
   template <Priority P, typename R, typename F, typename Finished, typename... Args>
   void detachBatchHeapWithCallback(R &&r, F &&f, Finished &&finished, size_t count, Args &&...args) {
 

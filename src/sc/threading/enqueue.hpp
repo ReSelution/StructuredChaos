@@ -72,8 +72,7 @@ namespace sc::threading::impl {
     return [f, args, item = std::forward<Arg>(item), state]() mutable {
       auto completion_guard = [&]() {
         if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-          // Der LETZTE Thread setzt den Erfolg, WENN keine Exception geworfen
-          // wurde
+          // The LAST thread sets the success, IF no exception was thrown
           if (!state->exception_set.test_and_set(std::memory_order_relaxed)) {
             state->batch_promise.set_value();
           }
