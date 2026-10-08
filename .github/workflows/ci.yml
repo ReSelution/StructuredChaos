@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Fedora ships the same Clang major as the development machines, which keeps
+# clang-format and clang-tidy results identical to a local run.
+env:
+  PACKAGES: >-
+    clang clang-tools-extra compiler-rt llvm gcc-c++ mold meson ninja-build git
+    findutils
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:44
+      # The sanitizer runtimes need ptrace and personality().
+      options: --security-opt seccomp=unconfined
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debug
+            setup: --buildtype=debug
+          - name: release
+            setup: --buildtype=release
+          - name: asan-ubsan
+            setup: -Db_sanitize=address,undefined
+          - name: tsan
+            setup: -Db_sanitize=thread
+    steps:
+      - name: Install toolchain
+        run: dnf install -y --setopt=install_weak_deps=False $PACKAGES
+
+      - uses: actions/checkout@v5
+
+      - name: Cache subprojects
+        uses: actions/cache@v4
+        with:
+          path: |
+            subprojects/*/
+            !subprojects/packagefiles/
+            !subprojects/rapidHash/
+          key: subprojects-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
+
+      - name: Configure
+        run: meson setup build --native-file cross/linux-clang.ini ${{ matrix.setup }}
+
+      - name: Build
+        run: meson compile -C build
+
+      - name: Test
+        run: meson test -C build --suite StructuredChaos --print-errorlogs
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlog-${{ matrix.name }}
+          path: build/meson-logs/testlog.txt
+
+  lint:
+    name: format + tidy
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:44
+    steps:
+      - name: Install toolchain
+        run: dnf install -y --setopt=install_weak_deps=False $PACKAGES
+
+      - uses: actions/checkout@v5
+
+      - name: Cache subprojects
+        uses: actions/cache@v4
+        with:
+          path: |
+            subprojects/*/
+            !subprojects/packagefiles/
+            !subprojects/rapidHash/
+          key: subprojects-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
+
+      - name: Configure
+        run: meson setup build --native-file cross/linux-clang.ini
+
+      - name: clang-format
+        run: ninja -C build clang-format-check
+
+      # No build needed: the config header is generated at configure time.
+      # clang-tidy 22 sporadically crashes while tearing down after a clean
+      # run, so a file is retried when it dies from a signal.
+      - name: clang-tidy
+        run: |
+          python3 -c "
+          import json
+          for entry in json.load(open('build/compile_commands.json')):
+              if entry['file'].startswith(('../src/', '../tests/')):
+                  print('build/' + entry['file'])
+          " | xargs -P "$(nproc)" -I{} sh -c '
+            for attempt in 1 2 3; do
+              clang-tidy -p build --quiet --warnings-as-errors="*" "$1"
+              rc=$?
+              [ "$rc" -lt 128 ] && exit "$rc"
+              echo "clang-tidy crashed on $1 (attempt $attempt)" >&2
+            done
+            exit "$rc"' _ {}
