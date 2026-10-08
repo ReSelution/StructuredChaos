@@ -1,5 +1,10 @@
-# Catch2 Dependency
-catch2_dep = dependency('catch2-with-main', fallback: ['catch2', 'catch2_with_main_dep'])
+# Catch2 Dependency. Its own self-tests are a quarter of all objects and are
+# not ours to run.
+catch2_dep = dependency(
+  'catch2-with-main',
+  fallback: ['catch2', 'catch2_with_main_dep'],
+  default_options: ['tests=false'],
+)
 
 # UBSan only prints by default, which would leave a failing run green.
 test_env = environment()
