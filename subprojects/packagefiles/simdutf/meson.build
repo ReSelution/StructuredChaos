@@ -1,15 +1,15 @@
 project(
   'simdutf',
   'cpp',
-  version: '9.0.0',
+  version: '9.2.1',
   license: 'Apache-2.0 OR MIT',
   default_options: ['cpp_std=c++17'],
   meson_version: '>=1.1.0',
 )
 
 # ABI version, independent of the project version (SIMDUTF_LIB_VERSION in CMake)
-simdutf_lib_version = '34.0.0'
-simdutf_lib_soversion = '34'
+simdutf_lib_version = '36.0.0'
+simdutf_lib_soversion = '36'
 
 compiler = meson.get_compiler('cpp')
 compiler_id = compiler.get_id()

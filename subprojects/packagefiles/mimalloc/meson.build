@@ -48,6 +48,7 @@ mi_sources = files(
   'src/page.c',
   'src/prim/prim-tls.c',
   'src/prim/prim.c',
+  'src/profile/pprof.c',
   'src/random.c',
   'src/sample-guarded.c',
   'src/sample-profile.c',
@@ -518,8 +519,37 @@ if mi_arch.startswith('riscv')
   endif
 endif
 
-if not is_windows and cc.has_header('execinfo.h')
-  mi_defines += 'MI_HAS_EXECINFOH=1'
+# Platform headers that are only needed for profiling support
+if not is_windows and mi_profile != 'off'
+  if cc.has_header('unistd.h')
+    mi_defines += 'MI_HAS_UNISTDH=1'
+  endif
+  if cc.has_header('execinfo.h')
+    mi_defines += 'MI_HAS_EXECINFOH=1'
+    # On the BSDs backtrace lives in a separate libexecinfo
+    if host_sys in ['freebsd', 'netbsd', 'openbsd', 'dragonfly']
+      execinfo_dep = cc.find_library('execinfo', required: false)
+      if execinfo_dep.found()
+        mi_deps += execinfo_dep
+      endif
+    endif
+  elif cc.has_header('libunwind.h')
+    # No execinfo.h (e.g. musl); fall back to libunwind if it is installed
+    unwind_dep = cc.find_library('unwind', required: false)
+    if unwind_dep.found()
+      mi_defines += 'MI_HAS_LIBUNWINDH=1'
+      mi_deps += unwind_dep
+    endif
+  else
+    warning('No backtrace support available: neither execinfo.h nor libunwind.h found.')
+  endif
+  # kinfo_getvmmap, used for the memory mappings in dumped profiles
+  if host_sys in ['freebsd', 'dragonfly']
+    util_dep = cc.find_library('util', required: false)
+    if util_dep.found()
+      mi_deps += util_dep
+    endif
+  endif
 endif
 
 # Compiler flags
@@ -850,8 +880,11 @@ if mi_build_tests
       'stress-heaps',
       'stress-subprocs',
       'stress',
+      'stress-pprof',
       'profile',
+      'pprof',
     ]
+      is_profile_test = name in ['profile', 'pprof', 'stress-pprof']
       exe = executable(
         'mimalloc-test-' + name,
         'test/test-' + name + '.c',
@@ -863,7 +896,7 @@ if mi_build_tests
         link_language: link_lang,
         override_options: tgt_overrides,
       )
-      if is_guarded and name != 'profile'
+      if is_guarded and not is_profile_test
         test(
           'test-' + name,
           exe,
@@ -880,7 +913,11 @@ if mi_build_tests
           },
           timeout: 300,
         )
-      elif name != 'profile' or mi_profile != 'off'
+      elif is_profile_test and mi_profile == 'off'
+        # not a test without profiling
+      elif not is_apple and name in ['pprof', 'stress-pprof']
+        # not a test
+      else
         test('test-' + name, exe, timeout: 300)
       endif
     endforeach

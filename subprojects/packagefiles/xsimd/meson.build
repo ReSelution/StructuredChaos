@@ -1,7 +1,7 @@
 project(
   'xsimd',
   'cpp',
-  version: '14.2.0',
+  version: '14.3.0',
   license: 'BSD-3-Clause',
   default_options: ['cpp_std=c++14'],
   meson_version: '>=1.1.0',
