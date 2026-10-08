@@ -291,7 +291,7 @@ TEST_CASE("Registry Benchmarks: Parallel Reads", "[ecs][registry][threading][!be
     std::vector<int> tasks(TASK_COUNT);
     sc::threading::detachBatch(
         std::move(tasks),
-        [&](int thread_id, int task) {
+        [&](int task [[maybe_unused]]) {
           float sum = 0.0f;
           for (size_t i = 0; i < ENTITY_COUNT; ++i) {
             auto [lock, position, velocity] = sc_world.registry.get<BenchPosition, BenchVelocity>(sc_world.entities[i]);
@@ -308,7 +308,7 @@ TEST_CASE("Registry Benchmarks: Parallel Reads", "[ecs][registry][threading][!be
     std::vector<int> tasks(TASK_COUNT);
     sc::threading::detachBatch(
         std::move(tasks),
-        [&](int thread_id, int task) {
+        [&](int task [[maybe_unused]]) {
           float sum = 0.0f;
           auto view = sc_world.registry.view<BenchPosition, BenchVelocity>();
           view.raw().each([&sum](const BenchPosition &position, const BenchVelocity &velocity) {
@@ -348,7 +348,7 @@ TEST_CASE("Registry Benchmarks: Parallel Writes", "[ecs][registry][threading][!b
     std::vector<int> batches(BATCH_COUNT);
     sc::threading::detachBatch(
         std::move(batches),
-        [&registry](int thread_id, int batch) {
+        [&registry](int batch) {
           for (size_t i = 0; i < BATCH_SIZE; ++i) {
             auto entity = registry.create();
             entity.add<BenchPosition>();
@@ -381,7 +381,7 @@ TEST_CASE("Registry Benchmarks: Parallel Writes", "[ecs][registry][threading][!b
     std::vector<int> batches(BATCH_COUNT);
     sc::threading::detachBatch(
         std::move(batches),
-        [&registry](int thread_id, int batch) {
+        [&registry](int batch [[maybe_unused]]) {
           for (size_t i = 0; i < BATCH_SIZE; ++i) {
             registry.create();
           }
@@ -420,7 +420,7 @@ TEST_CASE("Registry Benchmarks: Parallel Writes", "[ecs][registry][threading][!b
     reserve_all(registry);
 
     std::vector<int> batches(BATCH_COUNT);
-    sc::threading::detachBatch(std::move(batches), [&](int thread_id, int batch) { write_batch(registry); }, nullptr);
+    sc::threading::detachBatch(std::move(batches), [&](int batch [[maybe_unused]]) { write_batch(registry); }, nullptr);
     sc::threading::wait_until_finished();
   };
 
@@ -467,10 +467,10 @@ TEST_CASE("Registry Benchmarks: Parallel Writes", "[ecs][registry][threading][!b
   };
 
   BENCHMARK("sc: 1 task per component") {
-    sc::threading::detach([&](int thread_id) { round_trip(sc_world, BenchPosition{}); });
-    sc::threading::detach([&](int thread_id) { round_trip(sc_world, BenchVelocity{}); });
-    sc::threading::detach([&](int thread_id) { round_trip(sc_world, BenchHealth{}); });
-    sc::threading::detach([&](int thread_id) { round_trip(sc_world, BenchTeam{}); });
+    sc::threading::detach([&]() { round_trip(sc_world, BenchPosition{}); });
+    sc::threading::detach([&]() { round_trip(sc_world, BenchVelocity{}); });
+    sc::threading::detach([&]() { round_trip(sc_world, BenchHealth{}); });
+    sc::threading::detach([&]() { round_trip(sc_world, BenchTeam{}); });
     sc::threading::wait_until_finished();
   };
 

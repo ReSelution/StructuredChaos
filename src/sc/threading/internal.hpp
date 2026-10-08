@@ -7,7 +7,7 @@
 #include <utility>
 namespace sc::threading {
 
-  using MoveOnlyFunction = std::move_only_function<void(int)>;
+  using MoveOnlyFunction = std::move_only_function<void()>;
   constexpr uint64_t QUEUE_CAP = 1000000;
   constexpr size_t SFO_LIMIT = 64;
 

@@ -333,7 +333,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
   std::ranges::iota(tasks, 0);
 
   SECTION("Small Tasks Return One Result Per Item In Order") {
-    FutureGroup<int> group = sc::threading::enqueueBatch(std::move(tasks), [](int, int value) { return value * 2; });
+    FutureGroup<int> group = sc::threading::enqueueBatch(std::move(tasks), [](int value) { return value * 2; });
 
     REQUIRE(group.size() == task_count);
 
@@ -348,7 +348,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
     SFOBreaker breaker;
     breaker.weight.fill(std::byte{1});
 
-    FutureGroup<size_t> group = sc::threading::enqueueBatch(std::move(tasks), [breaker](int, int value) {
+    FutureGroup<size_t> group = sc::threading::enqueueBatch(std::move(tasks), [breaker](int value) {
       return static_cast<size_t>(value) + std::to_integer<size_t>(breaker.weight[0]);
     });
 
@@ -361,7 +361,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
 
   SECTION("Extra Arguments Are Forwarded") {
     FutureGroup<int> group =
-        sc::threading::enqueueBatch(std::move(tasks), [](int, int value, int offset) { return value + offset; }, 100);
+        sc::threading::enqueueBatch(std::move(tasks), [](int value, int offset) { return value + offset; }, 100);
 
     auto results = group.get();
     REQUIRE(results.size() == task_count);
@@ -371,7 +371,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
 
   SECTION("Accepts A Priority") {
     auto group = sc::threading::enqueueBatch<sc::threading::Priority::High>(
-        std::move(tasks), [](int, int value) { return std::to_string(value); });
+        std::move(tasks), [](int value) { return std::to_string(value); });
 
     auto results = group.get();
     REQUIRE(results.size() == task_count);
@@ -379,7 +379,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
   }
 
   SECTION("Becomes Ready Once The Pool Is Idle") {
-    auto group = sc::threading::enqueueBatch(std::move(tasks), [](int, int value) { return value; });
+    auto group = sc::threading::enqueueBatch(std::move(tasks), [](int value) { return value; });
 
     sc::threading::wait_until_finished();
 
@@ -389,7 +389,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
   }
 
   SECTION("A Throwing Task Surfaces Through get") {
-    auto group = sc::threading::enqueueBatch(std::move(tasks), [](int, int value) -> int {
+    auto group = sc::threading::enqueueBatch(std::move(tasks), [](int value) -> int {
       if (value == 500) {
         throw std::runtime_error("task 500");
       }
@@ -406,7 +406,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
   SECTION("A Throwing Task On The Merged Path Surfaces Through get") {
     SFOBreaker breaker;
 
-    auto group = sc::threading::enqueueBatch(std::move(tasks), [breaker](int, int value) -> int {
+    auto group = sc::threading::enqueueBatch(std::move(tasks), [breaker](int value) -> int {
       (void)breaker;
       if (value == 500) {
         throw std::runtime_error("task 500");

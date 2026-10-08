@@ -69,15 +69,17 @@ namespace {
 
     if (use_detach) {
       if (force_no_sfo) {
-        sc::threading::detachBatch(std::move(tasks), [breaker](int id, TaskType t) { (void)breaker; }, nullptr);
+        sc::threading::detachBatch(
+            std::move(tasks), [breaker](TaskType t [[maybe_unused]]) { (void)breaker; }, nullptr);
       } else {
-        sc::threading::detachBatch(std::move(tasks), [](int id, TaskType t) {}, nullptr);
+        sc::threading::detachBatch(std::move(tasks), [](TaskType t [[maybe_unused]]) {}, nullptr);
       }
     } else {
       if (force_no_sfo) {
-        auto f = sc::threading::enqueueBatch(std::move(tasks), [breaker](int id, TaskType t) { (void)breaker; });
+        auto f =
+            sc::threading::enqueueBatch(std::move(tasks), [breaker](TaskType t [[maybe_unused]]) { (void)breaker; });
       } else {
-        auto f = sc::threading::enqueueBatch(std::move(tasks), [](int id, TaskType t) {});
+        auto f = sc::threading::enqueueBatch(std::move(tasks), [](TaskType t [[maybe_unused]]) {});
       }
     }
 
@@ -98,7 +100,7 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
     std::vector<int> tasks(task_count);
     std::ranges::iota(tasks, 0);
 
-    auto future = sc::threading::enqueueBatch(std::move(tasks), [&executed_counter](int thread_id, int task_val) {
+    auto future = sc::threading::enqueueBatch(std::move(tasks), [&executed_counter](int task_val [[maybe_unused]]) {
       executed_counter.fetch_add(1, std::memory_order_relaxed);
     });
 
@@ -115,7 +117,9 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
 
     sc::threading::detachBatch(
         std::move(tasks),
-        [&executed_counter](int thread_id, int task_val) { executed_counter.fetch_add(1, std::memory_order_relaxed); },
+        [&executed_counter](int task_val [[maybe_unused]]) {
+          executed_counter.fetch_add(1, std::memory_order_relaxed);
+        },
         nullptr);
 
     sc::threading::wait_until_finished();
@@ -130,7 +134,7 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
 
     sc::threading::detachBatch(
         std::move(tasks),
-        [&data_valid](int thread_id, int task_val) {
+        [&data_valid](int task_val) {
           if (task_val < 0 || std::cmp_greater_equal(task_val, task_count)) {
             data_valid.store(false, std::memory_order_relaxed);
           }
@@ -177,7 +181,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
   SECTION("Runs Task With Arguments") {
     std::atomic<int> result{0};
 
-    sc::threading::detach([&result](int thread_id, int a, int b) { result.store(a + b); }, 40, 2);
+    sc::threading::detach([&result](int a, int b) { result.store(a + b); }, 40, 2);
     sc::threading::wait_until_finished();
 
     REQUIRE(result.load() == 42);
@@ -187,8 +191,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     std::atomic<size_t> weight_size{0};
     SFOBreaker breaker{};
 
-    sc::threading::detach([&weight_size](int thread_id, const SFOBreaker &b) { weight_size.store(b.weight.size()); },
-                          breaker);
+    sc::threading::detach([&weight_size](const SFOBreaker &b) { weight_size.store(b.weight.size()); }, breaker);
     sc::threading::wait_until_finished();
 
     REQUIRE(weight_size.load() == breaker.weight.size());
@@ -197,8 +200,8 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
   SECTION("Accepts A Priority") {
     std::atomic<int> executed{0};
 
-    sc::threading::detach<sc::threading::Priority::High>([&executed](int thread_id) { executed.fetch_add(1); });
-    sc::threading::detach<sc::threading::Priority::Low>([&executed](int thread_id) { executed.fetch_add(1); });
+    sc::threading::detach<sc::threading::Priority::High>([&executed]() { executed.fetch_add(1); });
+    sc::threading::detach<sc::threading::Priority::Low>([&executed]() { executed.fetch_add(1); });
     sc::threading::wait_until_finished();
 
     REQUIRE(executed.load() == 2);
@@ -209,7 +212,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     std::atomic<int> executed{0};
 
     for (int i = 0; i < task_count; ++i) {
-      sc::threading::detach([&executed](int thread_id) { executed.fetch_add(1, std::memory_order_relaxed); });
+      sc::threading::detach([&executed]() { executed.fetch_add(1, std::memory_order_relaxed); });
     }
     sc::threading::wait_until_finished();
 
@@ -220,9 +223,9 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     std::atomic<int> executed{0};
     SFOBreaker breaker{};
 
-    sc::threading::detach([](int thread_id) { throw std::runtime_error("small task"); });
-    sc::threading::detach([](int thread_id, const SFOBreaker &) { throw std::runtime_error("large task"); }, breaker);
-    sc::threading::detach([&executed](int thread_id) { executed.store(1); });
+    sc::threading::detach([]() { throw std::runtime_error("small task"); });
+    sc::threading::detach([](const SFOBreaker &) { throw std::runtime_error("large task"); }, breaker);
+    sc::threading::detach([&executed]() { executed.store(1); });
     sc::threading::wait_until_finished();
 
     REQUIRE(executed.load() == 1);
@@ -233,7 +236,7 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
   sc::threading::init();
 
   SECTION("Returns The Result Through The Future") {
-    auto future = sc::threading::enqueue([](int thread_id, int a, int b) { return a * b; }, 6, 7);
+    auto future = sc::threading::enqueue([](int a, int b) { return a * b; }, 6, 7);
 
     REQUIRE(future.get() == 42);
   }
@@ -241,7 +244,7 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
   SECTION("Completes A Void Future") {
     std::atomic<bool> executed{false};
 
-    std::future<void> future = sc::threading::enqueue([&executed](int thread_id) { executed.store(true); });
+    std::future<void> future = sc::threading::enqueue([&executed]() { executed.store(true); });
     future.get();
 
     REQUIRE(executed.load());
@@ -252,7 +255,7 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
     breaker.weight.fill(std::byte{3});
 
     auto future = sc::threading::enqueue(
-        [](int thread_id, const SFOBreaker &b) {
+        [](const SFOBreaker &b) {
           size_t sum = 0;
           for (const auto value : b.weight) {
             sum += std::to_integer<size_t>(value);
@@ -265,24 +268,24 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
   }
 
   SECTION("Accepts A Priority") {
-    auto future =
-        sc::threading::enqueue<sc::threading::Priority::High>([](int thread_id) { return std::string{"high"}; });
+    auto future = sc::threading::enqueue<sc::threading::Priority::High>([]() { return std::string{"high"}; });
 
     REQUIRE(future.get() == "high");
   }
 
-  SECTION("Passes The Worker Id") {
-    auto future = sc::threading::enqueue([](int thread_id) { return thread_id; });
+  SECTION("Reports The Worker Id") {
+    auto future = sc::threading::enqueue([]() { return sc::threading::thread_id(); });
 
     REQUIRE(future.get() > 0);
+    REQUIRE(sc::threading::thread_id() == 0);
   }
 
   SECTION("Forwards Exceptions Through The Future") {
     SFOBreaker breaker{};
 
-    auto small_task = sc::threading::enqueue([](int thread_id) -> int { throw std::runtime_error("small task"); });
-    auto large_task = sc::threading::enqueue(
-        [](int thread_id, const SFOBreaker &) -> int { throw std::runtime_error("large task"); }, breaker);
+    auto small_task = sc::threading::enqueue([]() -> int { throw std::runtime_error("small task"); });
+    auto large_task =
+        sc::threading::enqueue([](const SFOBreaker &) -> int { throw std::runtime_error("large task"); }, breaker);
 
     REQUIRE_THROWS_AS(small_task.get(), std::runtime_error);
     REQUIRE_THROWS_AS(large_task.get(), std::runtime_error);
@@ -295,8 +298,7 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
     futures.reserve(task_count);
 
     for (int i = 0; i < task_count; ++i) {
-      futures.push_back(
-          sc::threading::enqueue([&executed](int thread_id) { executed.fetch_add(1, std::memory_order_relaxed); }));
+      futures.push_back(sc::threading::enqueue([&executed]() { executed.fetch_add(1, std::memory_order_relaxed); }));
     }
     sc::threading::wait_until_finished();
 

@@ -14,9 +14,9 @@
 namespace sc::threading::impl {
 
   template <Priority P, typename F, typename... Args>
-    requires std::invocable<F, int, Args...>
-  auto enqueue(F &&f, Args &&...args) -> std::future<std::invoke_result_t<F, int, Args...>> {
-    using return_type = std::invoke_result_t<F, int, Args...>;
+    requires std::invocable<F, Args...>
+  auto enqueue(F &&f, Args &&...args) -> std::future<std::invoke_result_t<F, Args...>> {
+    using return_type = std::invoke_result_t<F, Args...>;
     std::promise<return_type> promise;
     auto res = promise.get_future();
 
@@ -27,14 +27,14 @@ namespace sc::threading::impl {
     on_task_enqueued();
     if constexpr (SizeF + SizeArgs + MIN_OVERHEAD <= SFO_LIMIT) {
       queues.emplace<P>(
-          [f = std::forward<F>(f), ... args = std::forward<Args>(args), p = std::move(promise)](int id) mutable {
+          [f = std::forward<F>(f), ... args = std::forward<Args>(args), p = std::move(promise)]() mutable {
             try {
 
               if constexpr (std::is_void_v<return_type>) {
-                f(id, std::forward<Args>(args)...);
+                f(std::forward<Args>(args)...);
                 p.set_value();
               } else {
-                p.set_value(f(id, std::forward<Args>(args)...));
+                p.set_value(f(std::forward<Args>(args)...));
               }
             } catch (...) {
               p.set_exception(std::current_exception());
@@ -43,17 +43,17 @@ namespace sc::threading::impl {
     } else {
       auto ctx = std::make_unique<std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>>>(
           std::forward<F>(f), std::make_tuple(std::forward<Args>(args)...));
-      queues.emplace<P>([ctx = std::move(ctx), p = std::move(promise)](int id) mutable {
+      queues.emplace<P>([ctx = std::move(ctx), p = std::move(promise)]() mutable {
         try {
           auto &func = std::get<0>(*ctx);
           auto &base_args = std::get<1>(*ctx);
           std::apply(
               [&](auto &&...unpacked) {
                 if constexpr (std::is_void_v<return_type>) {
-                  func(id, std::forward<decltype(unpacked)>(unpacked)...);
+                  func(std::forward<decltype(unpacked)>(unpacked)...);
                   p.set_value();
                 } else {
-                  p.set_value(func(id, std::forward<decltype(unpacked)>(unpacked)...));
+                  p.set_value(func(std::forward<decltype(unpacked)>(unpacked)...));
                 }
               },
               base_args);
@@ -69,7 +69,7 @@ namespace sc::threading::impl {
   // --- VOID PATHS ---
   template <typename F, typename Arg, typename... Args>
   auto make_void_individual(F &&f, Arg &&item, const std::tuple<Args...> &args, std::shared_ptr<BatchState> &state) {
-    return [f, args, item = std::forward<Arg>(item), state](int id) mutable {
+    return [f, args, item = std::forward<Arg>(item), state]() mutable {
       auto completion_guard = [&]() {
         if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
           // Der LETZTE Thread setzt den Erfolg, WENN keine Exception geworfen
@@ -80,7 +80,7 @@ namespace sc::threading::impl {
         }
       };
       try {
-        std::apply([&](auto &&...extra) { f(id, std::move(item), extra...); }, args);
+        std::apply([&](auto &&...extra) { f(std::move(item), extra...); }, args);
         completion_guard();
       } catch (...) {
         if (!state->exception_set.test_and_set(std::memory_order_relaxed)) {
@@ -94,19 +94,19 @@ namespace sc::threading::impl {
   template <typename F, typename Arg, typename... Args>
   auto make_void_individualWithCallback(F &&f, Arg &&item, const std::tuple<Args...> &args,
                                         std::shared_ptr<DetachBatchState> &state) {
-    return [f, args, item = std::forward<Arg>(item), state](int id) mutable {
+    return [f, args, item = std::forward<Arg>(item), state]() mutable {
       try {
-        std::apply([&](auto &&...extra) { f(id, std::move(item), extra...); }, args);
+        std::apply([&](auto &&...extra) { f(std::move(item), extra...); }, args);
 
         if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
           if (state->on_finished) {
-            state->on_finished(id);
+            state->on_finished();
           }
         }
       } catch (...) {
         if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
           if (state->on_finished) {
-            state->on_finished(id);
+            state->on_finished();
           }
         }
       }
@@ -114,9 +114,9 @@ namespace sc::threading::impl {
   }
 
   template <typename F, typename Shared> auto make_void_merged(F &&f, Shared shared, size_t i) {
-    return [f, shared, i](int id) {
+    return [f, shared, i]() {
       try {
-        std::apply([&](auto &&...extra) { f(id, std::move(shared->payload[i]), extra...); }, shared->saved_args);
+        std::apply([&](auto &&...extra) { f(std::move(shared->payload[i]), extra...); }, shared->saved_args);
         if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
           shared->batch_promise.set_value();
         }
@@ -129,9 +129,9 @@ namespace sc::threading::impl {
   // --- NON-VOID PATHS ---
   template <typename F, typename Arg, typename... Args, typename Promise>
   auto make_nonvoid_individual(F &&f, Arg &&item, const std::tuple<Args...> &args, Promise p) {
-    return [f, args, item = std::forward<Arg>(item), p = std::move(p)](int id) mutable {
+    return [f, args, item = std::forward<Arg>(item), p = std::move(p)]() mutable {
       try {
-        std::apply([&](auto &&...extra) { p.set_value(f(id, std::move(item), extra...)); }, args);
+        std::apply([&](auto &&...extra) { p.set_value(f(std::move(item), extra...)); }, args);
       } catch (...) {
         p.set_exception(std::current_exception());
       }
@@ -185,7 +185,7 @@ namespace sc::threading::impl {
     auto shared = std::make_shared<MergedState<R, Args...>>(size, std::forward<R>(r), std::forward<Args>(args)...);
 
     for (size_t i = 0; i < size; ++i) {
-      queues.emplace<P>([f, shared, i](int id) {
+      queues.emplace<P>([f, shared, i]() {
         auto completion_guard = [&]() {
           if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             if (!shared->exception_set.test_and_set(std::memory_order_relaxed)) {
@@ -194,8 +194,7 @@ namespace sc::threading::impl {
           }
         };
         try {
-          std::apply([&](auto &&...unpacked) { f(id, std::move(shared->payload[i]), unpacked...); },
-                     shared->saved_args);
+          std::apply([&](auto &&...unpacked) { f(std::move(shared->payload[i]), unpacked...); }, shared->saved_args);
           completion_guard();
         } catch (...) {
           if (!shared->exception_set.test_and_set(std::memory_order_relaxed)) {
@@ -229,17 +228,15 @@ namespace sc::threading::impl {
     }
 
     for (size_t i = 0; i < size; ++i) {
-      queues.emplace<P>([f, shared, i](int id) {
+      queues.emplace<P>([f, shared, i]() {
         try {
           if constexpr (std::is_move_constructible_v<RetType>) {
-            RetType res =
-                std::apply([&](auto &&...unpacked) { return f(id, std::move(shared->payload[i]), unpacked...); },
-                           shared->saved_args);
+            RetType res = std::apply([&](auto &&...unpacked) { return f(std::move(shared->payload[i]), unpacked...); },
+                                     shared->saved_args);
             shared->promises[i].set_value(std::move(res));
           } else {
-            shared->promises[i].set_value(
-                std::apply([&](auto &&...unpacked) { return f(id, std::move(shared->payload[i]), unpacked...); },
-                           shared->saved_args));
+            shared->promises[i].set_value(std::apply(
+                [&](auto &&...unpacked) { return f(std::move(shared->payload[i]), unpacked...); }, shared->saved_args));
           }
         } catch (...) {
           shared->promises[i].set_exception(std::current_exception());
@@ -251,11 +248,11 @@ namespace sc::threading::impl {
   }
 
   template <Priority P, std::ranges::sized_range R, typename F, typename... Args>
-    requires std::invocable<F, int, std::ranges::range_value_t<R>, Args...>
+    requires std::invocable<F, std::ranges::range_value_t<R>, Args...>
   auto enqueueBatch(R &&r, F &&f, Args &&...args) {
     const size_t count = std::ranges::size(r);
     using ArgType = std::ranges::range_value_t<R>;
-    using RetType = std::invoke_result_t<F, int, ArgType, Args...>;
+    using RetType = std::invoke_result_t<F, ArgType, Args...>;
     constexpr bool is_void = std::is_void_v<RetType>;
 
     constexpr size_t CAPTURE_BASE = sizeof(std::decay_t<F>) + (0 + ... + sizeof(std::decay_t<Args>)) + sizeof(ArgType);

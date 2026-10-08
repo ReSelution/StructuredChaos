@@ -12,7 +12,7 @@
 namespace sc::threading::impl {
 
   template <Priority P, typename F, typename... Args>
-    requires std::invocable<F, int, Args...> && std::is_void_v<std::invoke_result_t<F, int, Args...>>
+    requires std::invocable<F, Args...> && std::is_void_v<std::invoke_result_t<F, Args...>>
   void detach(F &&f, Args &&...args) {
     constexpr size_t SizeF = sizeof(std::decay_t<F>);
     constexpr size_t SizeArgs = (sizeof(std::decay_t<Args>) + ... + 0);
@@ -20,9 +20,9 @@ namespace sc::threading::impl {
 
     on_task_enqueued();
     if constexpr (SizeF + SizeArgs + MIN_OVERHEAD <= SFO_LIMIT) {
-      queues.emplace<P>([f = std::forward<F>(f), ... args = std::forward<Args>(args)](int id) mutable {
+      queues.emplace<P>([f = std::forward<F>(f), ... args = std::forward<Args>(args)]() mutable {
         try {
-          f(id, std::forward<Args>(args)...);
+          f(std::forward<Args>(args)...);
         } catch (...) { // NOLINT(bugprone-empty-catch)
           // Nobody waits for a detached task, so there is no one to report to.
         }
@@ -30,11 +30,11 @@ namespace sc::threading::impl {
     } else {
       auto ctx = std::make_unique<std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>>>(
           std::forward<F>(f), std::make_tuple(std::forward<Args>(args)...));
-      queues.emplace<P>([ctx = std::move(ctx)](int id) mutable {
+      queues.emplace<P>([ctx = std::move(ctx)]() mutable {
         auto &func = std::get<0>(*ctx);
         auto &base_args = std::get<1>(*ctx);
         try {
-          std::apply([&](auto &&...unpacked) { func(id, std::forward<decltype(unpacked)>(unpacked)...); }, base_args);
+          std::apply([&](auto &&...unpacked) { func(std::forward<decltype(unpacked)>(unpacked)...); }, base_args);
         } catch (...) { // NOLINT(bugprone-empty-catch)
           // Nobody waits for a detached task, so there is no one to report to.
         }
@@ -47,9 +47,9 @@ namespace sc::threading::impl {
   template <Priority P, typename R, typename F, typename... Args>
   void detachBatchSfoNoCallback(R &&r, F &&f, Args &&...args) {
     for (auto &&item : r) {
-      queues.emplace<P>([f, args..., arg = std::move(item)](int id) mutable {
+      queues.emplace<P>([f, args..., arg = std::move(item)]() mutable {
         try {
-          f(id, std::move(arg), args...);
+          f(std::move(arg), args...);
         } catch (const std::exception &e) {
           ThreadLog::err("Exception: {}", e.what());
         }
@@ -64,17 +64,17 @@ namespace sc::threading::impl {
     auto state = std::make_shared<DetachBatchState>(count, std::forward<Finished>(finished));
 
     for (auto &&item : r) {
-      queues.emplace<P>([f, args..., arg = std::move(item), state](int id) mutable {
+      queues.emplace<P>([f, args..., arg = std::move(item), state]() mutable {
         auto invoke_finished_if_last = [&]() {
           if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             if (state->on_finished) {
-              state->on_finished(id);
+              state->on_finished();
             }
           }
         };
 
         try {
-          f(id, std::move(arg), args...);
+          f(std::move(arg), args...);
           invoke_finished_if_last();
         } catch (...) {
           invoke_finished_if_last();
@@ -95,10 +95,9 @@ namespace sc::threading::impl {
         std::make_shared<DetachedMergedStateNoCallback<R, Args...>>(std::forward<R>(r), std::forward<Args>(args)...);
 
     for (size_t i = 0; i < count; ++i) {
-      queues.emplace<P>([f, shared, i](int id) {
+      queues.emplace<P>([f, shared, i]() {
         try {
-          std::apply([&](auto &&...unpacked) { f(id, std::move(shared->payload[i]), unpacked...); },
-                     shared->saved_args);
+          std::apply([&](auto &&...unpacked) { f(std::move(shared->payload[i]), unpacked...); }, shared->saved_args);
         } catch (...) { // NOLINT(bugprone-empty-catch)
           // Nobody waits for a detached task, so there is no one to report to.
         }
@@ -114,18 +113,17 @@ namespace sc::threading::impl {
                                                      std::forward<Args>(args)...);
 
     for (size_t i = 0; i < count; ++i) {
-      queues.emplace<P>([f, shared, i](int id) {
+      queues.emplace<P>([f, shared, i]() {
         auto invoke_finished_if_last = [&]() {
           if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             if (shared->on_finished) {
-              shared->on_finished(id);
+              shared->on_finished();
             }
           }
         };
 
         try {
-          std::apply([&](auto &&...unpacked) { f(id, std::move(shared->payload[i]), unpacked...); },
-                     shared->saved_args);
+          std::apply([&](auto &&...unpacked) { f(std::move(shared->payload[i]), unpacked...); }, shared->saved_args);
           invoke_finished_if_last();
         } catch (...) {
           invoke_finished_if_last();
@@ -135,8 +133,8 @@ namespace sc::threading::impl {
   }
 
   template <Priority P, std::ranges::sized_range R, typename F, typename Finished, typename... Args>
-    requires std::invocable<F, int, std::ranges::range_value_t<R>, Args...> &&
-             std::is_void_v<std::invoke_result_t<F, int, std::ranges::range_value_t<R>, Args...>>
+    requires std::invocable<F, std::ranges::range_value_t<R>, Args...> &&
+             std::is_void_v<std::invoke_result_t<F, std::ranges::range_value_t<R>, Args...>>
   void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
     const auto count = std::ranges::size(r);
     if (count == 0) {

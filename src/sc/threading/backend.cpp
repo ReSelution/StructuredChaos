@@ -80,14 +80,14 @@ namespace sc::threading::impl {
       MoveOnlyFunction task;
       if (queues.try_pop_any(task, threadId)) {
         on_task_started();
-        task(id);
+        task();
         on_task_finished();
         continue;
       }
       task = helpThread(id);
       if (task) {
         on_task_started();
-        task(id);
+        task();
         on_task_finished();
         continue;
       }

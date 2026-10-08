@@ -502,7 +502,7 @@ TEST_CASE("Registry Multi-Threaded Stress Test", "[ecs][registry][threading]") {
 
   sc::threading::detachBatch(
       std::move(entitiesStart),
-      [&registry](int thread_id, int start) {
+      [&registry](int start) {
         float rawData[200]{};
         for (size_t i = 0; i < batch_size; ++i) {
           auto e = registry.create();

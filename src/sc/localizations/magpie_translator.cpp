@@ -130,9 +130,11 @@ namespace sc {
     }
   }
 #endif
-
+  // NOLINTNEXTLINE ignoring make static when DUMP_MAGPIE is not set
   void Magpie::dumpToFile(std::string_view file) noexcept {
-#ifdef DUMP_MAGPIE
+#ifndef DUMP_MAGPIE
+    (void)file;
+#else
     std::shared_lock lock(sh_mtx);
     if (entries.empty())
       return;
