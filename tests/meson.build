@@ -5,8 +5,15 @@ catch2_dep = dependency('catch2-with-main', fallback: ['catch2', 'catch2_with_ma
 test_env = environment()
 test_env.set('UBSAN_OPTIONS', 'halt_on_error=1:print_stacktrace=1')
 
-# Instrumented binaries are several times slower.
-test_timeout = sc_asan or sc_tsan ? 300 : 30
+# Instrumented binaries are several times slower, and unoptimized ones leave
+# little headroom for the contended threading tests on a small CI runner.
+if sc_asan or sc_tsan
+  test_timeout = 300
+elif get_option('optimization') == '0'
+  test_timeout = 120
+else
+  test_timeout = 30
+endif
 
 # Registry Test Executable
 test_registry = executable(
