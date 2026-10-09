@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <random>
+#include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,6 +46,11 @@ namespace {
   };
   struct Tag {};
 
+  // Few entities have one.
+  struct Player {
+    int number{0};
+  };
+
   // What the world should hold: for every entity that exists, a bit for each
   // of the four components above.
   using Model = std::unordered_map<uint64_t, unsigned>;
@@ -54,6 +60,9 @@ namespace {
   // unwanted ones, on one thread and on all, and requires that the function is
   // called once for exactly those entities of the model, with their own
   // components.
+  // Room for the rare entities of a test.
+  constexpr size_t RARE_PLACES = 2 * PAGE_SIZE;
+
   template <typename... Terms> void requireLoop(World &world, const Model &model, unsigned wanted, unsigned unwanted) {
     std::vector<uint64_t> expected;
     for (const auto &[entity, components] : model) {
@@ -73,24 +82,37 @@ namespace {
     REQUIRE(wrong == 0);
     REQUIRE(seen == expected);
 
-    std::vector<std::atomic<uint32_t>> visits(world.pageLimit() * PAGE_SIZE);
+    // The rare entities, which have the highest indices, follow the others.
+    const size_t common = size_t{world.pageLimit()} * PAGE_SIZE;
+    const size_t places = common + RARE_PLACES;
+    const auto placeOf = [&](Entity entity) {
+      const size_t index = sc::ecs2::indexOf(entity);
+      return index < common ? index : std::min(common + (sc::ecs2::INDEX_LIMIT - 1 - index), places);
+    };
+    // One more for what is out of place.
+    std::vector<std::atomic<uint32_t>> visits(places + 1);
     std::atomic<size_t> wrongOnThreads = 0;
     std::atomic<size_t> calls = 0;
     world.parallelEach<Terms...>([&](Entity entity, const auto &...components) {
       ++calls;
       wrongOnThreads += !world.valid(entity) || ((components.owner != entity) || ... || false);
-      ++visits[sc::ecs2::indexOf(entity)];
+      ++visits[placeOf(entity)];
     });
     REQUIRE(wrongOnThreads == 0);
     REQUIRE(calls == expected.size());
+    REQUIRE(visits[places] == 0);
     size_t once = 0;
     for (const uint64_t entity : expected) {
-      once += visits[sc::ecs2::indexOf(Entity{entity})] == 1;
+      once += visits[placeOf(Entity{entity})] == 1;
     }
     REQUIRE(once == expected.size());
   }
 
 } // namespace
+
+// Gamma as well, so that the loops below go through columns of both kinds.
+template <> inline constexpr bool sc::ecs2::rareComponent<Player> = true;
+template <> inline constexpr bool sc::ecs2::rareComponent<Gamma> = true;
 
 TEST_CASE("World Entities", "[ecs2][world]") {
   sc::threading::init();
@@ -123,6 +145,97 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     REQUIRE_FALSE(world.valid(first));
     // Nothing of the earlier entity is left.
     REQUIRE_FALSE(world.contains<Position>(again));
+  }
+
+  SECTION("There Are Never More Entities Than INDEX_LIMIT") {
+    // The rare entities take their pages from the same indices.
+    const Entity special = world.create(sc::ecs2::rare);
+    REQUIRE(sc::ecs2::indexOf(special) == sc::ecs2::INDEX_LIMIT - PAGE_SIZE);
+
+    Entity last = sc::ecs2::null;
+    for (uint32_t i = 0; i < sc::ecs2::INDEX_LIMIT - PAGE_SIZE; ++i) {
+      last = world.create();
+    }
+    REQUIRE(sc::ecs2::indexOf(last) == sc::ecs2::INDEX_LIMIT - PAGE_SIZE - 1);
+    world.emplace<Position>(last, 1.0f, 2.0f);
+    REQUIRE(world.get<Position>(last).y == 2.0f);
+
+    REQUIRE_THROWS_AS(world.create(), std::length_error);
+    REQUIRE_THROWS_AS(world.createLocal(), std::length_error);
+    // The page of the rare entities is not full yet.
+    Entity lastRare = special;
+    for (uint32_t i = 1; i < PAGE_SIZE; ++i) {
+      lastRare = world.create(sc::ecs2::rare);
+    }
+    REQUIRE(sc::ecs2::indexOf(lastRare) == sc::ecs2::INDEX_LIMIT - 1);
+    REQUIRE_THROWS_AS(world.create(sc::ecs2::rare), std::length_error);
+    REQUIRE(world.valid(special));
+    REQUIRE(world.valid(lastRare));
+    // Nothing is lost by trying.
+    REQUIRE(world.valid(last));
+    REQUIRE_FALSE(world.contains<Position>(sc::ecs2::null));
+    size_t found = 0;
+    world.each<const Position>([&](const Position &) { ++found; });
+    REQUIRE(found == 1);
+
+    // A destroyed entity makes room for another one of its kind.
+    REQUIRE(world.destroy(last));
+    REQUIRE_THROWS_AS(world.create(sc::ecs2::rare), std::length_error);
+    REQUIRE(sc::ecs2::indexOf(world.create()) == sc::ecs2::INDEX_LIMIT - PAGE_SIZE - 1);
+  }
+
+  SECTION("Rare Entities Have Indices Of Their Own") {
+    const Entity common = world.create();
+    const Entity first = world.create(sc::ecs2::rare);
+    const Entity second = world.create(sc::ecs2::rare);
+    REQUIRE(sc::ecs2::indexOf(common) < PAGE_SIZE);
+    REQUIRE(sc::ecs2::indexOf(first) >= sc::ecs2::INDEX_LIMIT - PAGE_SIZE);
+    REQUIRE(sc::ecs2::indexOf(second) == sc::ecs2::indexOf(first) + 1);
+    REQUIRE(world.valid(first));
+    REQUIRE(world.valid(second));
+    // Between the two ends there is nothing.
+    REQUIRE_FALSE(world.valid(sc::ecs2::makeEntity(sc::ecs2::INDEX_LIMIT / 2, 0)));
+    REQUIRE_FALSE(world.valid(sc::ecs2::makeEntity(sc::ecs2::INDEX_LIMIT, 0)));
+
+    // An index goes back to the kind of entity it came from.
+    REQUIRE(world.destroy(first));
+    REQUIRE_FALSE(world.valid(first));
+    REQUIRE(sc::ecs2::indexOf(world.create()) == sc::ecs2::indexOf(common) + 1);
+    const Entity again = world.create(sc::ecs2::rare);
+    REQUIRE(sc::ecs2::indexOf(again) == sc::ecs2::indexOf(first));
+    REQUIRE(again != first);
+
+    REQUIRE(world.destroy(common));
+    REQUIRE(sc::ecs2::indexOf(world.create(sc::ecs2::rare)) == sc::ecs2::indexOf(second) + 1);
+    REQUIRE(sc::ecs2::indexOf(world.create()) == sc::ecs2::indexOf(common));
+  }
+
+  SECTION("Entities Created Locally Are Apart From The Earlier Ones") {
+    const Entity earlier = world.create();
+    const Entity local = world.createLocal();
+    const Entity next = world.createLocal();
+    const auto pageOf = [](Entity entity) { return sc::ecs2::indexOf(entity) / PAGE_SIZE; };
+    REQUIRE(pageOf(local) != pageOf(earlier));
+    REQUIRE(pageOf(next) == pageOf(local));
+    REQUIRE(world.valid(local));
+
+    // Not in a page that has entities from before.
+    world.sealLocal();
+    const Entity later = world.createLocal();
+    REQUIRE(pageOf(later) != pageOf(local));
+    REQUIRE(pageOf(later) != pageOf(earlier));
+
+    // What was left of the page is not lost.
+    std::unordered_set<uint32_t> indices{sc::ecs2::indexOf(earlier), sc::ecs2::indexOf(local), sc::ecs2::indexOf(next),
+                                         sc::ecs2::indexOf(later)};
+    world.sealLocal();
+    bool reused = false;
+    for (uint32_t i = 0; i < 3 * PAGE_SIZE; ++i) {
+      const Entity entity = world.create();
+      REQUIRE(indices.insert(sc::ecs2::indexOf(entity)).second);
+      reused = reused || pageOf(entity) == pageOf(local);
+    }
+    REQUIRE(reused);
   }
 
   SECTION("Every Thread Creates Other Entities") {
@@ -270,6 +383,53 @@ TEST_CASE("World Loops", "[ecs2][world][threading]") {
     }
   }
 
+  SECTION("Rare Entities And Rare Components Are Gone Through Like The Others") {
+    std::vector<Entity> players;
+    for (int i = 0; i < 300; ++i) {
+      players.push_back(world.create(sc::ecs2::rare));
+      world.emplace<Player>(players.back(), i);
+      world.emplace<Position>(players.back(), -1.0f, 0.0f);
+      if (i % 2 == 0) {
+        world.emplace<Velocity>(players.back(), 1.0f, 2.0f);
+      }
+    }
+    // The components of all of them are in one page.
+    REQUIRE(world.column<Player>().pages() == 1);
+    REQUIRE(world.column<Position>().pages() == 4 + 1);
+
+    size_t positions = 0;
+    world.each<const Position>([&](const Position &) { ++positions; });
+    REQUIRE(positions == entities.size() + players.size());
+
+    world.each<Position, const Velocity>([](Position &pos, const Velocity &vel) { pos.y += vel.dy; });
+    world.parallelEach<Position, const Velocity>([](Position &pos, const Velocity &vel) { pos.y += vel.dy; });
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.get<Position>(entities[i]).y == (i % 3 != 0 ? 4.0f : 0.0f));
+    }
+    for (size_t i = 0; i < players.size(); ++i) {
+      REQUIRE(world.get<Position>(players[i]).y == (i % 2 == 0 ? 4.0f : 0.0f));
+      REQUIRE(world.get<Player>(players[i]).number == static_cast<int>(i));
+    }
+
+    std::atomic<int> sum = 0;
+    std::atomic<size_t> wrong = 0;
+    world.parallelEach<const Player, const Position, Exclude<Velocity>>(
+        [&](Entity entity, const Player &player, const Position &pos) {
+          sum += player.number;
+          wrong += !world.valid(entity) || pos.x != -1.0f;
+        },
+        1);
+    // The odd numbers below 300.
+    REQUIRE(sum == 150 * 150);
+    REQUIRE(wrong == 0);
+
+    for (const Entity player : players) {
+      REQUIRE(world.destroy(player));
+    }
+    REQUIRE(world.column<Player>().pages() == 0);
+    REQUIRE(world.column<Position>().pages() == 4);
+  }
+
   SECTION("A Loop Changes Other Components Of Its Entity") {
     world.parallelEach<const Position>([&](Entity entity, const Position &pos) {
       if (static_cast<size_t>(pos.x) % 2 == 0) {
@@ -297,8 +457,12 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
   Model model;
   std::vector<Entity> alive;
 
-  const auto spawn = [&] {
-    const Entity entity = world.create();
+  size_t rares = 0;
+  const auto spawn = [&](bool common = false) {
+    // Now and then a rare one, as long as the test has room for them.
+    const bool rare = !common && rares < RARE_PLACES && below(4) == 0;
+    rares += rare;
+    const Entity entity = rare ? world.create(sc::ecs2::rare) : world.create();
     REQUIRE(model.emplace(static_cast<uint64_t>(entity), 0u).second);
     alive.push_back(entity);
     return entity;
@@ -340,7 +504,7 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
 
   // Full pages to begin with.
   for (size_t i = 0; i < 4 * PAGE_SIZE + 300; ++i) {
-    const Entity entity = spawn();
+    const Entity entity = spawn(true);
     world.emplace<Alpha>(entity, entity);
     world.emplace<Beta>(entity, entity);
     world.emplace<Gamma>(entity, entity);

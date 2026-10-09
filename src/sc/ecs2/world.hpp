@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -103,6 +104,21 @@ namespace sc::ecs2 {
 
     [[nodiscard]] Entity create() { return m_entities.create(); }
 
+    // An entity that is unlike most others, see Rare. It is an entity like any
+    // other, only with an index from the other end.
+    [[nodiscard]] Entity create(Rare) { return m_entities.create(rare); }
+
+    // An entity in a page that was made after the last sealLocal and that only
+    // the calling thread creates entities in. Several threads may create
+    // entities this way and give them components right away, next to threads
+    // that go through the entities there were at the last sealLocal.
+    [[nodiscard]] Entity createLocal() { return m_entities.createLocal(); }
+
+    // Ends the pages of createLocal, see there. To be called before threads
+    // go through entities and create others with createLocal, which the
+    // Scheduler does for every stage. Must have nothing running next to it.
+    void sealLocal() { m_entities.seal(); }
+
     [[nodiscard]] bool valid(Entity entity) const noexcept { return m_entities.valid(entity); }
 
     // Removes the entity with all of its components. False if it does not
@@ -165,7 +181,8 @@ namespace sc::ecs2 {
     // other entities as they are.
     template <typename... Terms, typename Function> void each(Function &&function) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
-      eachInPages(typename Lists::GetList{}, typename Lists::ExcludedList{}, 0, pageLimit(), function);
+      const PageRange pages = pageRange();
+      eachInRange(typename Lists::GetList{}, typename Lists::ExcludedList{}, pages, 0, pages.count(), function);
     }
 
     // The same on the calling thread and on every pool thread that has nothing
@@ -173,16 +190,73 @@ namespace sc::ecs2 {
     // and remove components of its entity here as well.
     template <typename... Terms, typename Function> void parallelEach(Function &&function, size_t grain = 1) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
-      threading::parallelFor(pageLimit(), grain, [&](size_t first, size_t last) {
-        eachInPages(typename Lists::GetList{}, typename Lists::ExcludedList{}, static_cast<uint32_t>(first),
+      const PageRange pages = pageRange();
+      // A thread for every so many entities: a page with few entities in it
+      // is not worth waking one up.
+      const size_t helpers =
+          countUpTo(typename Lists::GetList{}, pages, threading::thread_slots() * ENTITIES_PER_THREAD) /
+          ENTITIES_PER_THREAD;
+      threading::parallelFor(pages.count(), grain, helpers, [&](size_t first, size_t last) {
+        eachInRange(typename Lists::GetList{}, typename Lists::ExcludedList{}, pages, static_cast<uint32_t>(first),
                     static_cast<uint32_t>(last), function);
       });
     }
 
-    // No entity is in a page with this number or a higher one.
-    [[nodiscard]] uint32_t pageLimit() const noexcept { return (m_entities.limit() + PAGE_SIZE - 1) >> PAGE_BITS; }
+    // No common entity is in a page with this number or a higher one. The
+    // rare ones are in the last pages there are.
+    [[nodiscard]] uint32_t pageLimit() const noexcept { return m_entities.pages().common; }
 
   private:
+    // How many entities a loop needs before another thread helps with it.
+    static constexpr size_t ENTITIES_PER_THREAD = 1024;
+
+    // The pages that may have entities, as one row: the common ones first and
+    // then the rare ones, which are the last pages there are.
+    struct PageRange {
+      uint32_t common = 0;
+      uint32_t rare = 0;
+
+      [[nodiscard]] uint32_t count() const noexcept { return common + rare; }
+      // The number of the page at a place in the row.
+      [[nodiscard]] uint32_t page(uint32_t place) const noexcept {
+        return place < common ? place : rareBegin() + (place - common);
+      }
+      [[nodiscard]] uint32_t rareBegin() const noexcept { return static_cast<uint32_t>(internal::PAGE_COUNT) - rare; }
+    };
+
+    [[nodiscard]] PageRange pageRange() const noexcept {
+      const auto pages = m_entities.pages();
+      return {.common = pages.common, .rare = pages.rare};
+    }
+
+    // eachInPages for a part of the row of pages.
+    template <typename Get, typename Excluded, typename Function>
+    void eachInRange(Get get, Excluded excluded, PageRange pages, uint32_t first, uint32_t last, Function &function) {
+      if (first < pages.common) {
+        eachInPages(get, excluded, first, std::min(last, pages.common), function);
+      }
+      if (last > pages.common) {
+        eachInPages(get, excluded, pages.page(std::max(first, pages.common)), pages.rareBegin() + (last - pages.common),
+                    function);
+      }
+    }
+
+    // How many entities of the pages have all of the components, at most.
+    // Stops counting at the limit.
+    template <typename... Get> size_t countUpTo(internal::List<Get...>, PageRange pages, size_t limit) {
+      const std::tuple columns{&column<Get>()...};
+      size_t count = 0;
+      for (uint32_t place = 0; place < pages.count() && count < limit; ++place) {
+        const uint32_t number = pages.page(place);
+        count += std::apply(
+            [number](const auto *...each) {
+              return std::min({[&]() -> uint32_t { return each->page(number).count; }()...});
+            },
+            columns);
+      }
+      return count;
+    }
+
     template <typename Type> internal::Column<Type> &makeColumn(std::atomic<internal::ColumnBase *> &slot) {
       std::scoped_lock lock{m_columnMutex};
       if (internal::ColumnBase *found = slot.load(std::memory_order_relaxed)) {
@@ -198,11 +272,11 @@ namespace sc::ecs2 {
 
     // The values of a page as the function gets them: const for a component
     // that is only read, null for one without members.
-    template <typename Component> static auto valuesOf(typename ColumnOf<Component>::Page *page) noexcept {
+    template <typename Component> static auto valuesOf(const typename ColumnOf<Component>::Page &page) noexcept {
       if constexpr (!ColumnOf<Component>::HAS_VALUE) {
         return nullptr;
       } else {
-        return static_cast<Component *>(page->values());
+        return static_cast<Component *>(page.values);
       }
     }
 
@@ -216,7 +290,7 @@ namespace sc::ecs2 {
 
         for (uint32_t number = firstPage; number < lastPage; ++number) {
           const std::tuple pages{std::get<G>(columns)->page(number)...};
-          if (((std::get<G>(pages) == nullptr) || ...)) {
+          if ((!std::get<G>(pages) || ...)) {
             // No entity of this page has all of them.
             continue;
           }
@@ -239,7 +313,7 @@ namespace sc::ecs2 {
 
           // Every entity of the page: one loop the compiler turns into SIMD
           // code.
-          if (((std::get<G>(pages)->count == PAGE_SIZE) && ...) && ((std::get<X>(without) == nullptr) && ...)) {
+          if (((std::get<G>(pages).count == PAGE_SIZE) && ...) && (!std::get<X>(without) && ...)) {
             for (uint32_t slot = 0; slot < PAGE_SIZE; ++slot) {
               call(slot);
             }
@@ -247,8 +321,8 @@ namespace sc::ecs2 {
           }
 
           for (uint32_t word = 0; word < internal::PAGE_WORDS; ++word) {
-            uint64_t mask = (std::get<G>(pages)->mask[word] & ...);
-            ((mask &= std::get<X>(without) != nullptr ? ~std::get<X>(without)->mask[word] : ~uint64_t{0}), ...);
+            uint64_t mask = (std::get<G>(pages).mask[word] & ...);
+            ((mask &= std::get<X>(without) ? ~std::get<X>(without).mask[word] : ~uint64_t{0}), ...);
             const uint32_t first = word * 64;
             if (mask == ~uint64_t{0}) {
               for (uint32_t slot = first; slot < first + 64; ++slot) {
