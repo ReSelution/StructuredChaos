@@ -28,7 +28,7 @@ namespace sc::ecs2 {
 
   // Components are stored in pages of this many entities. Threads that work
   // on different pages share nothing.
-  inline constexpr unsigned PAGE_BITS = 10;
+  inline constexpr unsigned PAGE_BITS = 12;
   inline constexpr uint32_t PAGE_SIZE = uint32_t{1} << PAGE_BITS;
 
   [[nodiscard]] constexpr uint32_t indexOf(Entity entity) noexcept {
