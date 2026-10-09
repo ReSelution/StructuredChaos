@@ -103,8 +103,27 @@ scheduler.addParallel<sc::ecs::Group<entt::owned_t<Position, const Velocity>>>(
     [](Position &pos, const Velocity &vel) { pos.x += vel.dx; });
 ```
 
+Before the components, the function may take the entity and `Commands`. Every
+thread records into a buffer of its own; the changes of different threads are
+made in no particular order:
+
+```cpp
+scheduler.addParallel([](entt::entity entity, Commands<Frozen> commands, const Health &health) {
+  if (health.value <= 0.0f) {
+    commands.destroy(entity);
+  } else if (health.value < 10.0f) {
+    commands.emplace<Frozen>(entity);
+  }
+});
+```
+
 Inside a system that does more than one loop, `sc::ecs::parallelEach(view,
-function)` does the same for a single view or group.
+function)` does the same for a single view or group and `sc::ecs::each(view,
+function)` on the calling thread alone. Both go through the components page by
+page, which is several times faster than the `each` of an EnTT view for a
+function that does little. Such a system records changes from its loops through
+`sc::ecs::ParallelCommands`, whose `local()` is the `Commands` of the calling
+thread.
 
 Without the scheduler, the registry is used like an `entt::registry`:
 
