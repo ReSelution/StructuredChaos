@@ -11,11 +11,18 @@
 
 namespace sc::threading::impl {
 
-  template <typename F> void parallelFor(size_t count, size_t grain, F &function) {
+  template <typename F> void parallelFor(size_t count, size_t grain, size_t helpers, F &function) {
     grain = std::max<size_t>(grain, 1);
     if (count <= grain) {
       if (count != 0) {
         function(size_t{0}, count);
+      }
+      return;
+    }
+    if (helpers == 0) {
+      // Nothing to share: no job, no tickets, nobody is woken up.
+      for (size_t first = 0; first < count; first += grain) {
+        function(first, std::min(first + grain, count));
       }
       return;
     }
@@ -54,7 +61,7 @@ namespace sc::threading::impl {
     };
 
     // One thread per chunk at most, this one included.
-    shareParallel(job, ((count + grain - 1) / grain) - 1);
+    shareParallel(job, std::min(helpers, ((count + grain - 1) / grain) - 1));
     job.run(job);
     finishParallel(job);
 

@@ -37,7 +37,17 @@ namespace sc::threading {
   template <typename F>
     requires std::invocable<F &, size_t, size_t>
   void parallelFor(size_t count, size_t grain, F &&function) {
-    impl::parallelFor(count, grain, function);
+    impl::parallelFor(count, grain, SIZE_MAX, function);
+  }
+
+  // The same with at most the given number of pool threads helping, for a
+  // loop that knows it has too little work for all of them: waking a thread
+  // up costs more than a small chunk. With no helpers the calling thread does
+  // everything itself.
+  template <typename F>
+    requires std::invocable<F &, size_t, size_t>
+  void parallelFor(size_t count, size_t grain, size_t helpers, F &&function) {
+    impl::parallelFor(count, grain, helpers, function);
   }
 
   // detach
