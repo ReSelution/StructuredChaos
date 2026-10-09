@@ -11,15 +11,15 @@
 </p>
 
 A compact C++23 library of building blocks for games and other real-time
-applications: a thread-safe ECS, a priority thread pool, heap-based memory
+applications: an ECS with a system scheduler, a priority thread pool, heap-based memory
 management, logging, statistics, localization and hashing.
 
 ## Modules
 
 | Module | Header | What it does |
 | --- | --- | --- |
-| [ECS](#ecs) | `sc/ecs/registry.hpp` | EnTT registry with a lock per component, safe to use from many threads |
-| [Threading](#threading) | `sc/threading/threading.hpp` | Thread pool with priorities, futures and batches |
+| [ECS](#ecs) | `sc/ecs/scheduler.hpp` | EnTT registry without locks, and a scheduler that runs the systems that do not conflict at the same time |
+| [Threading](#threading) | `sc/threading/threading.hpp` | Thread pool with priorities, futures, batches and parallel loops |
 | [Memory](#memory) | `sc/memory/heap.hpp` | mimalloc heap that frees everything at once, usable as a `std::pmr` resource |
 | [Logger](#logger) | `sc/logger/logger.hpp` | Compile-time named loggers on top of spdlog, one file per module |
 | [Stats](#stats) | `sc/stats/stats.hpp` | Counters and throughput meters that compile to nothing when disabled |
@@ -28,46 +28,105 @@ management, logging, statistics, localization and hashing.
 
 ### ECS
 
-`sc::ecs::Registry` wraps an `entt::registry` and gives every component type
-its own reader/writer lock. Writes take the lock of one component; `get`,
-`view` and `group` return their result together with a shared lock that is
-held for as long as the result lives.
+`sc::ecs::Registry` wraps an `entt::registry` and reaches components without
+any locking. What keeps threads apart is the `sc::ecs::Scheduler`: a system is
+a function whose parameters say what it reads and writes, and two systems run
+at the same time if neither writes a component the other one uses.
 
 ```cpp
 #include "sc/ecs/registry.hpp"
+#include "sc/ecs/scheduler.hpp"
+#include "sc/threading/threading.hpp"
 
 struct Position { float x{0.0f}; float y{0.0f}; };
 struct Velocity { float dx{0.0f}; float dy{0.0f}; };
+struct Health { float value{100.0f}; };
+struct Frozen {};
+
+using sc::ecs::Commands;
+using sc::ecs::Exclude;
+using sc::ecs::View;
+
+sc::threading::init(); // the scheduler runs its systems on the thread pool
 
 sc::ecs::Registry registry;
 
 sc::ecs::Entity e = registry.create();
 registry.emplace<Position>(e, 1.0f, 2.0f);
 registry.emplace<Velocity>(e, 0.5f, -0.5f);
+registry.emplace<Health>(e);
 
-{
-  // The lock is released at the end of the scope.
-  auto [lock, pos, vel] = registry.get<Position, Velocity>(e);
-  pos.x += vel.dx;
-}
+sc::ecs::Scheduler scheduler;
 
-{
-  auto view = registry.view<Position, Velocity>();
-  view.raw().each([](entt::entity, Position &pos, const Velocity &vel) {
+// Writes Position, reads Velocity: a const component is only read.
+scheduler.add([](View<Position, const Velocity, Exclude<Frozen>> view) {
+  for (auto [entity, pos, vel] : view.each()) {
     pos.x += vel.dx;
     pos.y += vel.dy;
-  });
+  }
+});
+
+// The body of a loop, called for every entity on several threads at once.
+// Touches other components than the system above and runs next to it.
+scheduler.addParallel([](Health &health) { health.value = std::min(100.0f, health.value + 1.0f); });
+
+// Adding and removing components and destroying entities is recorded and
+// done once the systems running at the same time are finished.
+scheduler.add([](View<const Health> view, Commands<Frozen> commands) {
+  for (auto [entity, health] : view.each()) {
+    if (health.value <= 0.0f) {
+      commands.destroy(entity);
+    } else if (health.value < 10.0f) {
+      commands.emplace<Frozen>(entity);
+    }
+  }
+});
+
+scheduler.run(registry); // once per frame
+```
+
+A system may take any number of views, groups and one `Commands`. One that
+takes `sc::ecs::Registry &` may do anything and runs alone. Systems that cannot
+run together keep the order in which they were added.
+
+`addParallel` builds the view from the parameters of the function. A view with
+excluded components or a group is named instead:
+
+```cpp
+#include "sc/ecs/group.hpp"
+
+scheduler.addParallel<View<Position, const Velocity, Exclude<Frozen>>>(
+    [](Position &pos, const Velocity &vel) { pos.x += vel.dx; });
+
+// A group keeps its components packed together and is the fastest to go through.
+scheduler.addParallel<sc::ecs::Group<entt::owned_t<Position, const Velocity>>>(
+    [](Position &pos, const Velocity &vel) { pos.x += vel.dx; });
+```
+
+Inside a system that does more than one loop, `sc::ecs::parallelEach(view,
+function)` does the same for a single view or group.
+
+Without the scheduler, the registry is used like an `entt::registry`:
+
+```cpp
+auto [pos, vel] = registry.get<Position, const Velocity>(e);
+pos.x += vel.dx;
+
+for (auto [entity, position] : registry.view<Position, Exclude<Frozen>>().each()) {
+  position.y = 0.0f;
 }
 
 registry.destroy(e);
 ```
 
+Used from several threads this way, a component type must either be read by
+any number of threads or written by a single one; adding and removing
+components counts as writing. Only `create` and `valid` are safe from any
+thread at any time.
+
 Components have to be trivially destructible. Variable-sized data goes into a
 `sc::ecs::Resource<std::span<T>>` field, which the registry allocates from a
 heap of that component and frees together with it.
-
-A thread that holds a lock must not ask the same registry for another one on
-the same components; a writer waiting in between would block it for good.
 
 ### Threading
 
@@ -93,6 +152,23 @@ sc::threading::waitUntilFinished();
 
 `detachBatch` does the same for a range and calls an optional callback once
 the last task has finished.
+
+`parallelFor` runs a loop on the calling thread and on every worker that has
+nothing else to do, and returns once it is done:
+
+```cpp
+std::vector<float> samples(1'000'000);
+
+// Chunks of at most 4096 items, called from several threads at once.
+sc::threading::parallelFor(samples.size(), 4096, [&](size_t first, size_t last) {
+  for (size_t i = first; i < last; ++i) {
+    samples[i] *= 0.5f;
+  }
+});
+```
+
+The calling thread never sleeps while it waits, so `parallelFor` may also be
+called from a task of the pool or from inside another `parallelFor`.
 
 ### Memory
 
@@ -206,7 +282,9 @@ meson test -C build --suite StructuredChaos
 meson setup build --native-file cross/linux-clang.ini
 ```
 
-Benchmarks are part of the test binaries and run separately:
+Benchmarks run separately. The ones of the ECS compare it with a bare
+`entt::registry` and want an optimized build (`-Dbuildtype=release
+-Db_ndebug=true`):
 
 ```bash
 meson test -C build --benchmark
@@ -270,6 +348,7 @@ executable('game', 'main.cpp', dependencies: sc_dep, override_options: ['cpp_std
 | [rapidhash](https://github.com/Nicoshev/rapidhash) | Hashing |
 | [unordered_dense](https://github.com/martinus/unordered_dense) | Hash maps |
 | [simdutf](https://github.com/simdutf/simdutf) | UTF-16 to UTF-8 conversion |
+| [atomic_queue](https://github.com/max0x7ba/atomic_queue) | Lock-free queues of the thread pool |
 | [PFR](https://github.com/boostorg/pfr) | Reflection over component fields |
 | [glm](https://github.com/g-truc/glm), [xsimd](https://github.com/xtensor-stack/xsimd) | Math and SIMD, passed on to consumers |
 | [Catch2](https://github.com/catchorg/Catch2) | Tests and benchmarks |
