@@ -1,9 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <random>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
@@ -45,6 +48,82 @@ namespace {
   struct Lifetime {
     int runs{0};
   };
+
+  // Stays where it is in its storage, which leaves gaps behind.
+  struct Pinned {
+    static constexpr auto in_place_delete = true;
+    int visits{0};
+  };
+
+  // For the loops that are checked against what EnTT goes through: every
+  // component carries the number of its entity, so that one that is handed
+  // out for another entity shows.
+  using Number = std::underlying_type_t<entt::entity>;
+  struct Alpha {
+    Number owner;
+  };
+  struct Beta {
+    Number owner;
+  };
+  struct Gamma {
+    Number owner;
+  };
+  // Its storage is in pieces that end elsewhere than those of the others.
+  struct SmallPages {
+    static constexpr size_t page_size = 64;
+    Number owner;
+  };
+  struct Anchored {
+    static constexpr auto in_place_delete = true;
+    Number owner;
+  };
+  struct Tag {};
+
+  // Goes through a view or group with each and parallelEach and requires that
+  // both call the function once for exactly the entities EnTT goes through,
+  // with the components of that entity.
+  template <typename Source> void requireSameAsEntt(Source source, size_t grain) {
+    INFO(entt::type_name<Source>::value());
+    std::vector<entt::entity> expected;
+    uint32_t highest = 0;
+    for (const entt::entity entity : source) {
+      expected.push_back(entity);
+      highest = std::max(highest, static_cast<uint32_t>(entt::to_entity(entity)));
+    }
+    std::ranges::sort(expected);
+
+    std::vector<entt::entity> seen;
+    size_t wrong = 0;
+    sc::ecs::each(source, [&](entt::entity entity, const auto &...components) {
+      seen.push_back(entity);
+      wrong += ((components.owner != entt::to_integral(entity)) || ... || false);
+    });
+    std::ranges::sort(seen);
+    REQUIRE(wrong == 0);
+    REQUIRE(seen == expected);
+
+    std::vector<std::atomic<uint32_t>> visits(highest + 1);
+    std::atomic<size_t> wrongOnThreads = 0;
+    std::atomic<size_t> calls = 0;
+    sc::ecs::parallelEach(
+        source,
+        [&](entt::entity entity, const auto &...components) {
+          ++calls;
+          if (entt::to_entity(entity) > highest || ((components.owner != entt::to_integral(entity)) || ... || false)) {
+            ++wrongOnThreads;
+          } else {
+            ++visits[entt::to_entity(entity)];
+          }
+        },
+        grain);
+    REQUIRE(wrongOnThreads == 0);
+    REQUIRE(calls == expected.size());
+    size_t once = 0;
+    for (const entt::entity entity : expected) {
+      once += visits[entt::to_entity(entity)] == 1;
+    }
+    REQUIRE(once == expected.size());
+  }
 
   using Stages = std::vector<std::vector<size_t>>;
 
@@ -285,9 +364,9 @@ TEST_CASE("Scheduler Runs Systems", "[ecs][scheduler]") {
     scheduler.addParallel<sc::ecs::Group<entt::owned_t<Health, const Frozen>, entt::get_t<const Position>>>(
         [](Health &health, const Position &) { health.value += 1; }, "heal", 16);
     // Owns nothing.
-    scheduler.addParallel<
-        sc::ecs::Group<entt::owned_t<>, entt::get_t<Velocity, const Position>, entt::exclude_t<Frozen>>>(
-        [](Velocity &vel, const Position &) { vel.dx += 1.0f; }, "push", 16);
+    scheduler
+        .addParallel<sc::ecs::Group<entt::owned_t<>, entt::get_t<Velocity, const Position>, entt::exclude_t<Frozen>>>(
+            [](Velocity &vel, const Position &) { vel.dx += 1.0f; }, "push", 16);
     // The registry has no entity for this group.
     scheduler.addParallel<sc::ecs::Group<entt::owned_t<MissingEverywhere>>>([](MissingEverywhere &) {});
     REQUIRE(scheduler.stages() == Stages{{0, 3}, {1, 2}});
@@ -316,8 +395,8 @@ TEST_CASE("Scheduler Runs Systems", "[ecs][scheduler]") {
       }
     }
     using Moving = View<Position, const Velocity, sc::ecs::Exclude<const Frozen>>;
-    STATIC_REQUIRE(std::is_same_v<Moving, entt::view<entt::get_t<Position, const Velocity>,
-                                                     entt::exclude_t<const Frozen>>>);
+    STATIC_REQUIRE(
+        std::is_same_v<Moving, entt::view<entt::get_t<Position, const Velocity>, entt::exclude_t<const Frozen>>>);
     // The registry makes the same view.
     size_t thawed = 0;
     for ([[maybe_unused]] const auto entity : registry.view<const Position, sc::ecs::Exclude<Frozen>>()) {
@@ -580,6 +659,428 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
       REQUIRE(world.valid(entity));
       REQUIRE(age.runs < lifetime);
       REQUIRE(entt::to_entity(entity) < bound);
+    }
+  }
+}
+
+TEST_CASE("Loops Over Components That Fill Several Pages", "[ecs][scheduler]") {
+  sc::threading::init();
+
+  // More than the storages keep in one piece.
+  constexpr size_t count = 5 * ENTT_PACKED_PAGE - 120;
+
+  Registry registry;
+  std::vector<sc::ecs::Entity> entities(count);
+  registry.create(entities.begin(), entities.end());
+  for (size_t i = 0; i < count; ++i) {
+    registry.emplace<Position>(entities[i], static_cast<float>(i), 0.0f);
+    registry.emplace<Velocity>(entities[i], 1.0f, 2.0f);
+    registry.emplace<Health>(entities[i]);
+  }
+
+  const auto visit = [](Position &pos, const Velocity &vel, Health &health) {
+    pos.y += vel.dy;
+    health.value += static_cast<int>(pos.x);
+  };
+  // Every entity that has all three components was visited once with its own
+  // components, and no other one.
+  const auto check = [&](int runs) {
+    for (size_t i = 0; i < count; ++i) {
+      const bool visited = registry.storage<Velocity>().contains(entities[i]);
+      REQUIRE(registry.get<Position>(entities[i]).y == (visited ? 2.0f * static_cast<float>(runs) : 0.0f));
+      REQUIRE(registry.get<Health>(entities[i]).value == 100 + (visited ? runs * static_cast<int>(i) : 0));
+    }
+  };
+
+  SECTION("Storages With The Same Entities At The Same Positions") {
+    sc::ecs::each(registry.view<Position, const Velocity, Health>(), visit);
+    check(1);
+    // Shares that end in the middle of a page.
+    sc::ecs::parallelEach(registry.view<Position, const Velocity, Health>(), visit, 100);
+    check(2);
+  }
+
+  SECTION("Storages That Differ From Some Position On") {
+    // The last velocity takes the place of the erased one, in the third page,
+    // and the storage ends earlier than the others.
+    registry.erase<Velocity>(entities[2 * ENTT_PACKED_PAGE + 50]);
+    sc::ecs::each(registry.view<Position, const Velocity, Health>(), visit);
+    check(1);
+    sc::ecs::parallelEach(registry.view<Position, const Velocity, Health>(), visit, 100);
+    check(2);
+
+    // In no page any more.
+    for (size_t i = 0; i < count; i += 7) {
+      if (registry.storage<Velocity>().contains(entities[i])) {
+        registry.erase<Velocity>(entities[i]);
+      }
+    }
+    for (size_t i = 0; i < count; ++i) {
+      registry.get<Position>(entities[i]).y = 0.0f;
+      registry.get<Health>(entities[i]).value = 100;
+    }
+    sc::ecs::each(registry.view<Position, const Velocity, Health>(), visit);
+    check(1);
+  }
+
+  SECTION("A Group") {
+    auto group = registry.group<Position, Velocity>(entt::get<Health>);
+    sc::ecs::each(group, visit);
+    check(1);
+    registry.erase<Velocity>(entities[2 * ENTT_PACKED_PAGE + 50]);
+    sc::ecs::each(group, visit);
+    sc::ecs::parallelEach(group, visit, 100);
+    REQUIRE(registry.get<Position>(entities[2 * ENTT_PACKED_PAGE + 50]).y == 2.0f);
+    REQUIRE(registry.get<Position>(entities[0]).y == 6.0f);
+    REQUIRE(registry.get<Position>(entities[count - 1]).y == 6.0f);
+    REQUIRE(registry.get<Health>(entities[count - 1]).value == 100 + 3 * static_cast<int>(count - 1));
+  }
+
+  SECTION("A Storage That Keeps Its Order") {
+    for (size_t i = 0; i < count / 2; ++i) {
+      registry.emplace<Pinned>(entities[i]);
+    }
+    for (size_t i = 0; i < count / 2; i += 3) {
+      registry.erase<Pinned>(entities[i]);
+    }
+    const auto pin = [](Pinned &pinned, Position &pos) {
+      ++pinned.visits;
+      pos.y += 1.0f;
+    };
+    sc::ecs::each(registry.view<Pinned, Position>(), pin);
+    sc::ecs::parallelEach(registry.view<Pinned, Position>(), pin, 100);
+    sc::ecs::each(registry.view<Pinned>(), [](Pinned &pinned) { ++pinned.visits; });
+    for (size_t i = 0; i < count; ++i) {
+      const bool pinned = i < count / 2 && i % 3 != 0;
+      REQUIRE(registry.get<Position>(entities[i]).y == (pinned ? 2.0f : 0.0f));
+      if (pinned) {
+        REQUIRE(registry.get<Pinned>(entities[i]).visits == 3);
+      }
+    }
+  }
+}
+
+TEST_CASE("Loops That Take The Entity And Record Changes", "[ecs][scheduler][commands][threading]") {
+  sc::threading::init();
+
+  using sc::ecs::Commands;
+
+  constexpr size_t count = 3 * ENTT_PACKED_PAGE + 200;
+
+  Registry registry;
+  std::vector<sc::ecs::Entity> entities(count);
+  registry.create(entities.begin(), entities.end());
+  for (size_t i = 0; i < count; ++i) {
+    registry.emplace<Position>(entities[i], static_cast<float>(i), 0.0f);
+    registry.emplace<Velocity>(entities[i], 1.0f, 2.0f);
+    // The number of the entity, to tell whether a function got the right one.
+    registry.emplace<Health>(entities[i], static_cast<int>(entt::to_integral(entities[i].entity)));
+  }
+
+  Scheduler scheduler;
+
+  SECTION("The Entity Comes Before The Components") {
+    std::atomic<size_t> wrong = 0;
+    const auto visit = [&](entt::entity entity, Position &pos, const Health &health) {
+      wrong += static_cast<int>(entt::to_integral(entity)) != health.value;
+      pos.y += 1.0f;
+    };
+    sc::ecs::each(registry.view<Position, const Health>(), visit);
+    sc::ecs::parallelEach(registry.view<Position, const Health>(), visit, 100);
+    // Looked up, entity by entity.
+    registry.erase<Health>(entities[ENTT_PACKED_PAGE + 3]);
+    sc::ecs::each(registry.view<Position, const Health>(), visit);
+    sc::ecs::each(registry.view<Position, const Health, sc::ecs::Exclude<Frozen>>(), visit);
+    auto group = registry.group<Position, Health>();
+    sc::ecs::each(group, visit);
+    sc::ecs::parallelEach(group, visit, 100);
+
+    REQUIRE(wrong == 0);
+    REQUIRE(registry.get<Position>(entities[0]).y == 6.0f);
+    REQUIRE(registry.get<Position>(entities[ENTT_PACKED_PAGE + 3]).y == 2.0f);
+    REQUIRE(registry.get<Position>(entities[count - 1]).y == 6.0f);
+  }
+
+  SECTION("A Loop That Destroys, Adds And Removes") {
+    scheduler.addParallel(
+        [](entt::entity entity, Commands<Frozen, Velocity> commands, const Position &pos) {
+          const auto i = static_cast<size_t>(pos.x);
+          if (i % 3 == 0) {
+            commands.destroy(entity);
+          } else if (i % 3 == 1) {
+            commands.emplace<Frozen>(entity);
+          } else {
+            commands.remove<Velocity>(entity);
+          }
+        },
+        "sort out", 64);
+    // Does not need the entity.
+    scheduler.addParallel(
+        [](Commands<Lifetime, MissingEverywhere> commands, const Health &) {
+          const auto spawned = commands.create();
+          commands.emplace<Lifetime>(spawned, 7);
+          commands.emplace<MissingEverywhere>(spawned, 7);
+        },
+        "spawn", 64);
+    // Only reads, and records changes: nothing keeps them apart.
+    REQUIRE(scheduler.stages() == Stages{{0, 1}});
+    scheduler.run(registry);
+
+    for (size_t i = 0; i < count; ++i) {
+      REQUIRE(registry.valid(entities[i]) == (i % 3 != 0));
+      if (i % 3 != 0) {
+        REQUIRE(registry.storage<Frozen>().contains(entities[i]) == (i % 3 == 1));
+        REQUIRE(registry.storage<Velocity>().contains(entities[i]) == (i % 3 == 1));
+      }
+    }
+    // One for every entity there was, whatever thread recorded it.
+    REQUIRE(registry.view<Lifetime>().size() == count);
+    REQUIRE(registry.view<MissingEverywhere>().size() == count);
+    size_t spawned = 0;
+    sc::ecs::each(registry.view<const Lifetime, const MissingEverywhere>(),
+                  [&](entt::entity entity, const Lifetime &lifetime, const MissingEverywhere &missing) {
+                    spawned += registry.valid(entity) && lifetime.runs == 7 && missing.value == 7;
+                  });
+    REQUIRE(spawned == count);
+    // Added in the same order by every thread, so they are side by side.
+    const auto &lifetimes = registry.storage<Lifetime>();
+    const auto &missing = registry.storage<MissingEverywhere>();
+    REQUIRE(std::equal(lifetimes.data(), lifetimes.data() + count, missing.data()));
+
+    // Nothing is left over for the next run.
+    const size_t frozen = registry.view<Frozen>().size();
+    Scheduler nothing;
+    nothing.addParallel([](entt::entity, Commands<Frozen> &, const Position &) {});
+    nothing.run(registry);
+    nothing.run(registry);
+    REQUIRE(registry.view<Frozen>().size() == frozen);
+  }
+
+  SECTION("A Loop Over A Named View Or Group That Records Changes") {
+    for (size_t i = 0; i < count; i += 5) {
+      registry.emplace<Frozen>(entities[i]);
+    }
+    scheduler.addParallel<View<const Position, sc::ecs::Exclude<Frozen>>>(
+        [](entt::entity entity, Commands<Lifetime> commands, const Position &) { commands.emplace<Lifetime>(entity); },
+        "age", 64);
+    scheduler.addParallel<sc::ecs::Group<entt::owned_t<Health, const Velocity>>>(
+        [](entt::entity entity, Commands<> commands, Health &health, const Velocity &) {
+          if (health.value % 2 == 0) {
+            commands.destroy(entity);
+          }
+        },
+        "reap", 64);
+    scheduler.run(registry);
+
+    for (size_t i = 0; i < count; ++i) {
+      const bool alive = entt::to_integral(entities[i].entity) % 2 != 0;
+      REQUIRE(registry.valid(entities[i]) == alive);
+      if (alive) {
+        REQUIRE(registry.storage<Lifetime>().contains(entities[i]) == (i % 5 != 0));
+      }
+    }
+  }
+
+  SECTION("A System That Records Changes From Its Own Loops") {
+    scheduler.add([](View<const Position> view, sc::ecs::ParallelCommands<Frozen> commands) {
+      sc::ecs::parallelEach(
+          view,
+          [&](entt::entity entity, const Position &pos) {
+            if (static_cast<size_t>(pos.x) % 2 == 0) {
+              commands.local().emplace<Frozen>(entity);
+            }
+          },
+          64);
+      // On the thread of the system itself.
+      auto local = commands.local();
+      local.emplace<Frozen>(local.create());
+    });
+    scheduler.add([](View<const Frozen>, Commands<Frozen> commands) { commands.emplace<Frozen>(commands.create()); });
+    for (int run = 1; run <= 3; ++run) {
+      scheduler.run(registry);
+      REQUIRE(registry.view<Frozen>().size() == (count + 1) / 2 + 2);
+      for (auto entity : registry.view<Frozen>()) {
+        registry.erase<Frozen>(entity);
+      }
+    }
+  }
+
+  SECTION("An Exception Drops What Every Thread Recorded") {
+    scheduler.addParallel(
+        [](entt::entity entity, Commands<Frozen> commands, const Position &pos) {
+          commands.emplace<Frozen>(entity);
+          if (static_cast<size_t>(pos.x) == count - 1) {
+            throw std::runtime_error("last");
+          }
+        },
+        "freeze", 64);
+    REQUIRE_THROWS_AS(scheduler.run(registry), std::runtime_error);
+    REQUIRE(registry.view<Frozen>().size() == 0);
+  }
+}
+
+TEST_CASE("Loops Go Through What EnTT Goes Through, Whatever Happened To The Storages", "[ecs][scheduler][threading]") {
+  sc::threading::init();
+
+  using sc::ecs::Exclude;
+
+  const uint32_t seed = GENERATE(1u, 2u, 3u);
+  std::mt19937 random{seed};
+  const auto below = [&](size_t bound) { return std::uniform_int_distribution<size_t>{0, bound - 1}(random); };
+
+  Registry registry;
+  std::vector<entt::entity> alive;
+
+  const auto owner = [](entt::entity entity) { return entt::to_integral(entity); };
+  // Adds the component to an entity that does not have it, takes it away from
+  // one that has it.
+  const auto toggle = [&]<typename Component>(entt::entity entity) {
+    if (registry.storage<Component>().contains(entity)) {
+      registry.erase<Component>(entity);
+    } else if constexpr (std::is_empty_v<Component>) {
+      registry.emplace<Component>(entity);
+    } else {
+      registry.emplace<Component>(entity, owner(entity));
+    }
+  };
+  const auto toggleAny = [&](entt::entity entity) {
+    switch (below(6)) {
+    case 0:
+      toggle.template operator()<Alpha>(entity);
+      break;
+    case 1:
+      toggle.template operator()<Beta>(entity);
+      break;
+    case 2:
+      toggle.template operator()<Gamma>(entity);
+      break;
+    case 3:
+      toggle.template operator()<SmallPages>(entity);
+      break;
+    case 4:
+      toggle.template operator()<Anchored>(entity);
+      break;
+    default:
+      toggle.template operator()<Tag>(entity);
+      break;
+    }
+  };
+
+  SECTION("Views") {
+    // Everything side by side to begin with.
+    for (size_t i = 0; i < 4 * ENTT_PACKED_PAGE + 300; ++i) {
+      const entt::entity entity = registry.create();
+      alive.push_back(entity);
+      registry.emplace<Alpha>(entity, owner(entity));
+      registry.emplace<Beta>(entity, owner(entity));
+      registry.emplace<Gamma>(entity, owner(entity));
+      registry.emplace<SmallPages>(entity, owner(entity));
+      registry.emplace<Anchored>(entity, owner(entity));
+    }
+
+    const auto check = [&] {
+      const size_t grain = 1 + below(700);
+      requireSameAsEntt(registry.view<Alpha>(), grain);
+      requireSameAsEntt(registry.view<Alpha, const Beta>(), grain);
+      requireSameAsEntt(registry.view<Beta, Alpha>(), grain);
+      requireSameAsEntt(registry.view<Alpha, Beta, const Gamma>(), grain);
+      requireSameAsEntt(registry.view<SmallPages>(), grain);
+      requireSameAsEntt(registry.view<SmallPages, Alpha>(), grain);
+      requireSameAsEntt(registry.view<Alpha, const SmallPages, Beta>(), grain);
+      requireSameAsEntt(registry.view<Anchored>(), grain);
+      requireSameAsEntt(registry.view<Anchored, Alpha>(), grain);
+      requireSameAsEntt(registry.view<Alpha, const Anchored, Gamma>(), grain);
+      requireSameAsEntt(registry.view<const Tag, Alpha>(), grain);
+      requireSameAsEntt(registry.view<Alpha, Exclude<Beta>>(), grain);
+      requireSameAsEntt(registry.view<Alpha, const Beta, Exclude<Tag>>(), grain);
+    };
+    check();
+
+    for (int round = 0; round < 40; ++round) {
+      CAPTURE(seed, round);
+      // Few changes at first, which leave most pages as they are, then many.
+      const size_t changes = round < 20 ? 1 + below(4) : 1 + below(alive.size() / 4);
+      for (size_t change = 0; change < changes; ++change) {
+        const size_t index = below(alive.size());
+        switch (below(8)) {
+        case 0:
+          registry.destroy(alive[index]);
+          alive[index] = alive.back();
+          alive.pop_back();
+          break;
+        case 1: {
+          // The number of a destroyed entity comes back with a new version.
+          const entt::entity entity = registry.create();
+          alive.push_back(entity);
+          for (int component = 0; component < 4; ++component) {
+            toggleAny(entity);
+          }
+          break;
+        }
+        default:
+          toggleAny(alive[index]);
+          break;
+        }
+      }
+
+      // Reordered storages: by entity, by something else, like another one.
+      // The entities of the storage, which itself goes through its components.
+      const entt::sparse_set &alphas = registry.storage<Alpha>();
+      switch (below(6)) {
+      case 0:
+        registry.storage<Alpha>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
+        registry.storage<Beta>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
+        registry.storage<Gamma>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
+        registry.storage<SmallPages>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
+        break;
+      case 1: {
+        const auto salt = static_cast<uint32_t>(random());
+        registry.storage<Beta>().sort([salt](entt::entity lhs, entt::entity rhs) {
+          return (entt::to_integral(lhs) ^ salt) * 2654435761u < (entt::to_integral(rhs) ^ salt) * 2654435761u;
+        });
+        break;
+      }
+      case 2:
+        registry.storage<Beta>().sort_as(alphas.begin(), alphas.end());
+        break;
+      case 3:
+        registry.storage<SmallPages>().sort_as(alphas.begin(), alphas.end());
+        registry.storage<Gamma>().sort_as(alphas.begin(), alphas.end());
+        break;
+      default:
+        break;
+      }
+
+      check();
+    }
+  }
+
+  SECTION("Groups") {
+    // Two that own their components, one of them only a part, and one that
+    // owns nothing.
+    auto pairs = registry.group<Alpha, Beta>();
+    auto triples = registry.group<Gamma>(entt::get<const SmallPages, Alpha>);
+    auto loose = registry.group<>(entt::get<SmallPages, Anchored>, entt::exclude<Tag>);
+
+    for (size_t i = 0; i < 3 * ENTT_PACKED_PAGE + 300; ++i) {
+      const entt::entity entity = registry.create();
+      alive.push_back(entity);
+      for (int component = 0; component < 5; ++component) {
+        toggleAny(entity);
+      }
+    }
+
+    for (int round = 0; round < 30; ++round) {
+      const size_t changes = 1 + below(round < 10 ? 4 : alive.size() / 4);
+      for (size_t change = 0; change < changes; ++change) {
+        toggleAny(alive[below(alive.size())]);
+      }
+      const size_t grain = 1 + below(700);
+      requireSameAsEntt(pairs, grain);
+      requireSameAsEntt(triples, grain);
+      requireSameAsEntt(loose, grain);
+      requireSameAsEntt(registry.view<Alpha, const Beta>(), grain);
+      requireSameAsEntt(registry.view<Gamma, Alpha, SmallPages>(), grain);
     }
   }
 }

@@ -1,10 +1,12 @@
 #pragma once
 
 #include <array>
+#include <cassert>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <memory>
 #include <span>
 #include <tuple>
 #include <utility>
@@ -15,6 +17,7 @@
 
 #include "entity.hpp"
 #include "registry.hpp"
+#include "sc/threading/threading.hpp"
 
 namespace sc::ecs::internal {
 
@@ -231,6 +234,42 @@ namespace sc::ecs {
   private:
     Registry *m_registry;
     Buffer *m_buffer;
+  };
+
+  // Commands for a system that records changes from several threads at once,
+  // as the function of a parallelEach does. Every thread has a buffer of its
+  // own, so recording needs no locking here either:
+  //
+  //   void reap(View<const Lifetime> view, ParallelCommands<> commands) {
+  //     parallelEach(view, [&](entt::entity entity, const Lifetime &lifetime) {
+  //       if (lifetime.left <= 0) {
+  //         commands.local().destroy(entity);
+  //       }
+  //     });
+  //   }
+  //
+  // The changes of a thread are made in the order it recorded them, those of
+  // different threads in no particular order: which thread gets which entities
+  // differs from run to run.
+  template <typename... Components> class ParallelCommands {
+  public:
+    using Buffer = internal::CommandBuffer<Components...>;
+    using Buffers = std::span<const std::unique_ptr<internal::CommandBufferBase>>;
+
+    // One buffer for every sc::threading::thread_id.
+    ParallelCommands(Registry &registry, Buffers buffers) : m_registry(&registry), m_buffers(buffers) {}
+
+    // The Commands of the calling thread, which must not be handed to another
+    // one. Best taken once for many entities.
+    [[nodiscard]] Commands<Components...> local() const {
+      const auto thread = static_cast<size_t>(threading::thread_id());
+      assert(thread < m_buffers.size());
+      return Commands<Components...>{*m_registry, static_cast<Buffer &>(*m_buffers[thread])};
+    }
+
+  private:
+    Registry *m_registry;
+    Buffers m_buffers;
   };
 
 } // namespace sc::ecs

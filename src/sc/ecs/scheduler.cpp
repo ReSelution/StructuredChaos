@@ -100,12 +100,13 @@ namespace sc::ecs {
     for (size_t stage = 0; stage < m_stages.size(); ++stage) {
       CommandPlan &plan = m_plans[stage];
       for (const size_t system : m_stages[stage]) {
-        if (const auto &commands = m_systems[system].commands) {
+        for (const auto &commands : m_systems[system].commands) {
           plan.queues.insert(plan.queues.end(), commands->queues().begin(), commands->queues().end());
         }
       }
 
-      // The queues of one component stay in the order of their systems and are
+      // The queues of one component stay in the order of their systems, for a
+      // system with several buffers in the order of its threads, and are
       // worked off by a single task: a storage has one writer. A group ties its
       // components together into one family, which shares a task.
       const auto family = [&registry](const internal::CommandQueueBase *queue) {
@@ -137,11 +138,24 @@ namespace sc::ecs {
     }
 
     const std::vector<std::vector<size_t>> &stages = this->stages();
+
+    // Here and not when the system is added: the pool may be set up later.
+    const size_t threads = threading::thread_slots();
+    for (System &system : m_systems) {
+      if (system.access.commandsPerThread && system.commands.size() < threads) {
+        while (system.commands.size() < threads) {
+          system.commands.push_back(system.access.makeCommands());
+        }
+        // The plans name the queues of the buffers.
+        m_planRegistry = 0;
+      }
+    }
+
     for (size_t stage = 0; stage < stages.size(); ++stage) {
       try {
         runAll(stages[stage], [this, &registry](size_t index) {
           System &system = m_systems[index];
-          system.run({.registry = registry, .commands = system.commands.get()});
+          system.run({.registry = registry, .commands = system.commands});
         });
       } catch (...) {
         dropCommands(stages[stage]);
@@ -175,7 +189,7 @@ namespace sc::ecs {
     // Destroying an entity writes every component, so it comes after and has
     // nothing running next to it.
     for (const size_t system : m_stages[stage]) {
-      if (const auto &commands = m_systems[system].commands) {
+      for (const auto &commands : m_systems[system].commands) {
         if (!commands->destroyed.empty()) {
           registry.destroy(commands->destroyed.begin(), commands->destroyed.end());
           commands->destroyed.clear();
@@ -186,7 +200,7 @@ namespace sc::ecs {
 
   void Scheduler::dropCommands(const std::vector<size_t> &stage) noexcept {
     for (const size_t system : stage) {
-      if (const auto &commands = m_systems[system].commands) {
+      for (const auto &commands : m_systems[system].commands) {
         commands->clear();
       }
     }
