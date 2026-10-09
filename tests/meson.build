@@ -36,6 +36,20 @@ test_ecs = executable(
 
 test('ECS Tests', test_ecs, env: test_env, timeout: test_timeout)
 
+# The prototype of an ECS of our own, see src/sc/ecs2.
+test_ecs2 = executable(
+  'test_ecs2',
+  sources: [
+    'ecs2/test_world.cpp',
+  ],
+  dependencies: [
+    catch2_dep,
+    sc_dep,
+  ],
+)
+
+test('ECS2 Tests', test_ecs2, env: test_env, timeout: test_timeout)
+
 bench_ecs = executable(
   'bench_ecs',
   sources: [
