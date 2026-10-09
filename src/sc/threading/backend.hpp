@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include <atomic_queue/atomic_queue.h>
+
 #include "atomic_queue.hpp"
 #include "internal.hpp"
 #include "types.hpp"
@@ -75,6 +77,33 @@ namespace sc::threading::impl {
   }
 
   MoveOnlyFunction helpThread(int id);
+
+  // A loop that several threads work on, see parallelFor. It lives on the
+  // stack of the thread that started it and is handed around as tickets: a
+  // pointer to it in the queue for every thread that may help.
+  struct ParallelJob {
+    // Works on the loop until nothing is left to take. Called by the thread
+    // that started the loop and by everyone who got a ticket.
+    void (*run)(ParallelJob &) = nullptr;
+    // Tickets that were handed out and not given back yet. The job must not
+    // go away before this is zero.
+    std::atomic<size_t> tickets{0};
+  };
+
+  // Fixed in size and never freed, which is fine for a few pointers. A loop
+  // that finds it full gets fewer helpers.
+  inline atomic_queue::AtomicQueue<ParallelJob *, 1024> parallelJobs;
+
+  // Hands out up to the given number of tickets, at most one for every pool
+  // thread, and wakes the threads up.
+  void shareParallel(ParallelJob &job, size_t helpers);
+
+  // Takes a ticket, if there is one, and works on its loop.
+  bool helpParallel();
+
+  // Returns once every ticket of the job was given back. Works on the loops
+  // of waiting tickets in the meantime, also on those of other jobs.
+  void finishParallel(ParallelJob &job);
 
   void workerThread(const std::stop_token &st, int id);
 

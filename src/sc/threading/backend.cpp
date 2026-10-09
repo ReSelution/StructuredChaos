@@ -6,8 +6,22 @@
 
 namespace sc::threading::impl {
 
+  // Whether this thread was woken up for work it has not found yet.
+  static thread_local bool wokenForWork = false;
+
+  // Every piece of work comes with one wake-up. A thread that was woken up
+  // for it has used that up already; one that found the work while it was
+  // awake anyway takes the wake-up back, so that nobody gets up for nothing.
+  static inline void take_wake_up() {
+    if (wokenForWork) {
+      wokenForWork = false;
+    } else {
+      pool_sema.try_acquire();
+    }
+  }
+
   static inline void on_task_started() {
-    pool_sema.try_acquire();
+    take_wake_up();
     ActiveTask::record(1);
     QueueSize::record(-1);
   }
@@ -77,6 +91,10 @@ namespace sc::threading::impl {
   void workerThread(const std::stop_token &st, int id) {
     threadId = id;
     while (!st.stop_requested()) {
+      // First: a thread is waiting for these to be done.
+      if (helpParallel()) {
+        continue;
+      }
       MoveOnlyFunction task;
       if (queues.try_pop_any(task, threadId)) {
         on_task_started();
@@ -92,7 +110,46 @@ namespace sc::threading::impl {
         continue;
       }
 
-      pool_sema.try_acquire_for(std::chrono::milliseconds(10));
+      wokenForWork = pool_sema.try_acquire_for(std::chrono::milliseconds(10));
+    }
+  }
+
+  void shareParallel(ParallelJob &job, size_t helpers) {
+    helpers = std::min(helpers, threads.size());
+    size_t shared = 0;
+    for (; shared < helpers; ++shared) {
+      // Counted before it is pushed: a thread may take the ticket and give it
+      // back right away.
+      job.tickets.fetch_add(1, std::memory_order_relaxed);
+      if (!parallelJobs.try_push(&job)) {
+        job.tickets.fetch_sub(1, std::memory_order_relaxed);
+        break;
+      }
+    }
+    if (shared != 0) {
+      signalWork(shared);
+    }
+  }
+
+  bool helpParallel() {
+    ParallelJob *job = nullptr;
+    if (!parallelJobs.try_pop(job)) {
+      return false;
+    }
+    take_wake_up();
+    job->run(*job);
+    // Nothing may touch the job after this: its owner is free to go.
+    job->tickets.fetch_sub(1, std::memory_order_release);
+    return true;
+  }
+
+  void finishParallel(ParallelJob &job) {
+    while (job.tickets.load(std::memory_order_acquire) != 0) {
+      // Its own tickets are among the waiting ones, so it never depends on
+      // a sleeping thread to wake up for them.
+      if (!helpParallel()) {
+        std::this_thread::yield();
+      }
     }
   }
 
@@ -124,7 +181,7 @@ namespace sc::threading::impl {
     uint32_t targetIdx = (rotatedIdx + shift) % n;
 
     MoveOnlyFunction task;
-    if (workerStores[targetIdx]->try_pop(task, id)) {
+    if (workerStores[targetIdx]->try_pop(task, id)) [[likely]] {
       return task;
     }
     return {};

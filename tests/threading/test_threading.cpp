@@ -1,6 +1,7 @@
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
@@ -304,6 +305,98 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
     sc::threading::wait_until_finished();
 
     REQUIRE(executed.load() == task_count);
+  }
+}
+
+TEST_CASE("Threading Parallel For", "[threading][parallel_for]") {
+  sc::threading::init();
+
+  // How often every item was visited. Catch2 assertions are only made here,
+  // never from the function of a loop.
+  const auto visit = [](size_t count, size_t grain) {
+    std::vector<std::atomic<int>> visits(count);
+    std::atomic<size_t> largest{0};
+    sc::threading::parallelFor(count, grain, [&](size_t first, size_t last) {
+      size_t seen = largest.load();
+      while (last - first > seen && !largest.compare_exchange_weak(seen, last - first)) {
+      }
+      for (size_t i = first; i < last; ++i) {
+        visits[i].fetch_add(1);
+      }
+    });
+    const bool once = std::ranges::all_of(visits, [](const std::atomic<int> &n) { return n.load() == 1; });
+    return std::pair{once, largest.load()};
+  };
+
+  SECTION("Every Item Once, In Chunks Of At Most The Grain") {
+    for (const size_t count : {size_t{1}, size_t{7}, size_t{1000}, size_t{100'003}}) {
+      for (const size_t grain : {size_t{1}, size_t{64}, size_t{1000}, size_t{1'000'000}}) {
+        const auto [once, largest] = visit(count, grain);
+        REQUIRE(once);
+        REQUIRE(largest <= grain);
+      }
+    }
+  }
+
+  SECTION("Nothing To Do") {
+    bool called = false;
+    sc::threading::parallelFor(0, 16, [&](size_t, size_t) { called = true; });
+    REQUIRE(!called);
+  }
+
+  SECTION("A Grain Of Zero Counts As One") {
+    const auto [once, largest] = visit(100, 0);
+    REQUIRE(once);
+    REQUIRE(largest == 1);
+  }
+
+  SECTION("An Exception Is Rethrown") {
+    std::atomic<size_t> started{0};
+    const auto failing = [&] {
+      sc::threading::parallelFor(10'000, 1, [&](size_t first, size_t) {
+        started.fetch_add(1);
+        if (first == 3) {
+          throw std::runtime_error("broken chunk");
+        }
+      });
+    };
+    REQUIRE_THROWS_AS(failing(), std::runtime_error);
+    // The pool is fine afterwards.
+    const auto [once, largest] = visit(1000, 10);
+    REQUIRE(once);
+  }
+
+  SECTION("Inside Another Loop") {
+    constexpr size_t outer = 16;
+    constexpr size_t inner = 2000;
+    std::vector<std::atomic<int>> visits(outer * inner);
+    sc::threading::parallelFor(outer, 1, [&](size_t first, size_t last) {
+      for (size_t o = first; o < last; ++o) {
+        sc::threading::parallelFor(inner, 50, [&, o](size_t from, size_t to) {
+          for (size_t i = from; i < to; ++i) {
+            visits[(o * inner) + i].fetch_add(1);
+          }
+        });
+      }
+    });
+    REQUIRE(std::ranges::all_of(visits, [](const std::atomic<int> &n) { return n.load() == 1; }));
+  }
+
+  SECTION("From Many Tasks Of The Pool At Once") {
+    constexpr size_t tasks = 64;
+    constexpr size_t items = 5000;
+    std::vector<std::atomic<int>> visits(tasks * items);
+    std::vector<size_t> ids(tasks);
+    std::iota(ids.begin(), ids.end(), size_t{0});
+    auto done = sc::threading::enqueueBatch(ids, [&](size_t task) {
+      sc::threading::parallelFor(items, 100, [&, task](size_t first, size_t last) {
+        for (size_t i = first; i < last; ++i) {
+          visits[(task * items) + i].fetch_add(1);
+        }
+      });
+    });
+    done.get();
+    REQUIRE(std::ranges::all_of(visits, [](const std::atomic<int> &n) { return n.load() == 1; }));
   }
 }
 

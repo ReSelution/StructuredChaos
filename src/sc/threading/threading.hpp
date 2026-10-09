@@ -7,6 +7,7 @@
 
 #include "detach.hpp"
 #include "enqueue.hpp"
+#include "parallel_for.hpp"
 #include "types.hpp"
 namespace sc::threading {
 
@@ -17,6 +18,23 @@ namespace sc::threading {
   /// @brief Id of the calling thread: 0 for the thread that called init and
   /// for threads outside the pool, a positive number for pool workers.
   [[nodiscard]] inline int32_t thread_id() noexcept { return impl::threadId; }
+
+  // Calls function(first, last) for the items 0 to count - 1 in chunks of at
+  // most grain items, on the calling thread and on every pool thread that has
+  // nothing else to do, and returns once all of them are done.
+  //
+  // The function is called from several threads at once. May be called from
+  // anywhere, also from a task of the pool and from inside another
+  // parallelFor: the calling thread never sleeps, it works on the loop itself
+  // and, while it waits for the last chunks, on the loops of others.
+  //
+  // If the function throws, no further chunk is started and the first
+  // exception is rethrown once the running ones are done.
+  template <typename F>
+    requires std::invocable<F &, size_t, size_t>
+  void parallelFor(size_t count, size_t grain, F &&function) {
+    impl::parallelFor(count, grain, function);
+  }
 
   // detach
   template<Priority P, typename F, typename... Args>
