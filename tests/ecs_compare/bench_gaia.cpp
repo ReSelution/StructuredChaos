@@ -326,3 +326,40 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     REQUIRE(steered(w.get<Velocity>(last), w.get<Position>(last), w.get<Position>(world.entities[order.back()])));
   }
 }
+
+namespace {
+
+  struct Steady {
+    using Handle = ecs::Entity;
+    World base;
+    ecs::World &world = base.world;
+    ecs::Query moving = world.query().all<Position &>().all<Velocity>();
+    ecs::Query healing = world.query().all<Health &>().all<Velocity>();
+    ecs::Query timed = world.query().all<Timer &>().all<Velocity>();
+
+    Handle spawn(size_t number) {
+      const ecs::Entity entity = world.add();
+      world.add<Position>(entity, {static_cast<float>(number), 1.0f});
+      world.add<Velocity>(entity, {1.0f, 2.0f});
+      if (number % 2 == 0) {
+        world.add<Health>(entity, {50.0f});
+      }
+      return entity;
+    }
+    void destroy(Handle entity) { world.del(entity); }
+    void add_timer(Handle entity) { world.add<Timer>(entity, {0.0f}); }
+    void remove_timer(Handle entity) { world.del<Timer>(entity); }
+    void frame() {
+      moving.each([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      healing.each([](Health &health, const Velocity &vel) { regenerate(health, vel); });
+      timed.each([](Timer &timer, const Velocity &vel) { tick(timer, vel); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
+  Steady steady;
+  report(run_steady(steady));
+  REQUIRE(steady.world.query().all<Position>().count() == ENTITY_COUNT);
+}

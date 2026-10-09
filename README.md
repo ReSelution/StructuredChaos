@@ -325,7 +325,7 @@ meson setup build -Denable_chaos_stats=true
 ### ECS comparison
 
 With `ecs_comparison`, `tests/ecs_compare` builds one executable per library
-that does the same work on one thread and on all of them: `sc::ecs`,
+that does the same work on one thread and on all of them: `sc::ecs`, `sc::ecs2`,
 [EnTT](https://github.com/skypjack/entt),
 [Flecs](https://github.com/SanderMertens/flecs),
 [gaia-ecs](https://github.com/richardbiely/gaia-ecs),
@@ -339,6 +339,12 @@ scripts/ecs_compare.py
 scripts/ecs_compare.py --only sc,flecs --threads 8
 scripts/ecs_compare.py --markdown --save results.json
 ```
+
+Most benchmarks time one operation on a fresh world. The last section of the
+report is a world in use instead: every frame some entities are replaced, some
+get a component or lose it, and then the systems run. Its frames are timed one
+by one, so the report has the median and the slow frames (90th and 99th
+percentile, slowest) rather than a mean.
 
 `--native-file cross/linux-clang.ini` selects the compiler of a new build
 directory, see `scripts/ecs_compare.py --help` for the rest. In a build

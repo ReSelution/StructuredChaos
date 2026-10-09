@@ -289,3 +289,39 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
   REQUIRE(steered(*entities.getComponent<const Velocity>(last), *entities.getComponent<const Position>(last),
                   *entities.getComponent<const Position>(world.entities[order.back()])));
 }
+
+namespace {
+
+  struct Steady {
+    using Handle = mustache::Entity;
+    mustache::World world;
+    mustache::EntityManager &entities = world.entities();
+
+    Handle spawn(size_t number) {
+      const mustache::Entity entity = entities.create();
+      entities.assign<Position>(entity, static_cast<float>(number), 1.0f);
+      entities.assign<Velocity>(entity, 1.0f, 2.0f);
+      if (number % 2 == 0) {
+        entities.assign<Health>(entity, 50.0f);
+      }
+      return entity;
+    }
+    void destroy(Handle entity) { entities.destroyNow(entity); }
+    void add_timer(Handle entity) { entities.assign<Timer>(entity, 0.0f); }
+    void remove_timer(Handle entity) { entities.removeComponent<Timer>(entity); }
+    void frame() {
+      entities.forEach([](Position &pos, const Velocity &vel) { integrate(pos, vel); }, SERIAL);
+      entities.forEach([](Health &health, const Velocity &vel) { regenerate(health, vel); }, SERIAL);
+      entities.forEach([](Timer &timer, const Velocity &vel) { tick(timer, vel); }, SERIAL);
+    }
+  };
+
+} // namespace
+
+TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
+  Steady steady;
+  report(run_steady(steady));
+  size_t count = 0;
+  steady.entities.forEach([&count](const Position &) { ++count; }, SERIAL);
+  REQUIRE(count == ENTITY_COUNT);
+}

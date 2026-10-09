@@ -310,3 +310,39 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
                     ecs.get<const Position>(world.entities[order.back()])));
   }
 }
+
+namespace {
+
+  struct Steady {
+    using Handle = Entity;
+    sc::ecs2::World world;
+
+    Handle spawn(size_t number) {
+      const Entity entity = world.create();
+      world.emplace<Position>(entity, static_cast<float>(number), 1.0f);
+      world.emplace<Velocity>(entity, 1.0f, 2.0f);
+      if (number % 2 == 0) {
+        world.emplace<Health>(entity, 50.0f);
+      }
+      return entity;
+    }
+    void destroy(Handle entity) { world.destroy(entity); }
+    void add_timer(Handle entity) { world.emplace<Timer>(entity, 0.0f); }
+    void remove_timer(Handle entity) { world.erase<Timer>(entity); }
+    void frame() {
+      world.each<Position, const Velocity>([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      world.each<Health, const Velocity>([](Health &health, const Velocity &vel) { regenerate(health, vel); });
+      world.each<Timer, const Velocity>([](Timer &timer, const Velocity &vel) { tick(timer, vel); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
+  sc::threading::init(thread_count() - 1);
+  Steady steady;
+  report(run_steady(steady));
+  size_t count = 0;
+  steady.world.each<const Position>([&](const Position &) { ++count; });
+  REQUIRE(count == ENTITY_COUNT);
+}

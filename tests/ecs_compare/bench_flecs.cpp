@@ -296,3 +296,39 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
   const flecs::entity last = world.entities.back();
   REQUIRE(steered(last.get<Velocity>(), last.get<Position>(), world.entities[order.back()].get<Position>()));
 }
+
+namespace {
+
+  struct Steady {
+    using Handle = flecs::entity;
+    World base;
+    flecs::world &world = base.world;
+    flecs::query<Position, const Velocity> moving = world.query<Position, const Velocity>();
+    flecs::query<Health, const Velocity> healing = world.query<Health, const Velocity>();
+    flecs::query<Timer, const Velocity> timed = world.query<Timer, const Velocity>();
+
+    Handle spawn(size_t number) {
+      const flecs::entity entity =
+          world.entity().set<Position>({static_cast<float>(number), 1.0f}).set<Velocity>({1.0f, 2.0f});
+      if (number % 2 == 0) {
+        entity.set<Health>({50.0f});
+      }
+      return entity;
+    }
+    void destroy(Handle entity) { entity.destruct(); }
+    void add_timer(Handle entity) { entity.set<Timer>({0.0f}); }
+    void remove_timer(Handle entity) { entity.remove<Timer>(); }
+    void frame() {
+      moving.each([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      healing.each([](Health &health, const Velocity &vel) { regenerate(health, vel); });
+      timed.each([](Timer &timer, const Velocity &vel) { tick(timer, vel); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
+  Steady steady;
+  report(run_steady(steady));
+  REQUIRE(static_cast<size_t>(steady.world.count<Position>()) == ENTITY_COUNT);
+}

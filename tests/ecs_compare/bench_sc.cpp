@@ -433,3 +433,42 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     REQUIRE(grouped.registry.get<const Timer>(grouped.entities.back()).elapsed > 0.0f);
   }
 }
+
+namespace {
+
+  struct Steady {
+    using Handle = sc::ecs::Entity;
+    sc::ecs::Registry registry;
+
+    Handle spawn(size_t number) {
+      const sc::ecs::Entity entity = registry.create();
+      registry.emplace<Position>(entity, static_cast<float>(number), 1.0f);
+      registry.emplace<Velocity>(entity, 1.0f, 2.0f);
+      if (number % 2 == 0) {
+        registry.emplace<Health>(entity, 50.0f);
+      }
+      return entity;
+    }
+    void destroy(Handle entity) { registry.destroy(entity); }
+    void add_timer(Handle entity) { registry.emplace<Timer>(entity, 0.0f); }
+    void remove_timer(Handle entity) { registry.erase<Timer>(entity); }
+    void frame() {
+      sc::ecs::each(registry.view<Position, const Velocity>(),
+                    [](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      sc::ecs::each(registry.view<Health, const Velocity>(),
+                    [](Health &health, const Velocity &vel) { regenerate(health, vel); });
+      sc::ecs::each(registry.view<Timer, const Velocity>(),
+                    [](Timer &timer, const Velocity &vel) { tick(timer, vel); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
+  sc::threading::init(thread_count() - 1);
+  Steady steady;
+  report(run_steady(steady));
+  size_t count = 0;
+  sc::ecs::each(steady.registry.view<const Position>(), [&](const Position &) { ++count; });
+  REQUIRE(count == ENTITY_COUNT);
+}

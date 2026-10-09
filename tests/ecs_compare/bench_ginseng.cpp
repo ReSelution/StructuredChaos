@@ -172,3 +172,38 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
   REQUIRE(steered(database.get_component<Velocity>(last), database.get_component<Position>(last),
                   database.get_component<Position>(world.entities[order.back()])));
 }
+
+namespace {
+
+  struct Steady {
+    using Handle = Entity;
+    ginseng::database database;
+
+    Handle spawn(size_t number) {
+      const Entity entity = database.create_entity();
+      database.add_component(entity, Position{static_cast<float>(number), 1.0f});
+      database.add_component(entity, Velocity{1.0f, 2.0f});
+      if (number % 2 == 0) {
+        database.add_component(entity, Health{50.0f});
+      }
+      return entity;
+    }
+    void destroy(Handle entity) { database.destroy_entity(entity); }
+    void add_timer(Handle entity) { database.add_component(entity, Timer{0.0f}); }
+    void remove_timer(Handle entity) { database.remove_component<Timer>(entity); }
+    void frame() {
+      database.visit([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      database.visit([](Health &health, const Velocity &vel) { regenerate(health, vel); });
+      database.visit([](Timer &timer, const Velocity &vel) { tick(timer, vel); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
+  Steady steady;
+  report(run_steady(steady));
+  size_t count = 0;
+  steady.database.visit([&](const Position &) { ++count; });
+  REQUIRE(count == ENTITY_COUNT);
+}

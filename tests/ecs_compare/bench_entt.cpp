@@ -231,3 +231,37 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     REQUIRE(grouped.registry.get<const Timer>(grouped.entities.back()).elapsed > 0.0f);
   }
 }
+
+namespace {
+
+  struct Steady {
+    using Handle = entt::entity;
+    entt::registry registry;
+
+    Handle spawn(size_t number) {
+      const entt::entity entity = registry.create();
+      registry.emplace<Position>(entity, static_cast<float>(number), 1.0f);
+      registry.emplace<Velocity>(entity, 1.0f, 2.0f);
+      if (number % 2 == 0) {
+        registry.emplace<Health>(entity, 50.0f);
+      }
+      return entity;
+    }
+    void destroy(Handle entity) { registry.destroy(entity); }
+    void add_timer(Handle entity) { registry.emplace<Timer>(entity, 0.0f); }
+    void remove_timer(Handle entity) { registry.erase<Timer>(entity); }
+    void frame() {
+      registry.view<Position, const Velocity>().each([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      registry.view<Health, const Velocity>().each(
+          [](Health &health, const Velocity &vel) { regenerate(health, vel); });
+      registry.view<Timer, const Velocity>().each([](Timer &timer, const Velocity &vel) { tick(timer, vel); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
+  Steady steady;
+  report(run_steady(steady));
+  REQUIRE(steady.registry.view<Position>().size() == ENTITY_COUNT);
+}

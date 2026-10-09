@@ -1,9 +1,11 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <random>
@@ -211,5 +213,86 @@ namespace compare {
   // ENTITY_COUNT and PARALLEL_ENTITY_COUNT.
   inline constexpr const char *SMALL_WORLD = "100 000 entities";
   inline constexpr const char *LARGE_WORLD = "1 000 000 entities";
+  // ENTITY_COUNT and STEADY_CHANGES.
+  inline constexpr const char *STEADY_WORLD = "100 000 entities in use, 1 000 replaced and 1 000 changed per frame";
+
+  // A world that has been in use for a while, unlike the fresh ones of the
+  // benchmarks above: every frame some entities are destroyed and as many
+  // created, some get a component or lose it, and then the systems run. All
+  // of it on one thread. What counts is not only how long a frame takes but
+  // also how long the slow ones take, so the frames are timed one by one.
+  constexpr size_t STEADY_CHANGES = ENTITY_COUNT / 100;
+  constexpr size_t STEADY_FRAMES = 2000;
+  // Frames before the measured ones, until the world is no longer fresh.
+  constexpr size_t STEADY_WARM_UP = 200;
+
+  // Times of a frame in nanoseconds.
+  struct SteadyTimes {
+    double median;
+    double percentile90;
+    double percentile99;
+    double slowest;
+  };
+
+  // Runs the frames on a world of a library, which is a type with
+  //   Handle                     an entity
+  //   Handle spawn(size_t n)     an entity with Position and Velocity and, for an even n, Health
+  //   void destroy(Handle)
+  //   void add_timer(Handle)     adds Timer, which the entity does not have
+  //   void remove_timer(Handle)
+  //   void frame()               integrate, regenerate and tick for every entity that has the components
+  // The changes are the same for every library, in number and order.
+  template <typename World> SteadyTimes run_steady(World &world) {
+    struct Slot {
+      typename World::Handle entity;
+      bool timed;
+    };
+    std::vector<Slot> alive;
+    alive.reserve(ENTITY_COUNT);
+    size_t number = 0;
+    for (; number < ENTITY_COUNT; ++number) {
+      alive.push_back({world.spawn(number), false});
+    }
+
+    std::mt19937 random{42};
+    std::vector<double> times;
+    times.reserve(STEADY_FRAMES);
+    for (size_t frame = 0; frame < STEADY_WARM_UP + STEADY_FRAMES; ++frame) {
+      const auto start = std::chrono::steady_clock::now();
+      for (size_t change = 0; change < STEADY_CHANGES; ++change) {
+        Slot &slot = alive[random() % alive.size()];
+        world.destroy(slot.entity);
+        slot = {world.spawn(number++), false};
+      }
+      for (size_t change = 0; change < STEADY_CHANGES; ++change) {
+        Slot &slot = alive[random() % alive.size()];
+        slot.timed ? world.remove_timer(slot.entity) : world.add_timer(slot.entity);
+        slot.timed = !slot.timed;
+      }
+      world.frame();
+      const auto end = std::chrono::steady_clock::now();
+      if (frame >= STEADY_WARM_UP) {
+        times.push_back(std::chrono::duration<double, std::nano>(end - start).count());
+      }
+    }
+
+    std::ranges::sort(times);
+    const auto at = [&](size_t percent) { return times[std::min(times.size() - 1, times.size() * percent / 100)]; };
+    return {.median = at(50), .percentile90 = at(90), .percentile99 = at(99), .slowest = times.back()};
+  }
+
+  // Catch2 only reports the benchmarks it ran itself. These lines on the
+  // standard output are what scripts/ecs_compare.py reads instead: the test
+  // case, the name of the row and the nanoseconds, separated by tabs.
+  inline void report(const char *section, const char *row, double nanoseconds) {
+    std::printf("ecs_compare\t%s\t%s\t%.0f\n", section, row, nanoseconds);
+    std::fflush(stdout);
+  }
+  inline void report(const SteadyTimes &times) {
+    report(STEADY_WORLD, "frame, median", times.median);
+    report(STEADY_WORLD, "frame, 90th percentile", times.percentile90);
+    report(STEADY_WORLD, "frame, 99th percentile", times.percentile99);
+    report(STEADY_WORLD, "frame, slowest", times.slowest);
+  }
 
 } // namespace compare

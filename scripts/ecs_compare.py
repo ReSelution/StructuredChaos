@@ -44,6 +44,9 @@ LIBRARIES = {
 }
 
 # How tests/ecs_compare/common.hpp marks the two runs of a parallel benchmark.
+# How an executable marks a time it measured without Catch2.
+REPORTED = "ecs_compare"
+
 SERIAL = " [1 thread]"
 PARALLEL = " [all threads]"
 
@@ -156,6 +159,14 @@ def run(executable: Path, samples: int, threads: int | None) -> dict[str, dict[s
             sections = parse_report(report)
         except (OSError, ET.ParseError):
             sections = {}
+        # What an executable timed itself, see report in tests/ecs_compare/common.hpp.
+        for line in process.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) == 4 and fields[0] == REPORTED:
+                try:
+                    sections.setdefault(fields[1], {})[fields[2]] = float(fields[3])
+                except ValueError:
+                    pass
         if process.returncode != 0:
             warn(f"{executable.name} exited with {process.returncode}, its results may be incomplete")
             if process.stdout.strip():
@@ -327,7 +338,7 @@ def print_report(results, options, threads: int) -> None:
 
         if plain:
             rows = [(name, time_cells(row, libraries, baseline)) for name, row in plain.items()]
-            print_table(section, time_note, header, rows, options, factor_note)
+            print_table(section, "time{detail}, lower is better", header, rows, options, factor_note)
         if serial:
             rows = [(name, time_cells(row, libraries, baseline)) for name, row in serial.items()]
             print_table(f"{section} · 1 thread", time_note, header, rows, options, factor_note)
