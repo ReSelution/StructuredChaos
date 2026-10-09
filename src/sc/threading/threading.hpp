@@ -19,6 +19,10 @@ namespace sc::threading {
   /// for threads outside the pool, a positive number for pool workers.
   [[nodiscard]] inline int32_t thread_id() noexcept { return impl::threadId; }
 
+  /// @brief One more than the highest thread_id there is: the size of an
+  /// array that has an entry for every thread. Changes with init.
+  [[nodiscard]] size_t thread_slots() noexcept;
+
   // Calls function(first, last) for the items 0 to count - 1 in chunks of at
   // most grain items, on the calling thread and on every pool thread that has
   // nothing else to do, and returns once all of them are done.
