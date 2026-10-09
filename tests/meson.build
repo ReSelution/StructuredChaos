@@ -20,15 +20,13 @@ else
   test_timeout = 30
 endif
 
-# Registry Test Executable
-test_registry = executable(
-  'test_registry',
+test_ecs = executable(
+  'test_ecs',
   sources: [
-    'ecs/bench_registry.cpp',
-    'ecs/test_component_lock.cpp',
-    'ecs/test_destroy.cpp',
+    'ecs/test_commands.cpp',
     'ecs/test_groups.cpp',
     'ecs/test_registry.cpp',
+    'ecs/test_scheduler.cpp',
   ],
   dependencies: [
     catch2_dep,
@@ -36,12 +34,24 @@ test_registry = executable(
   ],
 )
 
-test('ECS Registry Tests', test_registry, env: test_env, timeout: test_timeout)
+test('ECS Tests', test_ecs, env: test_env, timeout: test_timeout)
+
+bench_ecs = executable(
+  'bench_ecs',
+  sources: [
+    'ecs/bench_ecs.cpp',
+  ],
+  dependencies: [
+    catch2_dep,
+    sc_dep,
+  ],
+)
+
 benchmark(
-  'ECS Registry Benchmarks',
-  test_registry,
+  'ECS Benchmarks',
+  bench_ecs,
   args: ['[!benchmark]'],
-  timeout: 300,
+  timeout: 600,
 )
 
 test_threading = executable(

@@ -1,6 +1,7 @@
 sc_sources = files(
   'sc/ecs/entity.cpp',
   'sc/ecs/registry.cpp',
+  'sc/ecs/scheduler.cpp',
   'sc/localizations/magpie_translator.cpp',
   'sc/logger/logger.cpp',
   'sc/memory/arena_pool.cpp',
