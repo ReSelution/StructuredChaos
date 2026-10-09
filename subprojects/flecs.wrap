@@ -1,0 +1,7 @@
+[wrap-git]
+url = https://github.com/SanderMertens/flecs.git
+revision = v4.1.6
+depth = 1
+
+[provide]
+flecs = flecs_dep

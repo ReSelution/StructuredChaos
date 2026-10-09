@@ -6,3 +6,9 @@ option(
   value: true,
   description: 'Route operator new/delete of every executable that uses sc_dep to mimalloc (Windows only)',
 )
+option(
+  'ecs_comparison',
+  type: 'boolean',
+  value: false,
+  description: 'Build the benchmarks that compare sc::ecs with other ECS libraries',
+)

@@ -184,3 +184,8 @@ test_util = executable(
 )
 
 test('Util Tests', test_util, env: test_env, timeout: test_timeout)
+
+# The other ECS libraries are only fetched and built for this.
+if get_option('ecs_comparison')
+  subdir('ecs_compare')
+endif

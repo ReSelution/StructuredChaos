@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/richardbiely/gaia-ecs.git
+revision = v1.0.0
+depth = 1
+patch_directory = gaia-ecs
+
+[provide]
+gaia-ecs = gaia_ecs_dep

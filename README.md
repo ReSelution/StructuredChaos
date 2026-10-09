@@ -316,10 +316,34 @@ meson test -C build --benchmark
 | `enable_chaos_stats` | `false` | Compiles the stats in instead of leaving them out |
 | `dump_magpie` | `false` | Keeps namespace and key of every text, for `Magpie::dump()` |
 | `mimalloc_new_delete` | `true` | On Windows, routes `new`/`delete` of every executable that uses `sc_dep` to mimalloc |
+| `ecs_comparison` | `false` | Fetches other ECS libraries and builds the benchmarks that compare `sc::ecs` with them |
 
 ```bash
 meson setup build -Denable_chaos_stats=true
 ```
+
+### ECS comparison
+
+With `ecs_comparison`, `tests/ecs_compare` builds one executable per library
+that does the same work on one thread and on all of them: `sc::ecs`,
+[EnTT](https://github.com/skypjack/entt),
+[Flecs](https://github.com/SanderMertens/flecs),
+[gaia-ecs](https://github.com/richardbiely/gaia-ecs),
+[mustache](https://github.com/kirillochnev/mustache) and
+[ginseng](https://github.com/apples/ginseng). `scripts/ecs_compare.py` sets up
+an optimized build with the option in `build-bench-ecs`, builds them, runs them
+and prints the results side by side:
+
+```bash
+scripts/ecs_compare.py
+scripts/ecs_compare.py --only sc,flecs --threads 8
+scripts/ecs_compare.py --markdown --save results.json
+```
+
+`--native-file cross/linux-clang.ini` selects the compiler of a new build
+directory, see `scripts/ecs_compare.py --help` for the rest. In a build
+directory that has the option, `meson compile -C <builddir> ecs_compare` builds
+and runs them as well.
 
 ### Sanitizers
 

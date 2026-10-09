@@ -1,0 +1,9 @@
+[wrap-git]
+url = https://github.com/kirillochnev/mustache.git
+# No releases are tagged: master of 2026-01-20.
+revision = 75ef20ff2264a46c24768a5fce5bd8a0738c8e2c
+depth = 1
+patch_directory = mustache
+
+[provide]
+mustache = mustache_dep
