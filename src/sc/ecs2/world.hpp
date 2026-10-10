@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <span>
+#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -26,13 +28,28 @@ namespace sc::ecs2 {
 
 namespace sc::ecs2::internal {
 
-  inline constexpr size_t MAX_COMPONENT_TYPES = 256;
+  // Far more than a program has: a world only reserves the addresses for
+  // them, see World::m_table.
+  inline constexpr size_t MAX_COMPONENT_TYPES = size_t{1} << 16;
+  // The first so many have their place in the world itself, which is found
+  // a little faster.
+  inline constexpr size_t NEAR_COMPONENT_TYPES = 256;
 
   inline std::atomic<size_t> nextComponentIndex{0};
 
-  // A number for every component type of the program, the same in all worlds.
-  template <typename Component> size_t componentIndex() noexcept {
-    static const size_t index = nextComponentIndex.fetch_add(1, std::memory_order_relaxed);
+  // A number for every component type of the program, the same in all worlds:
+  // where a world keeps the column of the type, found without a search, and
+  // what the scheduler tells the components of two systems apart by. Throws
+  // std::length_error for a type beyond MAX_COMPONENT_TYPES, the first time
+  // it is used and every time after.
+  template <typename Component> size_t componentIndex() {
+    static const size_t index = [] {
+      const size_t next = nextComponentIndex.fetch_add(1, std::memory_order_relaxed);
+      if (next >= MAX_COMPONENT_TYPES) [[unlikely]] {
+        throw std::length_error("sc::ecs2: more component types than MAX_COMPONENT_TYPES");
+      }
+      return next;
+    }();
     return index;
   }
 
@@ -84,40 +101,60 @@ namespace sc::ecs2 {
   // create and valid are safe from the threads of the pool at any time. A
   // component type is either read by any number of threads or written by one.
   // Adding and removing components is also safe for several threads as long as
-  // every thread keeps to entities of other pages, which is what the functions
-  // of parallelEach do. destroy must have nothing running next to it.
+  // every thread keeps to other entities, which is what the functions of
+  // parallelEach do with their own entity and the ones they create. For an
+  // entity that several threads may go for there is tryEmplace, and erase:
+  // one of them does it. The value of a component is another matter: it is
+  // written by one thread, or read by any number. destroy must have nothing
+  // running next to it.
   class World {
   public:
     template <typename Component> using ColumnOf = internal::Column<std::remove_const_t<Component>>;
 
-    World() = default;
+    // The pages are those of every column of the world, see Pages.
+    explicit World(Pages pages = Pages::Huge) : m_pages(pages), m_table(memory::reserve(TABLE_BYTES)) {
+      // All null from the start, and without memory until used.
+      memory::commit(m_table, TABLE_BYTES);
+      auto *const start = static_cast<std::byte *>(m_table);
+      m_farColumns = {reinterpret_cast<std::atomic<internal::ColumnBase *> *>(start), FAR_COMPONENT_TYPES};
+      m_columnList = {reinterpret_cast<internal::ColumnBase **>(start + FAR_BYTES), internal::MAX_COMPONENT_TYPES};
+    }
 
     ~World() {
       const size_t count = m_columnCount.load(std::memory_order_relaxed);
       for (size_t i = 0; i < count; ++i) {
         delete m_columnList[i];
       }
+      memory::release(m_table, TABLE_BYTES);
     }
 
     World(const World &) = delete;
     World &operator=(const World &) = delete;
 
+    // What the columns of this world are backed with.
+    [[nodiscard]] Pages pages() const noexcept { return m_pages; }
+
     [[nodiscard]] Entity create() { return m_entities.create(); }
+
+    // An entity for every place of the span, each with a copy of every given
+    // component:
+    //
+    //   std::vector<Entity> bullets(1000);
+    //   world.create(bullets, Position{}, Velocity{1.0f, 0.0f});
+    //
+    // The same as create and emplace for each of them, only faster: the
+    // columns are told how many components are coming and take them a page at
+    // a time. As safe from several threads as those two are.
+    template <typename... Components> void create(std::span<Entity> entities, const Components &...components) {
+      (column<Components>().expect(entities.size()), ...);
+      m_entities.create(entities, [&]([[maybe_unused]] uint32_t first, [[maybe_unused]] uint32_t count) {
+        (column<Components>().fill(first, count, components), ...);
+      });
+    }
 
     // An entity that is unlike most others, see Rare. It is an entity like any
     // other, only with an index from the other end.
     [[nodiscard]] Entity create(Rare) { return m_entities.create(rare); }
-
-    // An entity in a page that was made after the last sealLocal and that only
-    // the calling thread creates entities in. Several threads may create
-    // entities this way and give them components right away, next to threads
-    // that go through the entities there were at the last sealLocal.
-    [[nodiscard]] Entity createLocal() { return m_entities.createLocal(); }
-
-    // Ends the pages of createLocal, see there. To be called before threads
-    // go through entities and create others with createLocal, which the
-    // Scheduler does for every stage. Must have nothing running next to it.
-    void sealLocal() { m_entities.seal(); }
 
     [[nodiscard]] bool valid(Entity entity) const noexcept { return m_entities.valid(entity); }
 
@@ -133,8 +170,9 @@ namespace sc::ecs2 {
     }
 
     // The first half of destroy: removes the components and leaves the entity.
-    // Safe next to threads that keep to entities of other pages.
+    // Safe next to threads that keep to other entities.
     void eraseAll(Entity entity) noexcept {
+      assert(valid(entity));
       const size_t count = m_columnCount.load(std::memory_order_acquire);
       for (size_t i = 0; i < count; ++i) {
         m_columnList[i]->erase(indexOf(entity));
@@ -142,27 +180,55 @@ namespace sc::ecs2 {
     }
 
     // The second half: the entity must exist and have no components.
-    void release(Entity entity) { m_entities.destroy(entity); }
+    void release(Entity entity) {
+      assert(valid(entity));
+      m_entities.destroy(entity);
+    }
 
+    // The entity must exist and not have the component yet. An entity that
+    // was destroyed has its index no longer: the component would be that of
+    // whichever entity gets the index next.
     template <typename Component, typename... Args> decltype(auto) emplace(Entity entity, Args &&...args) {
+      assert(valid(entity));
       return column<Component>().emplace(indexOf(entity), std::forward<Args>(args)...);
     }
 
-    template <typename Component> bool erase(Entity entity) { return column<Component>().erase(indexOf(entity)); }
-
-    template <typename Component> [[nodiscard]] bool contains(Entity entity) {
-      return column<Component>().contains(indexOf(entity));
+    // Gives the entity the component unless it has it, and says whether it
+    // did. Several threads may do this for the same entity at the same time,
+    // also next to threads that erase it: the component is made once, by the
+    // first of them, and the entity has it only when it is made in full.
+    template <typename Component, typename... Args> bool tryEmplace(Entity entity, Args &&...args) {
+      assert(valid(entity));
+      return column<Component>().tryEmplace(indexOf(entity), std::forward<Args>(args)...);
     }
 
-    // The entity must have the component.
+    // The entity must exist. False if it did not have the component, or if
+    // another thread removed it at the same time.
+    template <typename Component> bool erase(Entity entity) {
+      assert(valid(entity));
+      return column<Component>().erase(indexOf(entity));
+    }
+
+    // Any entity may be asked for: one that does not exist (any more) has no
+    // components, whatever the entity has that got its index.
+    template <typename Component> [[nodiscard]] bool contains(Entity entity) {
+      // In this order: mostly the answer is no, without a look at the entity.
+      return column<Component>().contains(indexOf(entity)) && valid(entity);
+    }
+
+    // The entity must exist and have the component.
     template <typename Component> [[nodiscard]] Component &get(Entity entity) {
+      assert(valid(entity));
       return column<Component>().get(indexOf(entity));
     }
 
     // The column of a component, which is made on first use.
     template <typename Component> [[nodiscard]] ColumnOf<Component> &column() {
       using Type = std::remove_const_t<Component>;
-      std::atomic<internal::ColumnBase *> &slot = m_columns[internal::componentIndex<Type>()];
+      const size_t index = internal::componentIndex<Type>();
+      std::atomic<internal::ColumnBase *> &slot = index < internal::NEAR_COMPONENT_TYPES
+                                                      ? m_columns[index]
+                                                      : m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
       if (internal::ColumnBase *found = slot.load(std::memory_order_acquire)) [[likely]] {
         return static_cast<internal::Column<Type> &>(*found);
       }
@@ -177,8 +243,12 @@ namespace sc::ecs2 {
     //   world.each<const Health, Exclude<Frozen>>([](Entity entity, const Health &health) { ... });
     //
     // The function may add and remove components of the entity it is called
-    // with, as long as they are none of those the loop names, and must leave
-    // other entities as they are.
+    // with and of entities it creates, as long as they are none of those the
+    // loop names. Other entities it leaves as they are, apart from what
+    // tryEmplace and erase do to them in parallelEach, see there. An entity it
+    // creates may have the index of one that was destroyed, in a page the loop
+    // is yet to go through: with a component the loop names it would be found
+    // there.
     template <typename... Terms, typename Function> void each(Function &&function) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
       const PageRange pages = pageRange();
@@ -186,8 +256,12 @@ namespace sc::ecs2 {
     }
 
     // The same on the calling thread and on every pool thread that has nothing
-    // else to do. Each thread gets pages of its own, so the function may add
-    // and remove components of its entity here as well.
+    // else to do. Each thread gets entities of its own, so the function may
+    // add and remove components here as well. To an entity that is not its
+    // own, which the function of another thread may have in mind as well, it
+    // gives a component with tryEmplace. Taking one away with erase is safe
+    // as far as the world goes, but not for a thread that is using the
+    // component just then: see Commands::erase of the scheduler.
     template <typename... Terms, typename Function> void parallelEach(Function &&function, size_t grain = 1) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
       const PageRange pages = pageRange();
@@ -262,7 +336,7 @@ namespace sc::ecs2 {
       if (internal::ColumnBase *found = slot.load(std::memory_order_relaxed)) {
         return static_cast<internal::Column<Type> &>(*found);
       }
-      auto *made = new internal::Column<Type>;
+      auto *made = new internal::Column<Type>{m_pages};
       const size_t count = m_columnCount.load(std::memory_order_relaxed);
       m_columnList[count] = made;
       m_columnCount.store(count + 1, std::memory_order_release);
@@ -321,8 +395,10 @@ namespace sc::ecs2 {
           }
 
           for (uint32_t word = 0; word < internal::PAGE_WORDS; ++word) {
-            uint64_t mask = (std::get<G>(pages).mask[word] & ...);
-            ((mask &= std::get<X>(without) ? ~std::get<X>(without).mask[word] : ~uint64_t{0}), ...);
+            uint64_t mask = (std::get<G>(pages).mask[word].load(std::memory_order_relaxed) & ...);
+            ((mask &= std::get<X>(without) ? ~std::get<X>(without).mask[word].load(std::memory_order_relaxed)
+                                           : ~uint64_t{0}),
+             ...);
             const uint32_t first = word * 64;
             if (mask == ~uint64_t{0}) {
               for (uint32_t slot = first; slot < first + 64; ++slot) {
@@ -339,13 +415,25 @@ namespace sc::ecs2 {
     }
 
     internal::EntityAllocator m_entities;
+    Pages m_pages;
+
+    static_assert(sizeof(std::atomic<internal::ColumnBase *>) == sizeof(internal::ColumnBase *));
+    static constexpr size_t FAR_COMPONENT_TYPES = internal::MAX_COMPONENT_TYPES - internal::NEAR_COMPONENT_TYPES;
+    static constexpr size_t FAR_BYTES = sizeof(internal::ColumnBase *) * FAR_COMPONENT_TYPES;
+    static constexpr size_t TABLE_BYTES = FAR_BYTES + sizeof(internal::ColumnBase *) * internal::MAX_COMPONENT_TYPES;
 
     // The column of every component type used with this world, at
     // internal::componentIndex. An entry is written once, under the mutex, and
     // read without a lock by all threads.
-    std::array<std::atomic<internal::ColumnBase *>, internal::MAX_COMPONENT_TYPES> m_columns{};
-    // The same columns in the order they were made, for what goes through all.
-    std::array<internal::ColumnBase *, internal::MAX_COMPONENT_TYPES> m_columnList{};
+    std::array<std::atomic<internal::ColumnBase *>, internal::NEAR_COMPONENT_TYPES> m_columns{};
+    // Reserved addresses for the two below, one after the other. They have
+    // room for every component type there may be, but only the parts in use
+    // get memory: a world costs the same however high the limit is.
+    void *m_table = nullptr;
+    // The same for the types from NEAR_COMPONENT_TYPES on.
+    std::span<std::atomic<internal::ColumnBase *>> m_farColumns;
+    // All columns in the order they were made, for what goes through all.
+    std::span<internal::ColumnBase *> m_columnList;
     std::atomic<size_t> m_columnCount{0};
     std::mutex m_columnMutex;
   };

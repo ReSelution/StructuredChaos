@@ -268,6 +268,140 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     REQUIRE(velocities == before + spawners * perSpawner);
   }
 
+  SECTION("Creating And Destroying Run After Run Does Not Use Up The Indices") {
+    for (size_t i = 0; i < entities.size(); i += 100) {
+      world.emplace<Spawner>(entities[i], 3);
+    }
+    const size_t spawners = (entities.size() + 99) / 100;
+    // Every run destroys what the one before created.
+    scheduler.addParallel<Query<const Frozen>>([](Entity entity, Commands commands) { commands.destroy(entity); });
+    scheduler.addParallel([](Change<Frozen> change, const Spawner &spawner) {
+      for (int i = 0; i < spawner.count; ++i) {
+        change.emplace<Frozen>(change.create());
+      }
+    });
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}});
+
+    // Far more runs than there are pages.
+    const size_t runs = size_t{2} * (sc::ecs2::INDEX_LIMIT / PAGE_SIZE);
+    for (size_t run = 0; run < runs; ++run) {
+      scheduler.run(world);
+    }
+    size_t spawned = 0;
+    world.each<const Frozen>([&](Entity entity) { spawned += world.valid(entity); });
+    REQUIRE(spawned == spawners * 3);
+    // A page for every thread at most, next to the first ones: after that
+    // the indices of the destroyed entities do.
+    REQUIRE(world.pageLimit() <= 3 + sc::threading::thread_slots());
+    for (const Entity entity : entities) {
+      REQUIRE(world.valid(entity));
+    }
+  }
+
+  SECTION("A Loop Changes Its Entity Next To Entities Created In The Same Page") {
+    // Indices all over the pages for the new entities to get.
+    for (size_t i = 1; i < entities.size(); i += 2) {
+      world.destroy(entities[i]);
+    }
+    const size_t left = (entities.size() + 1) / 2;
+    const uint32_t pages = world.pageLimit();
+    // Every thread adds the same components to its own entity and to the one
+    // it creates, which is in the page of some thread or other.
+    scheduler.addParallel([](Entity entity, Change<Frozen, Spawner> change, const Position &pos) {
+      change.emplace<Frozen>(entity);
+      change.emplace<Spawner>(entity, static_cast<int>(pos.x));
+      const Entity spawned = change.create();
+      change.emplace<Frozen>(spawned);
+      change.emplace<Spawner>(spawned, -1);
+    });
+    // And takes them away again, the last ones of a page among them.
+    scheduler.addParallel([](Entity entity, Change<Frozen, Spawner> change, const Position &) {
+      change.erase<Frozen>(entity);
+      change.erase<Spawner>(entity);
+    });
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}});
+    scheduler.run(world);
+
+    REQUIRE(world.pageLimit() == pages);
+    size_t created = 0;
+    world.each<const Frozen, const Spawner>([&](Entity entity, const Spawner &spawner) {
+      created += world.valid(entity) && !world.contains<Position>(entity) && spawner.count == -1;
+    });
+    REQUIRE(created == left);
+    size_t frozen = 0;
+    world.each<const Frozen>([&](Entity) { ++frozen; });
+    REQUIRE(frozen == left);
+    for (size_t i = 0; i < entities.size(); i += 2) {
+      REQUIRE_FALSE(world.contains<Spawner>(entities[i]));
+    }
+  }
+
+  SECTION("A Loop Changes Entities That Other Threads Go For As Well") {
+    // Every entity hits one of a few, as do many on other threads.
+    constexpr size_t targets = 10;
+    scheduler.addParallel([&](Change<Spawner, Frozen> change, const Position &pos) {
+      const Entity target = entities[static_cast<size_t>(pos.x) % targets];
+      change.tryEmplace<Spawner>(target, 5);
+      change.tryEmplace<Frozen>(target);
+    });
+    std::atomic<size_t> thawed = 0;
+    scheduler.addParallel([&](Change<Frozen> change, const Position &pos) {
+      thawed += change.erase<Frozen>(entities[static_cast<size_t>(pos.x) % targets]);
+    });
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}});
+    scheduler.run(world);
+
+    REQUIRE(world.column<Spawner>().page(0).count == targets);
+    REQUIRE(thawed == targets);
+    REQUIRE(world.column<Frozen>().pages() == 0);
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.contains<Spawner>(entities[i]) == (i < targets));
+    }
+    for (size_t i = 0; i < targets; ++i) {
+      REQUIRE(world.get<Spawner>(entities[i]).count == 5);
+    }
+  }
+
+  SECTION("A Component Is Removed Once The Stage Is Over") {
+    constexpr size_t targets = 10;
+    for (size_t i = 0; i < targets; ++i) {
+      world.emplace<Spawner>(entities[i], 7);
+    }
+    // Every entity uses the component of one of a few and wants it gone, as
+    // do many on other threads.
+    std::atomic<size_t> used = 0;
+    scheduler.addParallel([&](Commands commands, Query<const Spawner> query, const Position &pos) {
+      const Entity target = entities[static_cast<size_t>(pos.x) % targets];
+      used += query.contains<Spawner>(target) && query.get<const Spawner>(target).count == 7;
+      commands.erase<Spawner>(target);
+      // One it does not have, and one of an entity that will be gone.
+      commands.erase<Frozen>(target);
+      if (static_cast<size_t>(pos.x) >= entities.size() - 5) {
+        commands.erase<Health>(entities[entities.size() - 1]);
+        commands.destroy(entities[entities.size() - 1]);
+      }
+    });
+    // Next to it, although it reads the component: it is still there.
+    std::atomic<size_t> seen = 0;
+    scheduler.addParallel([&](const Spawner &spawner) { seen += spawner.count == 7; });
+    REQUIRE(scheduler.stages() == Stages{{0, 1}});
+    scheduler.run(world);
+
+    REQUIRE(used == entities.size());
+    REQUIRE(seen == targets);
+    REQUIRE(world.column<Spawner>().pages() == 0);
+    REQUIRE_FALSE(world.valid(entities.back()));
+    for (size_t i = 0; i + 1 < entities.size(); ++i) {
+      REQUIRE(world.contains<Health>(entities[i]));
+    }
+
+    // Nothing is left over for the next run, and what comes back stays.
+    world.emplace<Spawner>(entities[0], 7);
+    scheduler.run(world);
+    REQUIRE(seen == targets + 1);
+    REQUIRE_FALSE(world.contains<Spawner>(entities[0]));
+  }
+
   SECTION("A System That Takes The World May Do Anything") {
     scheduler.add([&](World &all) {
       for (size_t i = 0; i < entities.size(); i += 2) {

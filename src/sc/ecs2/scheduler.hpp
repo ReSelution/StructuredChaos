@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <concepts>
 #include <cstddef>
 #include <exception>
@@ -19,10 +20,23 @@
 
 namespace sc::ecs2::internal {
 
-  // The entities one thread wants destroyed. On cache lines of its own, the
-  // threads next to it write theirs at the same time.
-  struct alignas(64) DestroyList {
-    std::vector<Entity> entities;
+  // What one thread wants done once its stage is over. On cache lines of its
+  // own, the threads next to it write theirs at the same time.
+  struct alignas(64) CommandList {
+    // A component to remove: the entity and the column of the component.
+    struct Erased {
+      Entity entity;
+      ColumnBase *column;
+    };
+
+    std::vector<Erased> erased;
+    // The entities to destroy.
+    std::vector<Entity> destroyed;
+
+    void clear() noexcept {
+      erased.clear();
+      destroyed.clear();
+    }
   };
 
 } // namespace sc::ecs2::internal
@@ -52,10 +66,12 @@ namespace sc::ecs2 {
       m_world->template parallelEach<Terms...>(function, grain);
     }
 
-    // The component of any entity, named the way the query names it.
+    // The component of any entity that exists and has it, named the way the
+    // query names it.
     template <typename Component>
       requires named<Component>
     [[nodiscard]] Component &get(Entity entity) const {
+      assert(m_world->valid(entity));
       return std::get<World::ColumnOf<Component> *>(m_columns)->get(indexOf(entity));
     }
 
@@ -88,22 +104,33 @@ namespace sc::ecs2 {
   // To the scheduler this is writing the components, so no other system uses
   // them at the same time. Within the system:
   //  - a loop must not change the components it goes through;
-  //  - the function of a parallel loop only changes the entity it is called
-  //    with and entities it made with create, which are in pages no other
-  //    thread touches and no loop of this stage goes through.
+  //  - the function of a parallel loop uses emplace only for the entity it is
+  //    called with and for entities it made with create, which no other
+  //    thread knows of. Any other entity it gives a component with
+  //    tryEmplace, as several threads may be doing at the same time, and
+  //    takes it away with Commands::erase: erase would take it away from
+  //    under a thread that is using it.
   template <typename... Components> class Change {
     template <typename Component> static constexpr bool named = (std::same_as<Component, Components> || ...);
 
   public:
     explicit Change(World &world) : m_world(&world) {}
 
-    // See World::createLocal.
-    [[nodiscard]] Entity create() const { return m_world->createLocal(); }
+    // An entity to give the named components to. Safe to call from the
+    // function of a parallel loop, like World::create.
+    [[nodiscard]] Entity create() const { return m_world->create(); }
 
     template <typename Component, typename... Args>
       requires named<Component>
     decltype(auto) emplace(Entity entity, Args &&...args) const {
       return m_world->template emplace<Component>(entity, std::forward<Args>(args)...);
+    }
+
+    // See World::tryEmplace.
+    template <typename Component, typename... Args>
+      requires named<Component>
+    bool tryEmplace(Entity entity, Args &&...args) const {
+      return m_world->template tryEmplace<Component>(entity, std::forward<Args>(args)...);
     }
 
     template <typename Component>
@@ -122,22 +149,34 @@ namespace sc::ecs2 {
     World *m_world;
   };
 
-  // Records what a system cannot do right away, because it touches every
-  // component: destroying entities. They are destroyed once all systems that
-  // run at the same time are done. Safe to use from the function of a parallel
-  // loop.
+  // Records what a system cannot do right away: destroying entities, which
+  // touches every component, and removing a component another thread may be
+  // using. It is done once all systems that run at the same time are done, so
+  // nothing an entity has goes away while they run. Safe to use from the
+  // function of a parallel loop, for any entity and from several threads for
+  // the same one.
   class Commands {
   public:
-    explicit Commands(std::span<internal::DestroyList> lists) : m_lists(lists) {}
+    Commands(World &world, std::span<internal::CommandList> lists) : m_world(&world), m_lists(lists) {}
 
     // Does nothing if the entity does not exist any more by then.
     void destroy(Entity entity) const {
-      m_lists[static_cast<size_t>(threading::thread_id())].entities.push_back(entity);
+      m_lists[static_cast<size_t>(threading::thread_id())].destroyed.push_back(entity);
+    }
+
+    // Does nothing if the entity does not exist any more by then or does not
+    // have the component. A system that does this does not count as writing
+    // the component: the systems that use it run at the same time and still
+    // find it.
+    template <typename Component> void erase(Entity entity) const {
+      m_lists[static_cast<size_t>(threading::thread_id())].erased.push_back(
+          {.entity = entity, .column = &m_world->template column<Component>()});
     }
 
   private:
+    World *m_world;
     // One for every sc::threading::thread_id.
-    std::span<internal::DestroyList> m_lists;
+    std::span<internal::CommandList> m_lists;
   };
 
 } // namespace sc::ecs2
@@ -186,7 +225,7 @@ namespace sc::ecs2::internal {
   // What the parameters of a system are made from when it runs.
   struct SystemContext {
     World &world;
-    std::span<DestroyList> destroyed;
+    std::span<CommandList> commands;
   };
 
   // How one kind of system parameter is declared to the scheduler and how its
@@ -219,7 +258,7 @@ namespace sc::ecs2::internal {
   template <> struct SystemParam<Commands> {
     static void declare(SystemAccess &access) { access.commands = true; }
 
-    static Commands fetch(const SystemContext &context) { return Commands{context.destroyed}; }
+    static Commands fetch(const SystemContext &context) { return Commands{context.world, context.commands}; }
   };
 
   template <> struct SystemParam<World &> {
@@ -256,9 +295,11 @@ namespace sc::ecs2::internal {
   template <typename Param> inline constexpr bool isLoopExtra = false;
   template <typename... Components> inline constexpr bool isLoopExtra<Change<Components...>> = true;
   template <> inline constexpr bool isLoopExtra<Commands> = true;
+  template <typename... Terms> inline constexpr bool isLoopExtra<Query<Terms...>> = true;
 
   // The parameters of a function for Scheduler::addParallel: the entity, then
-  // Change and Commands, all of them optional, and then the components.
+  // Change, Commands and queries, all of them optional, and then the
+  // components.
   template <bool WithEntity, typename Extras, typename... Rest> struct LoopRest;
 
   template <bool WithEntity, typename... Extras, typename... Components>
@@ -350,9 +391,11 @@ namespace sc::ecs2 {
     //
     // A component taken by reference to non-const is written, any other one is
     // only read. Before the components, the function may take the entity and,
-    // after it, Change and Commands:
+    // after it, Change, Commands and queries, the latter to look at entities
+    // other than its own:
     //
     //   scheduler.addParallel([](Entity entity, Commands commands, const Health &health) { ... });
+    //   scheduler.addParallel([](Query<const Health> others, const Target &target) { ... });
     //
     // grain is the number of pages a thread takes at a time.
     template <typename F> Scheduler &addParallel(F &&function, std::string name = {}, size_t grain = 1) {
@@ -383,50 +426,50 @@ namespace sc::ecs2 {
     // thread.
     //
     // If a system throws, the systems running at the same time still finish,
-    // the entities they wanted destroyed stay, later systems are skipped and
-    // the first exception is rethrown.
+    // what they recorded through Commands is not done, later systems are
+    // skipped and the first exception is rethrown.
     void run(World &world) {
       const std::vector<std::vector<size_t>> &stages = this->stages();
 
       // Here and not when the system is added: the pool may be set up later.
       const size_t threads = threading::thread_slots();
       for (System &system : m_systems) {
-        if (system.access.commands && system.destroyed.size() < threads) {
-          system.destroyed = std::vector<internal::DestroyList>(threads);
+        if (system.access.commands && system.commands.size() < threads) {
+          system.commands = std::vector<internal::CommandList>(threads);
         }
       }
 
       for (const std::vector<size_t> &stage : stages) {
-        // The entities the systems create are in pages of their own, apart
-        // from the ones that exist now.
-        world.sealLocal();
         try {
           internal::runAll(stage, [this, &world](size_t index) {
             System &system = m_systems[index];
-            system.run({.world = world, .destroyed = system.destroyed});
+            system.run({.world = world, .commands = system.commands});
           });
         } catch (...) {
           for (const size_t index : stage) {
-            for (internal::DestroyList &list : m_systems[index].destroyed) {
-              list.entities.clear();
+            for (internal::CommandList &list : m_systems[index].commands) {
+              list.clear();
             }
           }
           throw;
         }
 
-        // Destroying an entity writes every component, so it comes after and
-        // has nothing running next to it.
+        // Now that nothing is running: nobody is using what goes away.
         for (const size_t index : stage) {
-          for (internal::DestroyList &list : m_systems[index].destroyed) {
-            for (const Entity entity : list.entities) {
+          for (internal::CommandList &list : m_systems[index].commands) {
+            for (const internal::CommandList::Erased &erased : list.erased) {
+              // Not that of an entity that got the index since.
+              if (world.valid(erased.entity)) {
+                erased.column->erase(indexOf(erased.entity));
+              }
+            }
+            for (const Entity entity : list.destroyed) {
               world.destroy(entity);
             }
-            list.entities.clear();
+            list.clear();
           }
         }
       }
-      // For loops that go through the world without the scheduler.
-      world.sealLocal();
     }
 
     [[nodiscard]] size_t size() const noexcept { return m_systems.size(); }
@@ -466,7 +509,7 @@ namespace sc::ecs2 {
       internal::SystemAccess access;
       // What the threads recorded through Commands, one list for every
       // thread; empty for a system that does not take Commands.
-      std::vector<internal::DestroyList> destroyed;
+      std::vector<internal::CommandList> commands;
     };
 
     template <typename F, typename... Params>
@@ -484,7 +527,7 @@ namespace sc::ecs2 {
               },
           .name = std::move(name),
           .access = std::move(access),
-          .destroyed = {},
+          .commands = {},
       });
       m_stagesValid = false;
       return *this;

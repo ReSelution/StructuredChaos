@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -67,7 +68,8 @@ namespace sc::ecs2::internal {
   //
   // The indices come from both ends: from zero upwards for most entities and
   // from INDEX_LIMIT downwards for the rare ones, a page at a time, until the
-  // two meet.
+  // two meet. Every thread has a page of its own to take new indices from,
+  // and takes another one when that is used up.
   //
   // create and valid are safe from the threads of the pool and the thread that
   // set it up, at any time and without a lock. destroy must have nothing
@@ -83,9 +85,6 @@ namespace sc::ecs2::internal {
     struct alignas(64) Share {
       uint32_t next = 0;
       uint32_t end = 0;
-      // The same for createLocal: of a page that was made after the last seal.
-      uint32_t localNext = 0;
-      uint32_t localEnd = 0;
       // And for the rare entities.
       uint32_t rareNext = 0;
       uint32_t rareEnd = 0;
@@ -122,11 +121,6 @@ namespace sc::ecs2::internal {
       }
     };
 
-    struct Range {
-      uint32_t first;
-      uint32_t end;
-    };
-
   public:
     static constexpr size_t MAX_THREADS = 128;
 
@@ -151,20 +145,38 @@ namespace sc::ecs2::internal {
 
       Share &share = shareOfThread();
       if (share.next == share.end) [[unlikely]] {
-        // What createLocal left over comes first.
-        const size_t spare = m_spareTaken.load(std::memory_order_acquire) < m_spare.size()
-                                 ? m_spareTaken.fetch_add(1, std::memory_order_acq_rel)
-                                 : m_spare.size();
-        if (spare < m_spare.size()) {
-          share.next = m_spare[spare].first;
-          share.end = m_spare[spare].end;
-        } else {
-          share.next = makePage(false);
-          share.end = share.next + PAGE_SIZE;
-        }
+        share.next = makePage(false);
+        share.end = share.next + PAGE_SIZE;
       }
       // Never handed out before.
       return makeEntity(share.next++, 0);
+    }
+
+    // An entity for every place of the span, as create makes them. Calls the
+    // function with every run of indices it handed out, as (first index,
+    // count): what destroy gave back one by one, the rest in rows as long as
+    // the pages of the thread allow.
+    template <typename Function> void create(std::span<Entity> entities, Function &&run) {
+      size_t made = 0;
+      for (uint32_t index = 0; made < entities.size() && m_free.take(index); ++made) {
+        entities[made] = makeEntity(index, *generation(index));
+        run(index, uint32_t{1});
+      }
+
+      Share &share = shareOfThread();
+      while (made < entities.size()) {
+        if (share.next == share.end) {
+          share.next = makePage(false);
+          share.end = share.next + PAGE_SIZE;
+        }
+        const auto count = static_cast<uint32_t>(std::min<size_t>(entities.size() - made, share.end - share.next));
+        for (uint32_t i = 0; i < count; ++i) {
+          entities[made + i] = makeEntity(share.next + i, 0);
+        }
+        run(share.next, count);
+        share.next += count;
+        made += count;
+      }
     }
 
     // The same from the other end: an index among those of the rare entities.
@@ -179,32 +191,6 @@ namespace sc::ecs2::internal {
         share.rareEnd = share.rareNext + PAGE_SIZE;
       }
       return makeEntity(share.rareNext++, 0);
-    }
-
-    // An index of a page that was made after the last seal and that only the
-    // calling thread has indices of: no entity that existed at the last seal
-    // is in that page, and no entity of another thread.
-    [[nodiscard]] Entity createLocal() {
-      Share &share = shareOfThread();
-      if (share.localNext == share.localEnd) [[unlikely]] {
-        share.localNext = makePage(false);
-        share.localEnd = share.localNext + PAGE_SIZE;
-      }
-      return makeEntity(share.localNext++, 0);
-    }
-
-    // Ends the pages of createLocal: the next call starts a new one. What is
-    // left of them goes to create. Must have nothing running next to it.
-    void seal() {
-      const size_t taken = std::min(m_spareTaken.load(std::memory_order_relaxed), m_spare.size());
-      m_spare.erase(m_spare.begin(), m_spare.begin() + static_cast<std::ptrdiff_t>(taken));
-      for (Share &share : m_shares) {
-        if (share.localNext != share.localEnd) {
-          m_spare.push_back({.first = share.localNext, .end = share.localEnd});
-        }
-        share.localNext = share.localEnd = 0;
-      }
-      m_spareTaken.store(0, std::memory_order_release);
     }
 
     [[nodiscard]] bool valid(Entity entity) const noexcept {
@@ -296,10 +282,6 @@ namespace sc::ecs2::internal {
     alignas(64) std::atomic<uint64_t> m_pageCounts{0};
     FreeList m_free;
     FreeList m_rareFree;
-    // Indices that were never handed out, left over by createLocal. Only
-    // changed by seal; create takes whole ranges of it, from the front.
-    std::vector<Range> m_spare;
-    alignas(64) std::atomic<size_t> m_spareTaken{0};
     std::array<Share, MAX_THREADS> m_shares{};
   };
 

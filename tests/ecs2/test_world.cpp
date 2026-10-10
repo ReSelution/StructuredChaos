@@ -5,8 +5,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <random>
+#include <span>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -20,6 +23,7 @@ namespace {
   using sc::ecs2::Entity;
   using sc::ecs2::Exclude;
   using sc::ecs2::PAGE_SIZE;
+  using sc::ecs2::Pages;
   using sc::ecs2::World;
 
   struct Position {
@@ -45,6 +49,27 @@ namespace {
     uint64_t more[3]{};
   };
   struct Tag {};
+
+  // Components that have something to give back at their end.
+  struct Named {
+    std::string name;
+    // Counts the components there are.
+    std::shared_ptr<int> alive;
+  };
+
+  struct Owner {
+    std::unique_ptr<int> value;
+  };
+
+  // Cannot always be made.
+  struct Fragile {
+    Fragile(std::string text, bool fails) : text(std::move(text)) {
+      if (fails) {
+        throw std::runtime_error("fragile");
+      }
+    }
+    std::string text;
+  };
 
   // Few entities have one.
   struct Player {
@@ -116,7 +141,7 @@ template <> inline constexpr bool sc::ecs2::rareComponent<Gamma> = true;
 
 TEST_CASE("World Entities", "[ecs2][world]") {
   sc::threading::init();
-  World world;
+  World world{GENERATE(Pages::Huge, Pages::Small, Pages::BySize, Pages::Adaptive)};
 
   SECTION("An Entity Exists Until It Is Destroyed") {
     const Entity first = world.create();
@@ -145,6 +170,10 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     REQUIRE_FALSE(world.valid(first));
     // Nothing of the earlier entity is left.
     REQUIRE_FALSE(world.contains<Position>(again));
+    // And what the new one gets is not the earlier one's.
+    world.emplace<Position>(again, 3.0f, 4.0f);
+    REQUIRE(world.contains<Position>(again));
+    REQUIRE_FALSE(world.contains<Position>(first));
   }
 
   SECTION("There Are Never More Entities Than INDEX_LIMIT") {
@@ -161,7 +190,6 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     REQUIRE(world.get<Position>(last).y == 2.0f);
 
     REQUIRE_THROWS_AS(world.create(), std::length_error);
-    REQUIRE_THROWS_AS(world.createLocal(), std::length_error);
     // The page of the rare entities is not full yet.
     Entity lastRare = special;
     for (uint32_t i = 1; i < PAGE_SIZE; ++i) {
@@ -210,34 +238,6 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     REQUIRE(sc::ecs2::indexOf(world.create()) == sc::ecs2::indexOf(common));
   }
 
-  SECTION("Entities Created Locally Are Apart From The Earlier Ones") {
-    const Entity earlier = world.create();
-    const Entity local = world.createLocal();
-    const Entity next = world.createLocal();
-    const auto pageOf = [](Entity entity) { return sc::ecs2::indexOf(entity) / PAGE_SIZE; };
-    REQUIRE(pageOf(local) != pageOf(earlier));
-    REQUIRE(pageOf(next) == pageOf(local));
-    REQUIRE(world.valid(local));
-
-    // Not in a page that has entities from before.
-    world.sealLocal();
-    const Entity later = world.createLocal();
-    REQUIRE(pageOf(later) != pageOf(local));
-    REQUIRE(pageOf(later) != pageOf(earlier));
-
-    // What was left of the page is not lost.
-    std::unordered_set<uint32_t> indices{sc::ecs2::indexOf(earlier), sc::ecs2::indexOf(local), sc::ecs2::indexOf(next),
-                                         sc::ecs2::indexOf(later)};
-    world.sealLocal();
-    bool reused = false;
-    for (uint32_t i = 0; i < 3 * PAGE_SIZE; ++i) {
-      const Entity entity = world.create();
-      REQUIRE(indices.insert(sc::ecs2::indexOf(entity)).second);
-      reused = reused || pageOf(entity) == pageOf(local);
-    }
-    REQUIRE(reused);
-  }
-
   SECTION("Every Thread Creates Other Entities") {
     constexpr size_t perChunk = 3000;
     constexpr size_t chunks = 64;
@@ -273,7 +273,317 @@ TEST_CASE("World Entities", "[ecs2][world]") {
 
 TEST_CASE("World Components", "[ecs2][world]") {
   sc::threading::init();
-  World world;
+  World world{GENERATE(Pages::Huge, Pages::Small, Pages::BySize, Pages::Adaptive)};
+
+  SECTION("Entities Are Created With Their Components All At Once") {
+    // Some indices to hand out again, in no order, before the new ones.
+    std::vector<Entity> gone;
+    for (size_t i = 0; i < 100; ++i) {
+      gone.push_back(world.create());
+      world.emplace<Position>(gone.back(), 9.0f, 9.0f);
+    }
+    for (size_t i = 0; i < gone.size(); i += 3) {
+      REQUIRE(world.destroy(gone[i]));
+    }
+
+    // Enough for the column to move to huge pages where it does that.
+    const size_t count = sc::ecs2::HUGE_PAGE_COLUMN_BYTES / sizeof(Position) + 3 * PAGE_SIZE + 17;
+    std::vector<Entity> entities(count);
+    world.create(entities, Position{1.0f, 2.0f}, Tag{}, Player{7});
+
+    std::vector<Entity> sorted = entities;
+    std::ranges::sort(sorted);
+    REQUIRE(std::ranges::adjacent_find(sorted) == sorted.end());
+    size_t right = 0;
+    for (const Entity entity : entities) {
+      right += world.valid(entity) && world.contains<Tag>(entity) && world.get<const Position>(entity).x == 1.0f &&
+               world.get<const Position>(entity).y == 2.0f && world.get<const Player>(entity).number == 7;
+    }
+    REQUIRE(right == count);
+    for (size_t i = 0; i < gone.size(); ++i) {
+      REQUIRE(world.valid(gone[i]) == (i % 3 != 0));
+    }
+
+    size_t positions = 0;
+    world.each<const Position>([&](const Position &) { ++positions; });
+    REQUIRE(positions == count + gone.size() - (gone.size() + 2) / 3);
+    size_t tagged = 0;
+    world.each<const Tag, const Player>([&](const Player &) { ++tagged; });
+    REQUIRE(tagged == count);
+    REQUIRE(world.column<Position>().hugePages() == (world.pages() == Pages::Huge || world.pages() == Pages::Adaptive));
+
+    // An entity of the batch is one like any other.
+    REQUIRE(world.erase<Position>(entities[count / 2]));
+    REQUIRE(world.destroy(entities.front()));
+    REQUIRE_FALSE(world.valid(entities.front()));
+
+    world.create(std::span<Entity>{});
+  }
+
+  SECTION("A Column Moves To Huge Pages Once It Is Large") {
+    // As many entities as it takes, and their components are still there.
+    const size_t count = sc::ecs2::HUGE_PAGE_COLUMN_BYTES / sizeof(Position) + PAGE_SIZE;
+    std::vector<Entity> entities;
+    const bool small = world.pages() == Pages::Small || world.pages() == Pages::BySize;
+    for (size_t i = 0; i < count; ++i) {
+      entities.push_back(world.create());
+      world.emplace<Position>(entities.back(), static_cast<float>(i), 2.0f);
+      if (i == 0) {
+        REQUIRE(world.column<Position>().hugePages() == (world.pages() == Pages::Huge));
+      }
+    }
+    REQUIRE(world.column<Position>().hugePages() == !small);
+    size_t kept = 0;
+    for (size_t i = 0; i < count; ++i) {
+      kept += world.get<const Position>(entities[i]).x == static_cast<float>(i);
+    }
+    REQUIRE(kept == count);
+    // A rare component stays with small pages.
+    REQUIRE_FALSE(world.column<Player>().hugePages());
+  }
+
+  SECTION("The Columns Are Backed With The Pages Of The World") {
+    REQUIRE(world.column<Position>().hugePages() == (world.pages() == Pages::Huge));
+    // Large enough for huge pages wherever the size decides.
+    struct Large {
+      std::byte bytes[sc::ecs2::HUGE_PAGE_COMPONENT_BYTES];
+    };
+    static_assert(sizeof(Position) < sc::ecs2::HUGE_PAGE_COMPONENT_BYTES);
+    REQUIRE(world.column<Large>().hugePages() == (world.pages() == Pages::Huge || world.pages() == Pages::BySize));
+    // A rare component gets small pages either way.
+    REQUIRE_FALSE(world.column<Player>().hugePages());
+  }
+
+  SECTION("Threads Add And Remove Components Of Entities In The Same Page") {
+    std::vector<Entity> entities(PAGE_SIZE);
+    for (Entity &entity : entities) {
+      entity = world.create();
+    }
+    // Every chunk has entities all over the page, next to those of the others.
+    constexpr size_t chunks = 16;
+    std::atomic<size_t> wrong = 0;
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        for (int round = 0; round < 20; ++round) {
+          for (size_t i = chunk; i < entities.size(); i += chunks) {
+            world.emplace<Position>(entities[i], static_cast<float>(i), 1.0f);
+            world.emplace<Tag>(entities[i]);
+          }
+          for (size_t i = chunk; i < entities.size(); i += chunks) {
+            wrong += !world.contains<Tag>(entities[i]) || world.get<Position>(entities[i]).x != static_cast<float>(i);
+            if (round != 19) {
+              world.erase<Position>(entities[i]);
+              world.erase<Tag>(entities[i]);
+            }
+          }
+        }
+      }
+    });
+    REQUIRE(wrong == 0);
+    REQUIRE(world.column<Position>().page(0).count == PAGE_SIZE);
+    REQUIRE(world.column<Tag>().page(0).count == PAGE_SIZE);
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.get<Position>(entities[i]).x == static_cast<float>(i));
+    }
+  }
+
+  SECTION("Threads Give The Same Entities A Component And Take It Away") {
+    const auto alive = std::make_shared<int>(0);
+    // In two pages, the second one with few of them.
+    std::vector<Entity> entities(PAGE_SIZE + 50);
+    for (Entity &entity : entities) {
+      entity = world.create();
+    }
+    // Some have it already.
+    for (size_t i = 0; i < entities.size(); i += 7) {
+      world.emplace<Named>(entities[i], "before", alive);
+      world.emplace<Tag>(entities[i]);
+    }
+    const size_t before = (entities.size() + 6) / 7;
+
+    constexpr size_t chunks = 16;
+    std::atomic<size_t> added = 0;
+    std::atomic<size_t> tagged = 0;
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        // Every chunk goes for every entity.
+        for (const Entity entity : entities) {
+          added += world.tryEmplace<Named>(entity, std::to_string(chunk), alive);
+          tagged += world.tryEmplace<Tag>(entity);
+        }
+      }
+    });
+    // Each of them once, and none twice.
+    REQUIRE(added == entities.size() - before);
+    REQUIRE(tagged == entities.size() - before);
+    REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size()));
+    REQUIRE(world.column<Named>().page(0).count == PAGE_SIZE);
+    REQUIRE(world.column<Named>().page(1).count == 50);
+    REQUIRE(world.column<Tag>().page(1).count == 50);
+    for (size_t i = 0; i < entities.size(); ++i) {
+      const std::string &name = world.get<Named>(entities[i]).name;
+      REQUIRE((i % 7 == 0 ? name == "before" : std::stoul(name) < chunks));
+    }
+    REQUIRE_FALSE(world.tryEmplace<Named>(entities[1], "late", alive));
+
+    std::atomic<size_t> removed = 0;
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        for (const Entity entity : entities) {
+          removed += world.erase<Named>(entity);
+          if (chunk % 2 == 0) {
+            world.erase<Tag>(entity);
+          } else {
+            world.tryEmplace<Tag>(entity);
+          }
+        }
+      }
+    });
+    REQUIRE(removed == entities.size());
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE(world.column<Named>().pages() == 0);
+    // Counted as many as there are.
+    size_t tags = 0;
+    world.each<const Tag>([&](Entity) { ++tags; });
+    REQUIRE(world.column<Tag>().page(0).count + world.column<Tag>().page(1).count == tags);
+    for (const Entity entity : entities) {
+      world.erase<Tag>(entity);
+    }
+    REQUIRE(world.column<Tag>().pages() == 0);
+
+    // Coming and going at the same time, also one that owns something: made
+    // as often as destroyed, apart from the ones that are left.
+    std::atomic<size_t> made = 0;
+    std::atomic<size_t> gone = 0;
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        for (int round = 0; round < 4; ++round) {
+          for (const Entity entity : entities) {
+            if ((chunk + static_cast<size_t>(round)) % 2 == 0) {
+              made += world.tryEmplace<Named>(entity, std::string(100, 'm'), alive);
+            } else {
+              gone += world.erase<Named>(entity);
+            }
+          }
+        }
+      }
+    });
+    size_t named = 0;
+    world.each<const Named>([&](const Named &component) { named += component.name == std::string(100, 'm'); });
+    REQUIRE(made - gone == named);
+    REQUIRE(alive.use_count() == 1 + static_cast<long>(named));
+    REQUIRE(world.column<Named>().page(0).count + world.column<Named>().page(1).count == named);
+    for (const Entity entity : entities) {
+      world.erase<Named>(entity);
+    }
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE(world.column<Named>().pages() == 0);
+
+    // One that cannot be made is not there for the next to try.
+    REQUIRE_THROWS_AS(world.tryEmplace<Fragile>(entities[0], "no", true), std::runtime_error);
+    REQUIRE_FALSE(world.contains<Fragile>(entities[0]));
+    REQUIRE(world.column<Fragile>().pages() == 0);
+    REQUIRE(world.tryEmplace<Fragile>(entities[0], "yes", false));
+    REQUIRE(world.get<Fragile>(entities[0]).text == "yes");
+  }
+
+  SECTION("Threads Add The First And Remove The Last Component Of A Page") {
+    // So few that the page gets its memory and gives it back all the time.
+    constexpr size_t chunks = 8;
+    std::vector<Entity> entities(chunks);
+    for (Entity &entity : entities) {
+      entity = world.create();
+    }
+    std::atomic<size_t> wrong = 0;
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        for (int round = 1; round <= 5000; ++round) {
+          world.emplace<Position>(entities[chunk], static_cast<float>(round), 1.0f);
+          // Not taken away with the memory another thread gave back.
+          wrong += world.get<Position>(entities[chunk]).x != static_cast<float>(round);
+          wrong += !world.erase<Position>(entities[chunk]);
+        }
+      }
+    });
+    REQUIRE(wrong == 0);
+    REQUIRE(world.column<Position>().pages() == 0);
+    REQUIRE_FALSE(world.column<Position>().page(0));
+
+    world.emplace<Position>(entities[0], 3.0f, 4.0f);
+    REQUIRE(world.column<Position>().pages() == 1);
+    REQUIRE(world.get<Position>(entities[0]).y == 4.0f);
+  }
+
+  SECTION("Components That Own Something Give It Back") {
+    const auto alive = std::make_shared<int>(0);
+    // Too long to be kept in the string itself.
+    const std::string name(100, 'n');
+    {
+      World owning{world.pages()};
+      const Entity first = owning.create();
+      owning.emplace<Named>(first, name, alive);
+      REQUIRE(owning.get<Named>(first).name == name);
+      REQUIRE(alive.use_count() == 2);
+      REQUIRE(owning.erase<Named>(first));
+      REQUIRE(alive.use_count() == 1);
+      REQUIRE(owning.column<Named>().pages() == 0);
+
+      owning.emplace<Named>(first, name, alive);
+      owning.emplace<Owner>(first, std::make_unique<int>(7));
+      REQUIRE(*owning.get<Owner>(first).value == 7);
+      REQUIRE(owning.destroy(first));
+      REQUIRE(alive.use_count() == 1);
+
+      // In several pages, and in the one of the rare entities.
+      std::vector<Entity> entities;
+      for (size_t i = 0; i < PAGE_SIZE + 500; ++i) {
+        entities.push_back(owning.create());
+        owning.emplace<Named>(entities.back(), name + std::to_string(i), alive);
+      }
+      const Entity special = owning.create(sc::ecs2::rare);
+      owning.emplace<Named>(special, name, alive);
+      REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size()) + 1);
+      for (size_t i = 0; i < entities.size(); i += 2) {
+        REQUIRE(owning.destroy(entities[i]));
+      }
+      REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size() / 2) + 1);
+      REQUIRE(owning.get<Named>(entities[PAGE_SIZE + 1]).name == name + std::to_string(PAGE_SIZE + 1));
+
+      // Every entity gets a copy of its own.
+      std::vector<Entity> batch(PAGE_SIZE + 10);
+      owning.create(std::span<Entity>{batch}, Named{.name = name, .alive = alive});
+      REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size() / 2) + 1 + static_cast<long>(batch.size()));
+      REQUIRE(owning.get<Named>(batch.back()).name == name);
+
+      std::atomic<size_t> found = 0;
+      owning.parallelEach<const Named>([&](const Named &named) { found += named.name.size() >= 100; }, 1);
+      REQUIRE(found == entities.size() / 2 + 1 + batch.size());
+    }
+    // Whatever was left went with the world.
+    REQUIRE(alive.use_count() == 1);
+  }
+
+  SECTION("A Component That Cannot Be Made Is Not There") {
+    const Entity entity = world.create();
+    REQUIRE_THROWS_AS(world.emplace<Fragile>(entity, std::string(100, 'f'), true), std::runtime_error);
+    REQUIRE_FALSE(world.contains<Fragile>(entity));
+    REQUIRE(world.column<Fragile>().pages() == 0);
+    REQUIRE_FALSE(world.column<Fragile>().page(0));
+
+    // Next to one that is there.
+    const Entity other = world.create();
+    world.emplace<Fragile>(other, std::string(100, 'o'), false);
+    REQUIRE_THROWS_AS(world.emplace<Fragile>(entity, std::string(100, 'f'), true), std::runtime_error);
+    REQUIRE_FALSE(world.contains<Fragile>(entity));
+    REQUIRE(world.column<Fragile>().page(0).count == 1);
+    REQUIRE(world.get<Fragile>(other).text == std::string(100, 'o'));
+
+    world.emplace<Fragile>(entity, "made", false);
+    REQUIRE(world.get<Fragile>(entity).text == "made");
+    REQUIRE(world.erase<Fragile>(entity));
+    REQUIRE(world.erase<Fragile>(other));
+    REQUIRE(world.column<Fragile>().pages() == 0);
+  }
 
   SECTION("Added, Read, Changed And Removed") {
     const Entity entity = world.create();
@@ -347,7 +657,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
 TEST_CASE("World Loops", "[ecs2][world][threading]") {
   sc::threading::init();
-  World world;
+  World world{GENERATE(Pages::Huge, Pages::Small, Pages::BySize, Pages::Adaptive)};
 
   std::vector<Entity> entities;
   for (size_t i = 0; i < 3 * PAGE_SIZE + 200; ++i) {
@@ -453,7 +763,7 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
   std::mt19937 random{seed};
   const auto below = [&](size_t bound) { return std::uniform_int_distribution<size_t>{0, bound - 1}(random); };
 
-  World world;
+  World world{GENERATE(Pages::Huge, Pages::Small, Pages::BySize, Pages::Adaptive)};
   Model model;
   std::vector<Entity> alive;
 
