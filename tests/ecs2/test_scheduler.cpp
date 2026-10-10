@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <cstddef>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "sc/ecs2/scheduler.hpp"
@@ -38,6 +40,30 @@ namespace {
 
   struct Spawner {
     int count{0};
+  };
+
+  struct Target {
+    int value{0};
+  };
+
+  // Owns something, which shows whether every one that was made is gone.
+  struct Named {
+    std::string name;
+    std::shared_ptr<int> alive;
+  };
+
+  // Cannot be given to an entity while told so.
+  struct Fragile {
+    static inline bool breaks = false;
+
+    int value{0};
+
+    explicit Fragile(int number) : value(number) {}
+    Fragile(Fragile &&other) : value(other.value) {
+      if (breaks) {
+        throw std::runtime_error("broken");
+      }
+    }
   };
 
   using Stages = std::vector<std::vector<size_t>>;
@@ -400,6 +426,139 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     scheduler.run(world);
     REQUIRE(seen == targets + 1);
     REQUIRE_FALSE(world.contains<Spawner>(entities[0]));
+  }
+
+  SECTION("A Component Is Added Once The Stage Is Over") {
+    constexpr size_t targets = 10;
+    std::atomic<size_t> seen = 0;
+    scheduler.addParallel([&](Entity entity, Commands commands, const Position &pos) {
+      commands.emplace<Spawner>(entity, static_cast<int>(pos.x));
+      commands.emplace<Frozen>(entity);
+      // One that many on other threads want to give as well.
+      commands.emplace<Target>(entities[static_cast<size_t>(pos.x) % targets], 7);
+    });
+    // Next to it, so no entity has any of them yet.
+    scheduler.addParallel<Query<const Position, Exclude<Spawner, Frozen, Target>>>([&](const Position &) { ++seen; });
+    REQUIRE(scheduler.stages() == Stages{{0, 1}});
+    scheduler.run(world);
+
+    REQUIRE(seen == entities.size());
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.get<Spawner>(entities[i]).count == static_cast<int>(i));
+      REQUIRE(world.contains<Frozen>(entities[i]));
+      REQUIRE(world.contains<Target>(entities[i]) == (i < targets));
+    }
+    REQUIRE(world.get<Target>(entities[0]).value == 7);
+
+    // An entity that has the component keeps the one it has.
+    world.get<Spawner>(entities[0]).count = -1;
+    seen = 0;
+    scheduler.run(world);
+    REQUIRE(seen == 0);
+    REQUIRE(world.get<Spawner>(entities[0]).count == -1);
+  }
+
+  SECTION("Recorded Components Are Added And Removed In Their Order") {
+    world.emplace<Spawner>(entities[0], 1);
+    world.emplace<Spawner>(entities[1], 1);
+    const Entity gone = entities[2];
+    Entity made = sc::ecs2::null;
+    scheduler.add([&](Commands commands) {
+      // Replaced, gone again, and of an entity that is there right away.
+      commands.erase<Spawner>(entities[0]);
+      commands.emplace<Spawner>(entities[0], 2);
+      commands.emplace<Target>(entities[1], 3);
+      commands.erase<Target>(entities[1]);
+      made = commands.create();
+      commands.emplace<Spawner>(made, 4);
+      // Nothing for an entity that is no more, or about to be.
+      commands.emplace<Spawner>(gone, 5);
+      commands.destroy(entities[3]);
+      commands.emplace<Spawner>(entities[3], 6);
+    });
+    world.destroy(gone);
+    scheduler.run(world);
+
+    REQUIRE(world.get<Spawner>(entities[0]).count == 2);
+    REQUIRE_FALSE(world.contains<Target>(entities[1]));
+    REQUIRE(world.valid(made));
+    REQUIRE(world.get<Spawner>(made).count == 4);
+    REQUIRE_FALSE(world.valid(entities[3]));
+    // Not left for whoever gets the index next.
+    const Entity next = world.create();
+    const Entity other = world.create();
+    REQUIRE_FALSE(world.contains<Spawner>(next));
+    REQUIRE_FALSE(world.contains<Spawner>(other));
+  }
+
+  SECTION("A Recorded Component That Is Not Given Is Gone") {
+    const auto alive = std::make_shared<int>(0);
+    // Too long to be kept in the string itself.
+    const std::string name(100, 'n');
+    bool fails = false;
+    scheduler.addParallel([&](Entity entity, Commands commands, const Position &) {
+      commands.emplace<Named>(entity, name, alive);
+      // The entity has one by then.
+      commands.emplace<Named>(entity, name, alive);
+    });
+    scheduler.add([&](Query<const Health>) {
+      if (fails) {
+        throw std::runtime_error("failed");
+      }
+    });
+    REQUIRE(scheduler.stages() == Stages{{0, 1}});
+    scheduler.run(world);
+    REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size()));
+    for (const Entity entity : entities) {
+      REQUIRE(world.get<Named>(entity).name == name);
+    }
+
+    // Many more than fit into the memory kept for them, none of them given.
+    for (int run = 0; run < 3; ++run) {
+      scheduler.run(world);
+      REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size()));
+    }
+
+    // Nor are the ones of a stage that failed.
+    for (const Entity entity : entities) {
+      world.erase<Named>(entity);
+    }
+    REQUIRE(alive.use_count() == 1);
+    fails = true;
+    REQUIRE_THROWS_AS(scheduler.run(world), std::runtime_error);
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE_FALSE(world.contains<Named>(entities[0]));
+  }
+
+  SECTION("A Recorded Component That Cannot Be Made Ends The Run") {
+    const auto alive = std::make_shared<int>(0);
+    int ran = 0;
+    scheduler.add([&](Commands commands) {
+      commands.emplace<Spawner>(entities[0], 1);
+      commands.emplace<Fragile>(entities[0], 2);
+      commands.emplace<Named>(entities[0], "after", alive);
+      commands.destroy(entities[1]);
+    });
+    scheduler.add([&](World &) { ++ran; });
+
+    Fragile::breaks = true;
+    REQUIRE_THROWS_AS(scheduler.run(world), std::runtime_error);
+    Fragile::breaks = false;
+    // What came before it is done, the rest is dropped.
+    REQUIRE(ran == 0);
+    REQUIRE(world.get<Spawner>(entities[0]).count == 1);
+    REQUIRE_FALSE(world.contains<Fragile>(entities[0]));
+    REQUIRE_FALSE(world.contains<Named>(entities[0]));
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE(world.valid(entities[1]));
+
+    // And nothing of it is left over for the next run.
+    world.erase<Spawner>(entities[0]);
+    scheduler.run(world);
+    REQUIRE(ran == 1);
+    REQUIRE(world.get<Fragile>(entities[0]).value == 2);
+    REQUIRE(alive.use_count() == 2);
+    REQUIRE_FALSE(world.valid(entities[1]));
   }
 
   SECTION("A System That Takes The World May Do Anything") {

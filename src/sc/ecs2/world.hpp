@@ -107,6 +107,10 @@ namespace sc::ecs2 {
   // one of them does it. The value of a component is another matter: it is
   // written by one thread, or read by any number. destroy must have nothing
   // running next to it.
+  //
+  // A const world is only read: valid, contains, get and loops over const
+  // components. None of them makes the column of a component the world never
+  // had.
   class World {
   public:
     template <typename Component> using ColumnOf = internal::Column<std::remove_const_t<Component>>;
@@ -211,15 +215,23 @@ namespace sc::ecs2 {
 
     // Any entity may be asked for: one that does not exist (any more) has no
     // components, whatever the entity has that got its index.
-    template <typename Component> [[nodiscard]] bool contains(Entity entity) {
+    template <typename Component> [[nodiscard]] bool contains(Entity entity) const {
+      const ColumnOf<Component> *const found = findColumn<Component>();
       // In this order: mostly the answer is no, without a look at the entity.
-      return column<Component>().contains(indexOf(entity)) && valid(entity);
+      return found != nullptr && found->contains(indexOf(entity)) && valid(entity);
     }
 
     // The entity must exist and have the component.
     template <typename Component> [[nodiscard]] Component &get(Entity entity) {
       assert(valid(entity));
       return column<Component>().get(indexOf(entity));
+    }
+
+    template <typename Component> [[nodiscard]] const std::remove_const_t<Component> &get(Entity entity) const {
+      assert(valid(entity));
+      const ColumnOf<Component> *const found = findColumn<Component>();
+      assert(found != nullptr);
+      return found->get(indexOf(entity));
     }
 
     // The column of a component, which is made on first use.
@@ -233,6 +245,16 @@ namespace sc::ecs2 {
         return static_cast<internal::Column<Type> &>(*found);
       }
       return makeColumn<Type>(slot);
+    }
+
+    // The column of a component, null as long as nothing made it: no entity
+    // of the world ever had the component then.
+    template <typename Component> [[nodiscard]] const ColumnOf<Component> *findColumn() const {
+      const size_t index = internal::componentIndex<std::remove_const_t<Component>>();
+      const std::atomic<internal::ColumnBase *> &slot = index < internal::NEAR_COMPONENT_TYPES
+                                                            ? m_columns[index]
+                                                            : m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
+      return static_cast<const ColumnOf<Component> *>(slot.load(std::memory_order_acquire));
     }
 
     // Calls the function with the components of every entity that has all of
@@ -252,7 +274,22 @@ namespace sc::ecs2 {
     template <typename... Terms, typename Function> void each(Function &&function) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
       const PageRange pages = pageRange();
-      eachInRange(typename Lists::GetList{}, typename Lists::ExcludedList{}, pages, 0, pages.count(), function);
+      eachInRange(typename Lists::GetList{}, typename Lists::ExcludedList{}, columnsOf(typename Lists::GetList{}),
+                  findColumns(typename Lists::ExcludedList{}), pages, 0, pages.count(), function);
+    }
+
+    // The same for a world that is only read: every component is a const one.
+    template <typename... Terms, typename Function> void each(Function &&function) const {
+      using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
+      assertOnlyRead(typename Lists::GetList{});
+      const auto columns = findColumns(typename Lists::GetList{});
+      if (!allFound(columns)) {
+        // No entity ever had one of the components.
+        return;
+      }
+      const PageRange pages = pageRange();
+      eachInRange(typename Lists::GetList{}, typename Lists::ExcludedList{}, columns,
+                  findColumns(typename Lists::ExcludedList{}), pages, 0, pages.count(), function);
     }
 
     // The same on the calling thread and on every pool thread that has nothing
@@ -264,16 +301,20 @@ namespace sc::ecs2 {
     // component just then: see Commands::erase of the scheduler.
     template <typename... Terms, typename Function> void parallelEach(Function &&function, size_t grain = 1) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
-      const PageRange pages = pageRange();
-      // A thread for every so many entities: a page with few entities in it
-      // is not worth waking one up.
-      const size_t helpers =
-          countUpTo(typename Lists::GetList{}, pages, threading::thread_slots() * ENTITIES_PER_THREAD) /
-          ENTITIES_PER_THREAD;
-      threading::parallelFor(pages.count(), grain, helpers, [&](size_t first, size_t last) {
-        eachInRange(typename Lists::GetList{}, typename Lists::ExcludedList{}, pages, static_cast<uint32_t>(first),
-                    static_cast<uint32_t>(last), function);
-      });
+      parallelEachOf(typename Lists::GetList{}, typename Lists::ExcludedList{}, columnsOf(typename Lists::GetList{}),
+                     findColumns(typename Lists::ExcludedList{}), function, grain);
+    }
+
+    // The same for a world that is only read: every component is a const one.
+    template <typename... Terms, typename Function> void parallelEach(Function &&function, size_t grain = 1) const {
+      using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
+      assertOnlyRead(typename Lists::GetList{});
+      const auto columns = findColumns(typename Lists::GetList{});
+      if (!allFound(columns)) {
+        return;
+      }
+      parallelEachOf(typename Lists::GetList{}, typename Lists::ExcludedList{}, columns,
+                     findColumns(typename Lists::ExcludedList{}), function, grain);
     }
 
     // No common entity is in a page with this number or a higher one. The
@@ -303,22 +344,61 @@ namespace sc::ecs2 {
       return {.common = pages.common, .rare = pages.rare};
     }
 
+    // The columns of the components a loop names, as it uses them: a loop
+    // only looks into a column, what it writes are the components.
+    template <typename... Components> using Columns = std::tuple<const ColumnOf<Components> *...>;
+
+    template <typename... Components> [[nodiscard]] Columns<Components...> columnsOf(internal::List<Components...>) {
+      return Columns<Components...>{&column<Components>()...};
+    }
+
+    // Null for the ones nothing made yet.
+    template <typename... Components>
+    [[nodiscard]] Columns<Components...> findColumns(internal::List<Components...>) const {
+      return Columns<Components...>{findColumn<Components>()...};
+    }
+
+    template <typename... Each> [[nodiscard]] static bool allFound(const std::tuple<Each...> &columns) {
+      return std::apply([](const auto *...each) { return ((each != nullptr) && ...); }, columns);
+    }
+
+    template <typename... Get> static void assertOnlyRead(internal::List<Get...>) {
+      static_assert((std::is_const_v<Get> && ...), "a const world is only read: its loops name const components");
+    }
+
+    template <typename... Get, typename... Excluded, typename Function>
+    void parallelEachOf(internal::List<Get...> get, internal::List<Excluded...> without,
+                        const Columns<Get...> &columns, const Columns<Excluded...> &excluded, Function &function,
+                        size_t grain) const {
+      const PageRange pages = pageRange();
+      // A thread for every so many entities: a page with few entities in it
+      // is not worth waking one up.
+      const size_t helpers =
+          countUpTo(columns, pages, threading::thread_slots() * ENTITIES_PER_THREAD) / ENTITIES_PER_THREAD;
+      threading::parallelFor(pages.count(), grain, helpers, [&](size_t first, size_t last) {
+        eachInRange(get, without, columns, excluded, pages, static_cast<uint32_t>(first), static_cast<uint32_t>(last),
+                    function);
+      });
+    }
+
     // eachInPages for a part of the row of pages.
-    template <typename Get, typename Excluded, typename Function>
-    void eachInRange(Get get, Excluded excluded, PageRange pages, uint32_t first, uint32_t last, Function &function) {
+    template <typename... Get, typename... Excluded, typename Function>
+    void eachInRange(internal::List<Get...> get, internal::List<Excluded...> without, const Columns<Get...> &columns,
+                     const Columns<Excluded...> &excluded, PageRange pages, uint32_t first, uint32_t last,
+                     Function &function) const {
       if (first < pages.common) {
-        eachInPages(get, excluded, first, std::min(last, pages.common), function);
+        eachInPages(get, without, columns, excluded, first, std::min(last, pages.common), function);
       }
       if (last > pages.common) {
-        eachInPages(get, excluded, pages.page(std::max(first, pages.common)), pages.rareBegin() + (last - pages.common),
-                    function);
+        eachInPages(get, without, columns, excluded, pages.page(std::max(first, pages.common)),
+                    pages.rareBegin() + (last - pages.common), function);
       }
     }
 
     // How many entities of the pages have all of the components, at most.
     // Stops counting at the limit.
-    template <typename... Get> size_t countUpTo(internal::List<Get...>, PageRange pages, size_t limit) {
-      const std::tuple columns{&column<Get>()...};
+    template <typename... Each>
+    static size_t countUpTo(const std::tuple<Each...> &columns, PageRange pages, size_t limit) {
       size_t count = 0;
       for (uint32_t place = 0; place < pages.count() && count < limit; ++place) {
         const uint32_t number = pages.page(place);
@@ -354,21 +434,21 @@ namespace sc::ecs2 {
       }
     }
 
+    // An excluded component the world never had is one no entity has.
     template <typename... Get, typename... Excluded, typename Function>
-    void eachInPages(internal::List<Get...>, internal::List<Excluded...>, uint32_t firstPage, uint32_t lastPage,
-                     Function &function) {
+    void eachInPages(internal::List<Get...>, internal::List<Excluded...>, const Columns<Get...> &columns,
+                     const Columns<Excluded...> &excluded, uint32_t firstPage, uint32_t lastPage,
+                     Function &function) const {
       static_assert(sizeof...(Get) != 0, "a loop needs a component to go through");
       [&]<size_t... G, size_t... X>(std::index_sequence<G...>, std::index_sequence<X...>) {
-        const std::tuple columns{&column<Get>()...};
-        const std::tuple excluded{&column<Excluded>()...};
-
         for (uint32_t number = firstPage; number < lastPage; ++number) {
           const std::tuple pages{std::get<G>(columns)->page(number)...};
           if ((!std::get<G>(pages) || ...)) {
             // No entity of this page has all of them.
             continue;
           }
-          const std::tuple without{std::get<X>(excluded)->page(number)...};
+          const std::tuple without{(std::get<X>(excluded) != nullptr ? std::get<X>(excluded)->page(number)
+                                                                     : typename ColumnOf<Excluded>::Page{})...};
           const std::tuple values{valuesOf<Get>(std::get<G>(pages))...};
           const uint32_t base = number << PAGE_BITS;
 

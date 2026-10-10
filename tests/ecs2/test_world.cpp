@@ -605,6 +605,30 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(world.valid(entity));
   }
 
+  SECTION("A World That Is Only Read") {
+    struct Unused {
+      int value{0};
+    };
+    const Entity entity = world.create();
+    world.emplace<Position>(entity, 1.0f, 2.0f);
+    world.emplace<Tag>(entity);
+
+    const World &read = world;
+    REQUIRE(read.valid(entity));
+    REQUIRE(read.contains<Position>(entity));
+    REQUIRE(read.contains<const Tag>(entity));
+    REQUIRE(read.get<Position>(entity).y == 2.0f);
+    REQUIRE(&read.get<const Position>(entity) == &world.get<Position>(entity));
+    STATIC_REQUIRE(std::is_same_v<decltype(read.get<Position>(entity)), const Position &>);
+    STATIC_REQUIRE(std::is_same_v<decltype(read.get<const Position>(entity)), const Position &>);
+
+    // Asking for a component makes no column for it, in no world.
+    REQUIRE_FALSE(read.contains<Unused>(entity));
+    REQUIRE_FALSE(world.contains<Unused>(entity));
+    REQUIRE(read.findColumn<Unused>() == nullptr);
+    REQUIRE(read.findColumn<Position>() == &world.column<Position>());
+  }
+
   SECTION("A Component Stays Where It Is") {
     std::vector<Entity> entities;
     for (size_t i = 0; i < 3 * PAGE_SIZE; ++i) {
@@ -691,6 +715,33 @@ TEST_CASE("World Loops", "[ecs2][world][threading]") {
           (i % 3 == 0 ? 1.0f : 0.0f) + (i % 5 == 0 ? 10.0f : 0.0f) + (i % 3 != 0 && i % 5 != 0 ? 100.0f : 0.0f);
       REQUIRE(world.get<Position>(entities[i]).y == expected);
     }
+  }
+
+  SECTION("A World That Is Only Read Is Gone Through As Well") {
+    struct Unused {
+      int value{0};
+    };
+    const World &read = world;
+    size_t moving = 0;
+    read.each<const Position, const Velocity>([&](const Position &, const Velocity &vel) { moving += vel.dy == 2.0f; });
+    REQUIRE(moving == entities.size() - (entities.size() + 2) / 3);
+
+    std::atomic<size_t> still = 0;
+    read.parallelEach<const Position, Exclude<Velocity>>([&](Entity entity, const Position &pos) {
+      still += read.valid(entity) && static_cast<size_t>(pos.x) % 3 == 0;
+    });
+    REQUIRE(still == (entities.size() + 2) / 3);
+
+    // A component the world never had: no entity has it, and none is kept
+    // out by it. No loop makes its column.
+    size_t found = 0;
+    read.each<const Position, const Unused>([&](const Position &, const Unused &) { ++found; });
+    read.parallelEach<const Unused>([&](const Unused &) { ++found; });
+    REQUIRE(found == 0);
+    read.each<const Position, Exclude<Unused>>([&](const Position &) { ++found; });
+    world.each<Position, Exclude<Unused>>([&](Position &) { ++found; });
+    REQUIRE(found == 2 * entities.size());
+    REQUIRE(read.findColumn<Unused>() == nullptr);
   }
 
   SECTION("Rare Entities And Rare Components Are Gone Through Like The Others") {

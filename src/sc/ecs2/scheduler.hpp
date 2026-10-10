@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <exception>
 #include <functional>
+#include <memory>
+#include <new>
 #include <span>
 #include <string>
 #include <tuple>
@@ -20,23 +22,157 @@
 
 namespace sc::ecs2::internal {
 
-  // What one thread wants done once its stage is over. On cache lines of its
-  // own, the threads next to it write theirs at the same time.
-  struct alignas(64) CommandList {
-    // A component to remove: the entity and the column of the component.
-    struct Erased {
-      Entity entity;
-      ColumnBase *column;
-    };
-
-    std::vector<Erased> erased;
-    // The entities to destroy.
-    std::vector<Entity> destroyed;
+  // Memory for the components a thread wants added later. What is made in it
+  // stays where it is until clear, which keeps the memory for the next time.
+  class ValueStore {
+  public:
+    [[nodiscard]] void *allocate(size_t bytes, size_t alignment) {
+      if (!m_chunks.empty()) {
+        if (void *const found = place(bytes, alignment)) {
+          return found;
+        }
+      }
+      // Large enough wherever the chunk starts.
+      const size_t size = std::max(CHUNK_BYTES, bytes + alignment);
+      m_chunks.push_back({.memory = std::make_unique_for_overwrite<std::byte[]>(size), .size = size});
+      m_used = 0;
+      return place(bytes, alignment);
+    }
 
     void clear() noexcept {
-      erased.clear();
-      destroyed.clear();
+      if (m_chunks.size() > 1) {
+        // One is enough to keep, and the last one is never the smallest.
+        m_chunks.front() = std::move(m_chunks.back());
+        m_chunks.resize(1);
+      }
+      m_used = 0;
     }
+
+  private:
+    static constexpr size_t CHUNK_BYTES = size_t{1} << 16;
+
+    struct Chunk {
+      std::unique_ptr<std::byte[]> memory;
+      size_t size;
+    };
+
+    // In the last chunk, null if it has no room for it.
+    [[nodiscard]] void *place(size_t bytes, size_t alignment) noexcept {
+      const Chunk &chunk = m_chunks.back();
+      void *address = chunk.memory.get() + m_used;
+      size_t space = chunk.size - m_used;
+      if (std::align(alignment, bytes, address, space) == nullptr) {
+        return nullptr;
+      }
+      m_used = chunk.size - space + bytes;
+      return address;
+    }
+
+    std::vector<Chunk> m_chunks;
+    // Of the last chunk.
+    size_t m_used = 0;
+  };
+
+  // Gives the index a component made from the recorded value unless it has
+  // one, or only drops the value. The value is gone afterwards either way,
+  // also if making the component throws. Null for a component without
+  // members.
+  template <typename T> void finishEmplace(ColumnBase &column, uint32_t index, void *value, bool give) {
+    auto &typed = static_cast<Column<T> &>(column);
+    if constexpr (Column<T>::HAS_VALUE) {
+      const auto drop = [](T *made) { std::destroy_at(made); };
+      const std::unique_ptr<T, decltype(drop)> made{static_cast<T *>(value), drop};
+      if (give) {
+        typed.tryEmplace(index, std::move(*made));
+      }
+    } else if (give) {
+      typed.tryEmplace(index);
+    }
+  }
+
+  // What one thread wants done once its stage is over. On cache lines of its
+  // own, the threads next to it write theirs at the same time.
+  class alignas(64) CommandList {
+  public:
+    CommandList() = default;
+    ~CommandList() { clear(); }
+
+    CommandList(CommandList &&) = delete;
+    CommandList &operator=(CommandList &&) = delete;
+
+    void erase(Entity entity, ColumnBase &column) {
+      m_changes.push_back({.entity = entity, .column = &column, .emplace = nullptr, .value = nullptr});
+    }
+
+    template <typename T, typename... Args> void emplace(Entity entity, Column<T> &column, Args &&...args) {
+      // First, so that a value that was made is always one of a change.
+      m_changes.push_back({.entity = entity, .column = &column, .emplace = &finishEmplace<T>, .value = nullptr});
+      if constexpr (Column<T>::HAS_VALUE) {
+        try {
+          m_changes.back().value = ::new (m_values.allocate(sizeof(T), alignof(T))) T{std::forward<Args>(args)...};
+        } catch (...) {
+          m_changes.pop_back();
+          throw;
+        }
+      }
+    }
+
+    void destroy(Entity entity) { m_destroyed.push_back(entity); }
+
+    // Does what was recorded: the components in the order they were added and
+    // removed, then the entities. Nothing may be running next to it. If
+    // making a component throws, the rest is dropped.
+    void apply(World &world) {
+      for (; m_done < m_changes.size(); ++m_done) {
+        const Change change = m_changes[m_done];
+        // Not that of an entity that got the index since.
+        const bool valid = world.valid(change.entity);
+        if (change.emplace != nullptr) {
+          // Counted before: the value is gone after this, whatever happens.
+          ++m_done;
+          change.emplace(*change.column, indexOf(change.entity), change.value, valid);
+          --m_done;
+        } else if (valid) {
+          change.column->erase(indexOf(change.entity));
+        }
+      }
+      for (const Entity entity : m_destroyed) {
+        world.destroy(entity);
+      }
+      clear();
+    }
+
+    // Drops what was recorded and not done.
+    void clear() noexcept {
+      for (; m_done < m_changes.size(); ++m_done) {
+        const Change &change = m_changes[m_done];
+        if (change.emplace != nullptr) {
+          change.emplace(*change.column, indexOf(change.entity), change.value, false);
+        }
+      }
+      m_changes.clear();
+      m_done = 0;
+      m_values.clear();
+      m_destroyed.clear();
+    }
+
+  private:
+    // A component to add or remove: the entity and the column of the
+    // component.
+    struct Change {
+      Entity entity;
+      ColumnBase *column;
+      // finishEmplace of the component to add, null for one to remove.
+      void (*emplace)(ColumnBase &column, uint32_t index, void *value, bool give);
+      void *value;
+    };
+
+    std::vector<Change> m_changes;
+    // How many of them are done with.
+    size_t m_done = 0;
+    ValueStore m_values;
+    // The entities to destroy.
+    std::vector<Entity> m_destroyed;
   };
 
 } // namespace sc::ecs2::internal
@@ -151,17 +287,36 @@ namespace sc::ecs2 {
 
   // Records what a system cannot do right away: destroying entities, which
   // touches every component, and removing a component another thread may be
-  // using. It is done once all systems that run at the same time are done, so
-  // nothing an entity has goes away while they run. Safe to use from the
-  // function of a parallel loop, for any entity and from several threads for
-  // the same one.
+  // using. Adding a component is recorded for a system that would otherwise
+  // have to write it with Change, and keep the systems that use it waiting.
+  // It is done once all systems that run at the same time are done, so
+  // nothing an entity has goes away or turns up while they run. Safe to use
+  // from the function of a parallel loop, for any entity and from several
+  // threads for the same one.
+  //
+  // What one thread records for the components is done in that order, so a
+  // component that is erased and then emplaced is replaced. The threads come
+  // one after the other, in no particular order, and the entities are
+  // destroyed after the components of their thread.
   class Commands {
   public:
     Commands(World &world, std::span<internal::CommandList> lists) : m_world(&world), m_lists(lists) {}
 
+    // An entity to give components to with emplace. It exists right away,
+    // without components, so no loop comes across it before the stage is
+    // over. Safe to call from the function of a parallel loop, like
+    // World::create.
+    [[nodiscard]] Entity create() const { return m_world->create(); }
+
     // Does nothing if the entity does not exist any more by then.
-    void destroy(Entity entity) const {
-      m_lists[static_cast<size_t>(threading::thread_id())].destroyed.push_back(entity);
+    void destroy(Entity entity) const { list().destroy(entity); }
+
+    // Makes the component now, from the arguments, and gives it to the entity
+    // later. Does nothing if the entity does not exist any more by then or
+    // has the component already: the one that was made is dropped. Like
+    // erase, this does not count as writing the component.
+    template <typename Component, typename... Args> void emplace(Entity entity, Args &&...args) const {
+      list().emplace(entity, m_world->template column<Component>(), std::forward<Args>(args)...);
     }
 
     // Does nothing if the entity does not exist any more by then or does not
@@ -169,11 +324,15 @@ namespace sc::ecs2 {
     // the component: the systems that use it run at the same time and still
     // find it.
     template <typename Component> void erase(Entity entity) const {
-      m_lists[static_cast<size_t>(threading::thread_id())].erased.push_back(
-          {.entity = entity, .column = &m_world->template column<Component>()});
+      list().erase(entity, m_world->template column<Component>());
     }
 
   private:
+    // The one of the calling thread.
+    [[nodiscard]] internal::CommandList &list() const {
+      return m_lists[static_cast<size_t>(threading::thread_id())];
+    }
+
     World *m_world;
     // One for every sc::threading::thread_id.
     std::span<internal::CommandList> m_lists;
@@ -427,7 +586,9 @@ namespace sc::ecs2 {
     //
     // If a system throws, the systems running at the same time still finish,
     // what they recorded through Commands is not done, later systems are
-    // skipped and the first exception is rethrown.
+    // skipped and the first exception is rethrown. The same goes for a
+    // component of Commands::emplace that cannot be made: what the stage
+    // recorded and is not done yet is dropped.
     void run(World &world) {
       const std::vector<std::vector<size_t>> &stages = this->stages();
 
@@ -446,28 +607,20 @@ namespace sc::ecs2 {
             system.run({.world = world, .commands = system.commands});
           });
         } catch (...) {
-          for (const size_t index : stage) {
-            for (internal::CommandList &list : m_systems[index].commands) {
-              list.clear();
-            }
-          }
+          clearCommands(stage);
           throw;
         }
 
         // Now that nothing is running: nobody is using what goes away.
-        for (const size_t index : stage) {
-          for (internal::CommandList &list : m_systems[index].commands) {
-            for (const internal::CommandList::Erased &erased : list.erased) {
-              // Not that of an entity that got the index since.
-              if (world.valid(erased.entity)) {
-                erased.column->erase(indexOf(erased.entity));
-              }
+        try {
+          for (const size_t index : stage) {
+            for (internal::CommandList &list : m_systems[index].commands) {
+              list.apply(world);
             }
-            for (const Entity entity : list.destroyed) {
-              world.destroy(entity);
-            }
-            list.clear();
           }
+        } catch (...) {
+          clearCommands(stage);
+          throw;
         }
       }
     }
@@ -511,6 +664,15 @@ namespace sc::ecs2 {
       // thread; empty for a system that does not take Commands.
       std::vector<internal::CommandList> commands;
     };
+
+    // Drops what the systems of a stage recorded through Commands.
+    void clearCommands(const std::vector<size_t> &stage) noexcept {
+      for (const size_t index : stage) {
+        for (internal::CommandList &list : m_systems[index].commands) {
+          list.clear();
+        }
+      }
+    }
 
     template <typename F, typename... Params>
     Scheduler &addSystem(F &&system, std::string name, internal::List<Params...>) {
