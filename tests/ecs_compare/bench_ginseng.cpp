@@ -207,3 +207,46 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
   steady.database.visit([&](const Position &) { ++count; });
   REQUIRE(count == ENTITY_COUNT);
 }
+
+namespace {
+
+  struct Heavy {
+    using Handle = Entity;
+    ginseng::database database;
+
+    Handle spawn() {
+      const Entity entity = database.create_entity();
+      database.add_component(entity, Transform{});
+      database.add_component(entity, Body{1.0f, {}});
+      return entity;
+    }
+    void add_health(Handle entity) { database.add_component(entity, Health{50.0f}); }
+    void remove_health(Handle entity) { database.remove_component<Health>(entity); }
+    void spin() {
+      database.visit([](Transform &transform) { compare::spin(transform); });
+    }
+    void weigh() {
+      database.visit([](Body &body) { compare::weigh(body); });
+    }
+    void drop() {
+      database.visit([](Transform &transform, const Body &body) { compare::drop(transform, body); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(HEAVY_WORLD, "[ecs_compare][!benchmark]") { run_heavy<Heavy>(); }
+
+// The memory of the worlds, see memory in common.hpp.
+TEST_CASE(memory::MOVING, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::MOVING, ENTITY_COUNT, &World::fill_moving);
+}
+TEST_CASE(memory::FULL, "[ecs_compare][.memory]") { report_memory<World>(memory::FULL, ENTITY_COUNT, &World::fill); }
+TEST_CASE(memory::FRAGMENTED, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::FRAGMENTED, ENTITY_COUNT, &World::fill_fragmented);
+}
+TEST_CASE(memory::LARGE, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::LARGE, PARALLEL_ENTITY_COUNT, &World::fill);
+}
+TEST_CASE(memory::HEAVY, "[ecs_compare][.memory]") { report_heavy_memory<Heavy>(); }
+TEST_CASE(memory::STEADY, "[ecs_compare][.memory]") { report_steady_memory<Steady>(); }

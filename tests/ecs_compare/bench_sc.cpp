@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
+#include <ranges>
 #include <utility>
 #include <vector>
 
@@ -61,6 +62,16 @@ namespace {
     }
   };
 
+  // The entities in one call and each component in another, which takes the
+  // values one after the other: here the same one every time.
+  template <typename First, typename Second>
+  void create_all(sc::ecs::Registry &registry, size_t count, const First &first, const Second &second) {
+    std::vector<sc::ecs::Entity> entities(count);
+    registry.create(entities.begin(), entities.end());
+    registry.insert<First>(entities.begin(), entities.end(), std::views::repeat(first).begin());
+    registry.insert<Second>(entities.begin(), entities.end(), std::views::repeat(second).begin());
+  }
+
 } // namespace
 
 // The systems of a frame over one group that owns all six components. A
@@ -107,6 +118,21 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
         registry.emplace<Position>(entity, static_cast<float>(i), 1.0f);
         registry.emplace<Velocity>(entity, 1.0f, 2.0f);
       }
+    });
+  };
+
+  {
+    sc::ecs::Registry registry;
+    create_all(registry, ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
+    size_t count = 0;
+    sc::ecs::each(registry.view<const Position, const Velocity>(),
+                  [&](const Position &pos, const Velocity &vel) { count += pos.y == 1.0f && vel.dy == 2.0f; });
+    REQUIRE(count == ENTITY_COUNT);
+  }
+  BENCHMARK_ADVANCED(name::serial(name::CREATE_BATCH))(Catch::Benchmark::Chronometer meter) {
+    auto worlds = make_worlds<sc::ecs::Registry>(meter.runs());
+    meter.measure([&](int run) {
+      create_all(*worlds[static_cast<size_t>(run)], ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
     });
   };
 
@@ -472,3 +498,51 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
   sc::ecs::each(steady.registry.view<const Position>(), [&](const Position &) { ++count; });
   REQUIRE(count == ENTITY_COUNT);
 }
+
+namespace {
+
+  struct Heavy {
+    using Handle = sc::ecs::Entity;
+    sc::ecs::Registry registry;
+
+    Handle spawn() {
+      const sc::ecs::Entity entity = registry.create();
+      registry.emplace<Transform>(entity, Transform{});
+      registry.emplace<Body>(entity, Body{1.0f, {}});
+      return entity;
+    }
+    void spawn_all(size_t count) { create_all(registry, count, Transform{}, Body{1.0f, {}}); }
+    void add_health(Handle entity) { registry.emplace<Health>(entity, 50.0f); }
+    void remove_health(Handle entity) { registry.erase<Health>(entity); }
+    void spin() {
+      sc::ecs::each(registry.view<Transform>(), [](Transform &transform) { compare::spin(transform); });
+    }
+    void weigh() {
+      sc::ecs::each(registry.view<Body>(), [](Body &body) { compare::weigh(body); });
+    }
+    void drop() {
+      sc::ecs::each(registry.view<Transform, const Body>(),
+                    [](Transform &transform, const Body &body) { compare::drop(transform, body); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(HEAVY_WORLD, "[ecs_compare][!benchmark]") {
+  sc::threading::init(thread_count() - 1);
+  run_heavy<Heavy>();
+}
+
+// The memory of the worlds, see memory in common.hpp.
+TEST_CASE(memory::MOVING, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::MOVING, ENTITY_COUNT, &World::fill_moving);
+}
+TEST_CASE(memory::FULL, "[ecs_compare][.memory]") { report_memory<World>(memory::FULL, ENTITY_COUNT, &World::fill); }
+TEST_CASE(memory::FRAGMENTED, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::FRAGMENTED, ENTITY_COUNT, &World::fill_fragmented);
+}
+TEST_CASE(memory::LARGE, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::LARGE, PARALLEL_ENTITY_COUNT, &World::fill);
+}
+TEST_CASE(memory::HEAVY, "[ecs_compare][.memory]") { report_heavy_memory<Heavy>(); }
+TEST_CASE(memory::STEADY, "[ecs_compare][.memory]") { report_steady_memory<Steady>(); }

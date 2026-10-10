@@ -20,25 +20,31 @@ mustache_dep = dependency(
   default_options: ['cpp_std=' + get_option('cpp_std')],
 )
 
+# The source, what it needs and what it is compiled with.
 ecs_compare_libraries = {
-  'sc': [sc_dep],
+  'sc': ['bench_sc.cpp', [sc_dep], []],
   # The prototype of an ECS of our own, see src/sc/ecs2.
-  'sc2': [sc_dep],
-  'entt': [entt_dep],
-  'flecs': [flecs_dep],
-  'gaia': [gaia_ecs_dep],
-  'ginseng': [ginseng_dep],
-  'mustache': [mustache_dep],
+  'sc2': ['bench_sc2.cpp', [sc_dep], []],
+  # The same with worlds of other sc::ecs2::Pages than Pages::Huge.
+  'sc2_small': ['bench_sc2.cpp', [sc_dep], ['-DECS_COMPARE_PAGES=Small']],
+  'sc2_by_size': ['bench_sc2.cpp', [sc_dep], ['-DECS_COMPARE_PAGES=BySize']],
+  'sc2_adaptive': ['bench_sc2.cpp', [sc_dep], ['-DECS_COMPARE_PAGES=Adaptive']],
+  'entt': ['bench_entt.cpp', [entt_dep], []],
+  'flecs': ['bench_flecs.cpp', [flecs_dep], []],
+  'gaia': ['bench_gaia.cpp', [gaia_ecs_dep], []],
+  'ginseng': ['bench_ginseng.cpp', [ginseng_dep], []],
+  'mustache': ['bench_mustache.cpp', [mustache_dep], []],
 }
 
 ecs_compare_executables = []
-foreach name, dependencies : ecs_compare_libraries
+foreach name, parts : ecs_compare_libraries
   ecs_compare_executables += executable(
     'ecs_compare_' + name,
-    sources: ['bench_' + name + '.cpp'],
+    sources: [parts[0]],
+    cpp_args: parts[2],
     # Every library allocates with mimalloc, as sc::ecs does, so that the
     # allocator is not what is compared.
-    dependencies: [catch2_dep, mimalloc_dep] + dependencies,
+    dependencies: [catch2_dep, mimalloc_dep] + parts[1],
   )
 endforeach
 

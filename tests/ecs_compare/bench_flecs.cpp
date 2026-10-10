@@ -67,6 +67,28 @@ namespace {
     }
   };
 
+  // ecs_bulk_init wants the values of all entities in an array. It is built
+  // with the first call, which Catch2 makes before it measures.
+  template <typename Component> void *repeated(const Component &value, size_t count) {
+    static std::vector<Component> values;
+    if (values.size() != count) {
+      values.assign(count, value);
+    }
+    return values.data();
+  }
+
+  // All entities and their components in one call.
+  template <typename First, typename Second>
+  void create_all(flecs::world &world, size_t count, const First &first, const Second &second) {
+    void *data[] = {repeated(first, count), repeated(second, count)};
+    ecs_bulk_desc_t desc = {};
+    desc.count = static_cast<int32_t>(count);
+    desc.ids[0] = world.id<First>();
+    desc.ids[1] = world.id<Second>();
+    desc.data = data;
+    ecs_bulk_init(world, &desc);
+  }
+
 } // namespace
 
 // On all threads, every benchmark is a frame of a world with systems that are
@@ -83,6 +105,21 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
       for (size_t i = 0; i < ENTITY_COUNT; ++i) {
         world.entity().set<Position>({static_cast<float>(i), 1.0f}).set<Velocity>({1.0f, 2.0f});
       }
+    });
+  };
+
+  {
+    World world;
+    create_all(world.world, ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
+    size_t count = 0;
+    world.world.query<const Position, const Velocity>().each(
+        [&](const Position &pos, const Velocity &vel) { count += pos.y == 1.0f && vel.dy == 2.0f; });
+    REQUIRE(count == ENTITY_COUNT);
+  }
+  BENCHMARK_ADVANCED(name::serial(name::CREATE_BATCH))(Catch::Benchmark::Chronometer meter) {
+    auto worlds = make_worlds<World>(meter.runs());
+    meter.measure([&](int run) {
+      create_all(worlds[static_cast<size_t>(run)]->world, ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
     });
   };
 
@@ -332,3 +369,48 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
   report(run_steady(steady));
   REQUIRE(static_cast<size_t>(steady.world.count<Position>()) == ENTITY_COUNT);
 }
+
+namespace {
+
+  struct Heavy {
+    using Handle = flecs::entity;
+    flecs::world world;
+    flecs::query<Transform> transforms = world.query<Transform>();
+    flecs::query<Body> bodies = world.query<Body>();
+    flecs::query<Transform, const Body> both = world.query<Transform, const Body>();
+
+    // The components are known before anything is measured.
+    Heavy() { world.component<Health>(); }
+
+    Handle spawn() { return world.entity().set<Transform>(Transform{}).set<Body>(Body{1.0f, {}}); }
+    void spawn_all(size_t count) { create_all(world, count, Transform{}, Body{1.0f, {}}); }
+    void add_health(Handle entity) { entity.set<Health>({50.0f}); }
+    void remove_health(Handle entity) { entity.remove<Health>(); }
+    void spin() {
+      transforms.each([](Transform &transform) { compare::spin(transform); });
+    }
+    void weigh() {
+      bodies.each([](Body &body) { compare::weigh(body); });
+    }
+    void drop() {
+      both.each([](Transform &transform, const Body &body) { compare::drop(transform, body); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(HEAVY_WORLD, "[ecs_compare][!benchmark]") { run_heavy<Heavy>(); }
+
+// The memory of the worlds, see memory in common.hpp.
+TEST_CASE(memory::MOVING, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::MOVING, ENTITY_COUNT, &World::fill_moving);
+}
+TEST_CASE(memory::FULL, "[ecs_compare][.memory]") { report_memory<World>(memory::FULL, ENTITY_COUNT, &World::fill); }
+TEST_CASE(memory::FRAGMENTED, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::FRAGMENTED, ENTITY_COUNT, &World::fill_fragmented);
+}
+TEST_CASE(memory::LARGE, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::LARGE, PARALLEL_ENTITY_COUNT, &World::fill);
+}
+TEST_CASE(memory::HEAVY, "[ecs_compare][.memory]") { report_heavy_memory<Heavy>(); }
+TEST_CASE(memory::STEADY, "[ecs_compare][.memory]") { report_steady_memory<Steady>(); }

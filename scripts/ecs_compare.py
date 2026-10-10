@@ -36,6 +36,9 @@ SETUP_OPTIONS = ["-Dbuildtype=release", "-Db_ndebug=true", "-Decs_comparison=tru
 LIBRARIES = {
     "sc": "sc::ecs",
     "sc2": "sc::ecs2",
+    "sc2_small": "sc::ecs2 small pages",
+    "sc2_by_size": "sc::ecs2 pages by size",
+    "sc2_adaptive": "sc::ecs2 adaptive pages",
     "entt": "EnTT",
     "flecs": "Flecs",
     "gaia": "gaia-ecs",
@@ -49,6 +52,11 @@ REPORTED = "ecs_compare"
 
 SERIAL = " [1 thread]"
 PARALLEL = " [all threads]"
+
+# The start of the name of a section whose values are bytes instead of
+# nanoseconds, and the tag of the test cases that measure them.
+MEMORY = "memory"
+MEMORY_TAG = "[memory]"
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -141,6 +149,36 @@ def parse_report(path: Path) -> dict[str, dict[str, float]]:
     return sections
 
 
+def read_reported(output: str, sections: dict[str, dict[str, float]]) -> None:
+    """Adds what an executable measured itself, see report in tests/ecs_compare/common.hpp."""
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) == 4 and fields[0] == REPORTED:
+            try:
+                sections.setdefault(fields[1], {})[fields[2]] = float(fields[3])
+            except ValueError:
+                pass
+
+
+def run_memory(executable: Path, env: dict[str, str], sections: dict[str, dict[str, float]]) -> None:
+    """Runs every test case that measures memory in a process of its own.
+
+    A world built in the memory an earlier one has left behind would seem
+    smaller than it is.
+    """
+    listing = subprocess.run(
+        [str(executable), MEMORY_TAG, "--list-tests", "--verbosity", "quiet", "--order", "decl"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )  # fmt: skip
+    for case in filter(None, (line.strip() for line in listing.stdout.splitlines())):
+        process = subprocess.run([str(executable), case], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        read_reported(process.stdout, sections)
+        if process.returncode != 0:
+            warn(f"{executable.name} exited with {process.returncode} in '{case}'")
+            if process.stdout.strip():
+                print(process.stdout.strip(), file=sys.stderr)
+
+
 def run(executable: Path, samples: int, threads: int | None) -> dict[str, dict[str, float]]:
     env = dict(os.environ)
     if threads:
@@ -159,18 +197,12 @@ def run(executable: Path, samples: int, threads: int | None) -> dict[str, dict[s
             sections = parse_report(report)
         except (OSError, ET.ParseError):
             sections = {}
-        # What an executable timed itself, see report in tests/ecs_compare/common.hpp.
-        for line in process.stdout.splitlines():
-            fields = line.split("\t")
-            if len(fields) == 4 and fields[0] == REPORTED:
-                try:
-                    sections.setdefault(fields[1], {})[fields[2]] = float(fields[3])
-                except ValueError:
-                    pass
+        read_reported(process.stdout, sections)
         if process.returncode != 0:
             warn(f"{executable.name} exited with {process.returncode}, its results may be incomplete")
             if process.stdout.strip():
                 print(process.stdout.strip(), file=sys.stderr)
+        run_memory(executable, env, sections)
         return sections
 
 
@@ -182,6 +214,13 @@ def format_time(nanoseconds: float) -> str:
         if nanoseconds >= factor:
             return f"{float(f'{nanoseconds / factor:.3g}'):g} {unit}"
     return f"{float(f'{nanoseconds:.3g}'):g} ns"
+
+
+def format_bytes(count: float) -> str:
+    for unit, factor in (("GiB", 2**30), ("MiB", 2**20), ("KiB", 2**10)):
+        if count >= factor:
+            return f"{float(f'{count / factor:.3g}'):g} {unit}"
+    return f"{count:.0f} B"
 
 
 def format_factor(factor: float) -> str:
@@ -214,8 +253,11 @@ class Cell:
         return f"{self.text}  {self.detail}" if with_detail and self.detail else self.text
 
 
-def time_cells(row: dict[str, float], libraries: list[str], baseline: str | None) -> list[Cell]:
-    """Time and factor of every library, colored by the distance to the fastest."""
+def time_cells(row: dict[str, float], libraries: list[str], baseline: str | None, form=format_time) -> list[Cell]:
+    """Time and factor of every library, colored by the distance to the fastest.
+
+    Or, with another form, anything else of which less is better.
+    """
     fastest = min(row.values())
     reference = row.get(baseline, fastest) if baseline else fastest
     cells = []
@@ -224,7 +266,7 @@ def time_cells(row: dict[str, float], libraries: list[str], baseline: str | None
             cells.append(Cell("—", DIM))
             continue
         value = row[library]
-        behind = value / fastest
+        behind = value / fastest if fastest else 1.0 if value == fastest else float("inf")
         if value == fastest:
             style = BOLD + GREEN
         elif behind <= 1.25:
@@ -235,8 +277,8 @@ def time_cells(row: dict[str, float], libraries: list[str], baseline: str | None
             style = YELLOW
         else:
             style = ""
-        factor = f"{format_factor(value / reference):>5}"
-        cells.append(Cell(format_time(value), style, bold=value == fastest, detail=factor))
+        factor = f"{format_factor(value / reference):>5}" if reference else ""
+        cells.append(Cell(form(value), style, bold=value == fastest, detail=factor))
     return cells
 
 
@@ -336,7 +378,12 @@ def print_report(results, options, threads: int) -> None:
         parallel = {name[: -len(PARALLEL)]: row for name, row in benchmarks.items() if name.endswith(PARALLEL)}
         plain = {name: row for name, row in benchmarks.items() if not name.endswith((SERIAL, PARALLEL))}
 
-        if plain:
+        if plain and section.startswith(MEMORY):
+            rows = [(name, time_cells(row, libraries, baseline, format_bytes)) for name, row in plain.items()]
+            note = "memory the process holds more of with the world than without{detail}, lower is better"
+            smallest_note = f" and factor to {title_of(baseline) if baseline else 'the smallest'}"
+            print_table(section, note, header, rows, options, smallest_note)
+        elif plain:
             rows = [(name, time_cells(row, libraries, baseline)) for name, row in plain.items()]
             print_table(section, "time{detail}, lower is better", header, rows, options, factor_note)
         if serial:

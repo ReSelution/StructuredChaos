@@ -1,18 +1,24 @@
 #pragma once
 
+#include <catch2/benchmark/catch_benchmark.hpp>
+
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <random>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <mimalloc.h>
 
 // What every executable of the comparison shares: the components, the work of
 // the systems and the names of the benchmarks. One executable per library does
@@ -57,6 +63,22 @@ namespace compare {
     float value;
   };
 
+  // The components above are a few bytes each. These are not: moving one costs
+  // something, and fewer of them fit into a cache line.
+
+  // 64 bytes, all of which a system works on.
+  struct Transform {
+    std::array<float, 16> matrix;
+  };
+
+  // 256 bytes, of which a system wants only a few.
+  struct Body {
+    float mass;
+    std::array<float, 63> state;
+  };
+
+  static_assert(sizeof(Transform) == 64 && sizeof(Body) == 256);
+
   // The work of the systems, the same for every library.
   inline void nudge(Position &pos) { pos.x += DT; }
   inline void integrate(Position &pos, const Velocity &vel) {
@@ -85,6 +107,17 @@ namespace compare {
   }
 
   inline void heal(Health &health, const Position &pos) { health.value += pos.x * DT; }
+
+  // Reads and writes every byte of the component.
+  inline void spin(Transform &transform) {
+    for (float &value : transform.matrix) {
+      value = value * 0.5f + DT;
+    }
+  }
+  // 4 bytes of 256.
+  inline void weigh(Body &body) { body.mass += DT; }
+  // A few bytes of each of the two.
+  inline void drop(Transform &transform, const Body &body) { transform.matrix[13] -= body.mass * DT; }
 
   // Needs the position of another entity, which is somewhere else in memory.
   inline void steer(Velocity &vel, const Position &pos, const Position &target) {
@@ -182,6 +215,9 @@ namespace compare {
     // Only sc::ecs: the registry itself instead of recorded changes, which
     // lets one thread at a time write a component type.
     inline constexpr const char *CREATE_DIRECT = "create entities with 2 components, 1 thread per component";
+    // The same with what a library has for making many entities in one go,
+    // all of them with the same values.
+    inline constexpr const char *CREATE_BATCH = "create entities with 2 components, all at once";
     inline constexpr const char *DESTROY = "destroy entities";
     inline constexpr const char *ADD_REMOVE = "add + remove a component";
     inline constexpr const char *GET = "get 1 component, random order";
@@ -207,6 +243,15 @@ namespace compare {
     // Every entity has a Target component, defined by each executable with the
     // entity type of its library, that names another entity in no order.
     inline constexpr const char *LOOP_LOOKUP = "1 system, looks up another entity";
+
+    // ENTITY_COUNT entities with Transform and Body, see run_heavy.
+    inline constexpr const char *CREATE_HEAVY = "create entities with 2 components";
+    // Health, 4 bytes. Where a library keeps the components of an entity
+    // together, the large ones move along.
+    inline constexpr const char *ADD_REMOVE_HEAVY = "add + remove a small component";
+    inline constexpr const char *ITERATE_TRANSFORM = "iterate 64 bytes, all of them used";
+    inline constexpr const char *ITERATE_BODY = "iterate 256 bytes, 4 of them used";
+    inline constexpr const char *ITERATE_HEAVY = "iterate both, 4 bytes of each used";
   } // namespace name
 
   // Names of the test cases, the sections of the report. They state
@@ -215,6 +260,56 @@ namespace compare {
   inline constexpr const char *LARGE_WORLD = "1 000 000 entities";
   // ENTITY_COUNT and STEADY_CHANGES.
   inline constexpr const char *STEADY_WORLD = "100 000 entities in use, 1 000 replaced and 1 000 changed per frame";
+
+  inline constexpr const char *HEAVY_WORLD = "100 000 entities with components of 64 and 256 bytes";
+
+  // The benchmarks of HEAVY_WORLD on a world of a library, which is a type
+  // with
+  //   Handle                     an entity
+  //   Handle spawn()             an entity with Transform and Body
+  //   void spawn_all(size_t n)   so many of them in one go, if the library has a means for it
+  //   void add_health(Handle)    adds Health, which the entity does not have
+  //   void remove_health(Handle)
+  //   void spin()                spin for every entity
+  //   void weigh()               weigh for every entity
+  //   void drop()                drop for every entity
+  // All of them on one thread.
+  template <typename World> void run_heavy() {
+    BENCHMARK_ADVANCED(name::serial(name::CREATE_HEAVY))(Catch::Benchmark::Chronometer meter) {
+      auto worlds = make_worlds<World>(meter.runs());
+      meter.measure([&](int run) {
+        World &world = *worlds[static_cast<size_t>(run)];
+        for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+          world.spawn();
+        }
+      });
+    };
+
+    if constexpr (requires(World &world) { world.spawn_all(ENTITY_COUNT); }) {
+      BENCHMARK_ADVANCED(name::serial(name::CREATE_BATCH))(Catch::Benchmark::Chronometer meter) {
+        auto worlds = make_worlds<World>(meter.runs());
+        meter.measure([&](int run) { worlds[static_cast<size_t>(run)]->spawn_all(ENTITY_COUNT); });
+      };
+    }
+
+    World world;
+    std::vector<typename World::Handle> entities;
+    entities.reserve(ENTITY_COUNT);
+    for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+      entities.push_back(world.spawn());
+    }
+    BENCHMARK(name::serial(name::ADD_REMOVE_HEAVY)) {
+      for (const auto &entity : entities) {
+        world.add_health(entity);
+      }
+      for (const auto &entity : entities) {
+        world.remove_health(entity);
+      }
+    };
+    BENCHMARK(name::serial(name::ITERATE_TRANSFORM)) { world.spin(); };
+    BENCHMARK(name::serial(name::ITERATE_BODY)) { world.weigh(); };
+    BENCHMARK(name::serial(name::ITERATE_HEAVY)) { world.drop(); };
+  }
 
   // A world that has been in use for a while, unlike the fresh ones of the
   // benchmarks above: every frame some entities are destroyed and as many
@@ -293,6 +388,97 @@ namespace compare {
     report(STEADY_WORLD, "frame, 90th percentile", times.percentile90);
     report(STEADY_WORLD, "frame, 99th percentile", times.percentile99);
     report(STEADY_WORLD, "frame, slowest", times.slowest);
+  }
+
+  // What a world costs in memory rather than in time. The section of the
+  // report; scripts/ecs_compare.py takes the values of a section whose name
+  // starts with "memory" as bytes.
+  inline constexpr const char *MEMORY = "memory of a world";
+
+  // The rows of the section, each of them a test case of its own: the script
+  // runs every one in a new process, so that no world is built in memory an
+  // earlier one has left behind. They are hidden from the run of the
+  // benchmarks and must not contain what a test spec of Catch2 gives a
+  // meaning, a comma above all.
+  namespace memory {
+    inline constexpr const char *MOVING = "100 000 entities with 2 components";
+    inline constexpr const char *FULL = "100 000 entities with 6 components";
+    inline constexpr const char *FRAGMENTED = "100 000 entities with 2 to 10 components in 256 combinations";
+    inline constexpr const char *LARGE = "1 000 000 entities with 6 components";
+    // The world of HEAVY_WORLD.
+    inline constexpr const char *HEAVY = "100 000 entities with 2 components of 64 and 256 bytes";
+    // The world of STEADY_WORLD after all of its frames.
+    inline constexpr const char *STEADY = "100 000 entities in use after 2 200 frames";
+  } // namespace memory
+
+  // The bytes of the process that are in memory right now. Counts whatever a
+  // library takes, from the allocator or from the OS itself, and only where
+  // it was touched: a reserved range of addresses costs nothing here.
+  inline size_t resident_memory() {
+#ifdef __linux__
+    // Counted page by page on request, unlike the numbers of /proc/self/statm,
+    // which the kernel only keeps roughly up to date.
+    size_t kilobytes = 0;
+    if (std::FILE *file = std::fopen("/proc/self/smaps_rollup", "r")) {
+      char line[256];
+      while (std::fgets(line, sizeof(line), file) != nullptr) {
+        if (std::sscanf(line, "Rss: %zu kB", &kilobytes) == 1) {
+          break;
+        }
+      }
+      std::fclose(file);
+    }
+    return kilobytes * 1024;
+#else
+    size_t resident = 0;
+    mi_process_info(nullptr, nullptr, nullptr, &resident, nullptr, nullptr, nullptr, nullptr);
+    return resident;
+#endif
+  }
+
+  // Reports by how much the memory of the process grows with the world that
+  // the function builds and returns. What was freed on the way goes back to
+  // the OS first, so that it does not count.
+  template <typename Build> void report_memory(const char *row, Build &&build) {
+    mi_collect(true);
+    const size_t before = resident_memory();
+    const auto world = build();
+    mi_collect(true);
+    const size_t after = resident_memory();
+    report(MEMORY, row, after > before ? static_cast<double>(after - before) : 0.0);
+  }
+
+  // A world of a library as the benchmarks build it, filled by one of its
+  // fill functions. The handles the benchmarks keep are not the library's and
+  // are dropped before the memory is read.
+  template <typename World, typename Fill> void report_memory(const char *row, size_t count, Fill &&fill) {
+    report_memory(row, [&] {
+      auto world = std::make_unique<World>(count);
+      std::invoke(fill, *world);
+      world->entities = {};
+      return world;
+    });
+  }
+
+  // The world of run_heavy, of which 32 MB are the components themselves.
+  template <typename World> void report_heavy_memory() {
+    report_memory(memory::HEAVY, [] {
+      auto world = std::make_unique<World>();
+      for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+        world->spawn();
+      }
+      return world;
+    });
+  }
+
+  // The world of run_steady once it has been in use: what the entities that
+  // came and went have left behind counts as well.
+  template <typename Steady> void report_steady_memory() {
+    report_memory(memory::STEADY, [] {
+      auto steady = std::make_unique<Steady>();
+      run_steady(*steady);
+      return steady;
+    });
   }
 
 } // namespace compare

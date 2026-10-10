@@ -24,12 +24,19 @@ namespace {
   using sc::ecs2::Query;
   using sc::ecs2::Scheduler;
 
+  // The executable is built several times, see meson.build: once for each
+  // kind of pages a world can have its columns backed with.
+#ifndef ECS_COMPARE_PAGES
+#define ECS_COMPARE_PAGES Huge
+#endif
+  constexpr sc::ecs2::Pages PAGES = sc::ecs2::Pages::ECS_COMPARE_PAGES;
+
   struct Target {
     Entity entity;
   };
 
   struct World {
-    sc::ecs2::World world;
+    sc::ecs2::World world{PAGES};
     std::vector<Entity> entities;
 
     explicit World(size_t count) : entities(count) {
@@ -71,6 +78,13 @@ namespace {
     }
   };
 
+  // All entities and their components in one call.
+  template <typename First, typename Second>
+  void create_all(sc::ecs2::World &world, size_t count, const First &first, const Second &second) {
+    std::vector<Entity> entities(count);
+    world.create(entities, first, second);
+  }
+
 } // namespace
 
 TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
@@ -79,7 +93,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
   sc::threading::init(static_cast<uint32_t>(workers) - 1);
 
   BENCHMARK_ADVANCED(name::serial(name::CREATE))(Catch::Benchmark::Chronometer meter) {
-    auto worlds = make_worlds<sc::ecs2::World>(meter.runs());
+    auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
     meter.measure([&](int run) {
       auto &world = *worlds[static_cast<size_t>(run)];
       for (size_t i = 0; i < ENTITY_COUNT; ++i) {
@@ -87,6 +101,21 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
         world.emplace<Position>(entity, static_cast<float>(i), 1.0f);
         world.emplace<Velocity>(entity, 1.0f, 2.0f);
       }
+    });
+  };
+
+  {
+    sc::ecs2::World world{PAGES};
+    create_all(world, ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
+    size_t count = 0;
+    world.each<const Position, const Velocity>(
+        [&](const Position &pos, const Velocity &vel) { count += pos.y == 1.0f && vel.dy == 2.0f; });
+    REQUIRE(count == ENTITY_COUNT);
+  }
+  BENCHMARK_ADVANCED(name::serial(name::CREATE_BATCH))(Catch::Benchmark::Chronometer meter) {
+    auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
+    meter.measure([&](int run) {
+      create_all(*worlds[static_cast<size_t>(run)], ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
     });
   };
 
@@ -107,14 +136,14 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
       });
     });
     {
-      sc::ecs2::World world;
+      sc::ecs2::World world{PAGES};
       spawner.run(world);
       size_t count = 0;
       world.each<const Position, const Velocity>([&](const Position &, const Velocity &) { ++count; });
       REQUIRE(count == ENTITY_COUNT);
     }
     BENCHMARK_ADVANCED(name::parallel(name::CREATE))(Catch::Benchmark::Chronometer meter) {
-      auto worlds = make_worlds<sc::ecs2::World>(meter.runs());
+      auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
       meter.measure([&](int run) { spawner.run(*worlds[static_cast<size_t>(run)]); });
     };
   }
@@ -315,7 +344,7 @@ namespace {
 
   struct Steady {
     using Handle = Entity;
-    sc::ecs2::World world;
+    sc::ecs2::World world{PAGES};
 
     Handle spawn(size_t number) {
       const Entity entity = world.create();
@@ -346,3 +375,50 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
   steady.world.each<const Position>([&](const Position &) { ++count; });
   REQUIRE(count == ENTITY_COUNT);
 }
+
+namespace {
+
+  struct Heavy {
+    using Handle = Entity;
+    sc::ecs2::World world{PAGES};
+
+    Handle spawn() {
+      const Entity entity = world.create();
+      world.emplace<Transform>(entity, Transform{});
+      world.emplace<Body>(entity, Body{1.0f, {}});
+      return entity;
+    }
+    void spawn_all(size_t count) { create_all(world, count, Transform{}, Body{1.0f, {}}); }
+    void add_health(Handle entity) { world.emplace<Health>(entity, 50.0f); }
+    void remove_health(Handle entity) { world.erase<Health>(entity); }
+    void spin() {
+      world.each<Transform>([](Transform &transform) { compare::spin(transform); });
+    }
+    void weigh() {
+      world.each<Body>([](Body &body) { compare::weigh(body); });
+    }
+    void drop() {
+      world.each<Transform, const Body>([](Transform &transform, const Body &body) { compare::drop(transform, body); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(HEAVY_WORLD, "[ecs_compare][!benchmark]") {
+  sc::threading::init(thread_count() - 1);
+  run_heavy<Heavy>();
+}
+
+// The memory of the worlds, see memory in common.hpp.
+TEST_CASE(memory::MOVING, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::MOVING, ENTITY_COUNT, &World::fill_moving);
+}
+TEST_CASE(memory::FULL, "[ecs_compare][.memory]") { report_memory<World>(memory::FULL, ENTITY_COUNT, &World::fill); }
+TEST_CASE(memory::FRAGMENTED, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::FRAGMENTED, ENTITY_COUNT, &World::fill_fragmented);
+}
+TEST_CASE(memory::LARGE, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::LARGE, PARALLEL_ENTITY_COUNT, &World::fill);
+}
+TEST_CASE(memory::HEAVY, "[ecs_compare][.memory]") { report_heavy_memory<Heavy>(); }
+TEST_CASE(memory::STEADY, "[ecs_compare][.memory]") { report_steady_memory<Steady>(); }

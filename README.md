@@ -325,7 +325,9 @@ meson setup build -Denable_chaos_stats=true
 ### ECS comparison
 
 With `ecs_comparison`, `tests/ecs_compare` builds one executable per library
-that does the same work on one thread and on all of them: `sc::ecs`, `sc::ecs2`,
+that does the same work on one thread and on all of them: `sc::ecs`, `sc::ecs2`
+(once for each of `sc::ecs2::Pages`: huge pages, small ones, by the size of a
+component, and small ones that become huge as a column grows),
 [EnTT](https://github.com/skypjack/entt),
 [Flecs](https://github.com/SanderMertens/flecs),
 [gaia-ecs](https://github.com/richardbiely/gaia-ecs),
@@ -345,6 +347,23 @@ report is a world in use instead: every frame some entities are replaced, some
 get a component or lose it, and then the systems run. Its frames are timed one
 by one, so the report has the median and the slow frames (90th and 99th
 percentile, slowest) rather than a mean.
+
+Entities are created one by one and, where a library has a call for it, all at
+once with the same values.
+
+The components of those benchmarks are a few bytes each. One section has
+entities with a component of 64 and one of 256 bytes instead, on one thread:
+creating them, adding a small component to them, which moves the large ones
+where a library keeps the components of an entity together, and loops that use
+all of a component or only 4 bytes of it.
+
+After the times comes the memory of a world: by how much the memory of the
+process that is in RAM grows with it, which counts what a library takes from
+the allocator as well as what it takes from the OS itself. Every world is
+measured in a process of its own. Where the OS backs the memory with huge
+pages, the numbers move in steps of 2 MiB and by a few of them from run to run.
+Only on Linux are they counted page by page; elsewhere they are what the OS
+reports for the process.
 
 `--native-file cross/linux-clang.ini` selects the compiler of a new build
 directory, see `scripts/ecs_compare.py --help` for the rest. In a build

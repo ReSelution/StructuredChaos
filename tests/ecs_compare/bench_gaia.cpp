@@ -88,6 +88,16 @@ namespace {
         [](Score &score, const Position &pos, const Health &health) { rate(score, pos, health); });
   }
 
+  // One entity with the components and all others as copies of it, in one
+  // call.
+  template <typename First, typename Second>
+  void create_all(ecs::World &world, size_t count, const First &first, const Second &second) {
+    const ecs::Entity entity = world.add();
+    world.add<First>(entity, first);
+    world.add<Second>(entity, second);
+    world.copy_n(entity, static_cast<uint32_t>(count - 1));
+  }
+
 } // namespace
 
 // On all threads, a loop is a query run with QueryExecType::Parallel. What it
@@ -109,6 +119,21 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
         world.add<Position>(entity, {static_cast<float>(i), 1.0f});
         world.add<Velocity>(entity, {1.0f, 2.0f});
       }
+    });
+  };
+
+  {
+    World world;
+    create_all(world.world, ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
+    size_t count = 0;
+    world.world.query().all<Position>().all<Velocity>().each(
+        [&](const Position &pos, const Velocity &vel) { count += pos.y == 1.0f && vel.dy == 2.0f; });
+    REQUIRE(count == ENTITY_COUNT);
+  }
+  BENCHMARK_ADVANCED(name::serial(name::CREATE_BATCH))(Catch::Benchmark::Chronometer meter) {
+    auto worlds = make_worlds<World>(meter.runs());
+    meter.measure([&](int run) {
+      create_all(worlds[static_cast<size_t>(run)]->world, ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
     });
   };
 
@@ -363,3 +388,53 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
   report(run_steady(steady));
   REQUIRE(steady.world.query().all<Position>().count() == ENTITY_COUNT);
 }
+
+namespace {
+
+  struct Heavy {
+    using Handle = ecs::Entity;
+    ecs::World world;
+    ecs::Query transforms = world.query().all<Transform &>();
+    ecs::Query bodies = world.query().all<Body &>();
+    ecs::Query both = world.query().all<Transform &>().all<Body>();
+
+    // The components are known before anything is measured.
+    Heavy() { (void)world.add<Health>(); }
+
+    Handle spawn() {
+      const ecs::Entity entity = world.add();
+      world.add<Transform>(entity, Transform{});
+      world.add<Body>(entity, Body{1.0f, {}});
+      return entity;
+    }
+    void spawn_all(size_t count) { create_all(world, count, Transform{}, Body{1.0f, {}}); }
+    void add_health(Handle entity) { world.add<Health>(entity, {50.0f}); }
+    void remove_health(Handle entity) { world.del<Health>(entity); }
+    void spin() {
+      transforms.each([](Transform &transform) { compare::spin(transform); });
+    }
+    void weigh() {
+      bodies.each([](Body &body) { compare::weigh(body); });
+    }
+    void drop() {
+      both.each([](Transform &transform, const Body &body) { compare::drop(transform, body); });
+    }
+  };
+
+} // namespace
+
+TEST_CASE(HEAVY_WORLD, "[ecs_compare][!benchmark]") { run_heavy<Heavy>(); }
+
+// The memory of the worlds, see memory in common.hpp.
+TEST_CASE(memory::MOVING, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::MOVING, ENTITY_COUNT, &World::fill_moving);
+}
+TEST_CASE(memory::FULL, "[ecs_compare][.memory]") { report_memory<World>(memory::FULL, ENTITY_COUNT, &World::fill); }
+TEST_CASE(memory::FRAGMENTED, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::FRAGMENTED, ENTITY_COUNT, &World::fill_fragmented);
+}
+TEST_CASE(memory::LARGE, "[ecs_compare][.memory]") {
+  report_memory<World>(memory::LARGE, PARALLEL_ENTITY_COUNT, &World::fill);
+}
+TEST_CASE(memory::HEAVY, "[ecs_compare][.memory]") { report_heavy_memory<Heavy>(); }
+TEST_CASE(memory::STEADY, "[ecs_compare][.memory]") { report_steady_memory<Steady>(); }
