@@ -19,6 +19,13 @@ mimalloc_options = [
   'mi_build_shared=false',
   'mi_build_object=false',
   'mi_build_tests=false',
+
+  # mimalloc 3.5.4 aborts in its internal debug checks ("corrupted meta-data
+  # in thread-free list") when a heap is destroyed that still has blocks
+  # freed from another thread. sc::Heap does exactly that on purpose: pmr
+  # containers give their memory back right away. Use an address sanitizer
+  # build to check our own code instead.
+  'mimalloc:mi_debug=off',
 ]
 
 # Sanitizer runtimes interpose malloc themselves, so mimalloc must not override
