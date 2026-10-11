@@ -25,7 +25,7 @@ mimalloc_options = [
   # freed from another thread. sc::Heap does exactly that on purpose: pmr
   # containers give their memory back right away. Use an address sanitizer
   # build to check our own code instead.
-  'mimalloc:mi_debug=off',
+  'mi_debug=off',
 ]
 
 # Sanitizer runtimes interpose malloc themselves, so mimalloc must not override
