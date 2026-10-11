@@ -13,7 +13,7 @@
 namespace sc {
 
   class ArenaPool {
-    static constexpr size_t DEFAULT_SIZE = 16 * 1024;
+    static constexpr size_t DEFAULT_SIZE = size_t{16} * 1024;
     static constexpr size_t MAX_LOADED_ARENAS = 1024;
 
   public:

@@ -161,6 +161,8 @@ TEST_CASE("Logger Timer", "[logger]") {
     int items = 0;
     std::string stage = "start";
     auto timer = Log::time("{} for {} items, stopped at {}", items, stage);
+    // The timer reads items when it is destroyed.
+    // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
     items = 42;
     stage = "end";
   }

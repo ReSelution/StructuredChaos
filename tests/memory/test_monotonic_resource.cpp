@@ -47,6 +47,8 @@ namespace {
 
   struct alignas(64) Wide {
     std::byte data[64];
+    // Not trivial on purpose, so that the object gets a cleanup node.
+    // NOLINTNEXTLINE(modernize-use-equals-default)
     ~Wide() {}
   };
 
@@ -325,7 +327,7 @@ TEST_CASE("MonotonicResource: concurrent allocations do not overlap", "[memory][
   for (size_t t = 0; t < Threads; ++t) {
     for (std::byte *ptr: results[t]) {
       for (size_t i = 0; i < Bytes; ++i) {
-        corrupted += ptr[i] != static_cast<std::byte>(t + 1);
+        corrupted += static_cast<size_t>(ptr[i] != static_cast<std::byte>(t + 1));
       }
       all.push_back(ptr);
     }
@@ -335,7 +337,7 @@ TEST_CASE("MonotonicResource: concurrent allocations do not overlap", "[memory][
   std::ranges::sort(all);
   size_t overlaps = 0;
   for (size_t i = 1; i < all.size(); ++i) {
-    overlaps += all[i - 1] + Bytes > all[i];
+    overlaps += static_cast<size_t>(all[i - 1] + Bytes > all[i]);
   }
   CHECK(overlaps == 0);
   CHECK(all.size() == Threads * PerThread);
@@ -431,7 +433,7 @@ TEST_CASE("MonotonicResource: grows beyond its initial size", "[memory][monotoni
   size_t corrupted = 0;
   for (int i = 0; i < 100; ++i) {
     for (uint8_t byte: spans[i]) {
-      corrupted += byte != static_cast<uint8_t>(i);
+      corrupted += static_cast<size_t>(byte != static_cast<uint8_t>(i));
     }
   }
   CHECK(corrupted == 0);
@@ -494,7 +496,7 @@ TEST_CASE("MonotonicResource: make is safe from several threads", "[memory][mono
     for (int t = 0; t < Threads; ++t) {
       workers.emplace_back([&, t] {
         for (int i = 0; i < PerThread; ++i) {
-          results[t].push_back(res.make<std::string>(std::to_string(t * PerThread + i)));
+          results[t].push_back(res.make<std::string>(std::to_string((t * PerThread) + i)));
         }
       });
     }
@@ -503,7 +505,7 @@ TEST_CASE("MonotonicResource: make is safe from several threads", "[memory][mono
   size_t wrong = 0;
   for (int t = 0; t < Threads; ++t) {
     for (int i = 0; i < PerThread; ++i) {
-      wrong += *results[t][i] != std::to_string(t * PerThread + i);
+      wrong += static_cast<size_t>(*results[t][i] != std::to_string((t * PerThread) + i));
     }
   }
   CHECK(wrong == 0);

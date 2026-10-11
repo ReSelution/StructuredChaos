@@ -7,7 +7,7 @@
 namespace sc {
   void MonotonicResource::reset() noexcept {
     runCleanups();
-    std::lock_guard lock(m_block_mutex);
+    std::scoped_lock lock(m_block_mutex);
     // With a caller buffer every block is an extra one, otherwise the first
     // block is the one to start over in.
     const size_t kept = (m_initial_block.ptr == nullptr && !m_blocks.empty()) ? 1 : 0;
@@ -16,35 +16,37 @@ namespace sc {
     }
     m_blocks.resize(kept);
 
-    if (m_initial_block.ptr) {
-      m_range.store({m_initial_block.ptr, m_initial_block.ptr + m_initial_block.size}, std::memory_order_release);
+    if (m_initial_block.ptr != nullptr) {
+      m_range.store({.current = m_initial_block.ptr, .end = m_initial_block.ptr + m_initial_block.size},
+                    std::memory_order_release);
     } else if (kept != 0) {
-      m_range.store({m_blocks[0].ptr, m_blocks[0].ptr + m_blocks[0].size}, std::memory_order_release);
+      m_range.store({.current = m_blocks[0].ptr, .end = m_blocks[0].ptr + m_blocks[0].size}, std::memory_order_release);
     } else {
-      m_range.store({nullptr, nullptr}, std::memory_order_release);
+      m_range.store({.current = nullptr, .end = nullptr}, std::memory_order_release);
     }
   }
 
   void MonotonicResource::release() noexcept {
     runCleanups();
-    std::lock_guard lock(m_block_mutex);
+    std::scoped_lock lock(m_block_mutex);
     for (const auto &block: m_blocks) {
       m_upstream->deallocate(block.ptr, block.size, block.alignment);
     }
 
     m_blocks.clear();
-    if (m_initial_block.ptr) {
-      m_range.store({m_initial_block.ptr, m_initial_block.ptr + m_initial_block.size}, std::memory_order_release);
+    if (m_initial_block.ptr != nullptr) {
+      m_range.store({.current = m_initial_block.ptr, .end = m_initial_block.ptr + m_initial_block.size},
+                    std::memory_order_release);
     } else {
-      m_range.store({nullptr, nullptr}, std::memory_order_release);
+      m_range.store({.current = nullptr, .end = nullptr}, std::memory_order_release);
     }
   }
 
   void MonotonicResource::handle_full_block(size_t bytes, size_t alignment) {
-    std::lock_guard lock(m_block_mutex);
+    std::scoped_lock lock(m_block_mutex);
 
     // Another thread may have installed a new block in the meantime.
-    if (fit(m_range.load(std::memory_order::relaxed), bytes, alignment)) {
+    if (fit(m_range.load(std::memory_order::relaxed), bytes, alignment) != nullptr) {
       return;
     }
 
@@ -65,12 +67,12 @@ namespace sc {
 
   void MonotonicResource::allocate_new_block(size_t size) {
     auto *b_ptr = allocate_block(size, alignof(std::max_align_t));
-    m_range.store({b_ptr, b_ptr + size}, std::memory_order_release);
+    m_range.store({.current = b_ptr, .end = b_ptr + size}, std::memory_order_release);
   }
 
   void *MonotonicResource::allocate_custom_block(size_t size, size_t alignment) {
 
-    std::lock_guard lock(m_block_mutex);
+    std::scoped_lock lock(m_block_mutex);
     return allocate_block(size, alignment);
   }
 } // namespace sc

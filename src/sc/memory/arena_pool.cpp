@@ -12,7 +12,7 @@
 namespace sc {
   using PoolLogger = sc::Logger<"Mem">;
   void ArenaPool::init(const size_t poolSize, const size_t arenaSize) {
-    std::lock_guard<std::mutex> lock(m_initLock);
+    std::scoped_lock lock(m_initLock);
     if (m_storage.capacity() > 0) [[unlikely]] {
       return;
     }
@@ -41,9 +41,10 @@ namespace sc {
   }
 
   void ArenaPool::release(std::unique_ptr<MonotonicResource> &resource) {
-    if (!resource)
+    if (!resource) {
       return;
-    resource->reset();
+    }
+    (*resource).reset();
 
     {
       SpinLockGuard guard(m_lock);
@@ -54,7 +55,7 @@ namespace sc {
     }
 
     // The pool is full. Freed outside the lock.
-    resource.reset();
+    resource = nullptr;
   }
 
   size_t ArenaPool::getBufferSize() { return m_defaultSize; }

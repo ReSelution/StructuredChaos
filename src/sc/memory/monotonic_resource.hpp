@@ -63,7 +63,7 @@ namespace sc {
     std::atomic<CleanupNode *> m_cleanup{nullptr};
 
   public:
-    explicit MonotonicResource(size_t initial_size = 1024 * 32,
+    explicit MonotonicResource(size_t initial_size = size_t{1024} * 32,
                                memory_resource *upstream = std::pmr::get_default_resource()) :
         m_upstream(upstream), m_next_block_size(initial_size) {
       allocate_new_block(initial_size);
@@ -73,7 +73,7 @@ namespace sc {
                                memory_resource *upstream = std::pmr::get_default_resource()) :
         m_initial_block(static_cast<std::byte *>(buffer), size, alignof(std::max_align_t)), m_upstream(upstream),
         m_next_block_size(size * 2) {
-      m_range.store({m_initial_block.ptr, m_initial_block.ptr + size}, std::memory_order_release);
+      m_range.store({.current = m_initial_block.ptr, .end = m_initial_block.ptr + size}, std::memory_order_release);
     }
 
     MonotonicResource(const MonotonicResource &) = delete;
@@ -213,7 +213,7 @@ namespace sc {
     // Compares sizes instead of pointers, because current + bytes can wrap
     // around for huge requests.
     [[nodiscard]] static std::byte *fit(const BlockRange &range, size_t bytes, size_t alignment) noexcept {
-      if (!range.current) {
+      if (range.current == nullptr) {
         return nullptr;
       }
       auto curr_addr = reinterpret_cast<uintptr_t>(range.current);
