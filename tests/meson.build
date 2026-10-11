@@ -128,7 +128,9 @@ test_memory = executable(
   'test_memory',
   sources: [
     'memory/bench_heap.cpp',
+    'memory/test_arena_pool.cpp',
     'memory/test_heap.cpp',
+    'memory/test_monotonic_resource.cpp',
   ],
   dependencies: [
     catch2_dep,
