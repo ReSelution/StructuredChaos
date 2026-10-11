@@ -66,11 +66,11 @@ namespace {
 
   uintptr_t malloc_scope(std::vector<void *> &blocks, size_t bytes) {
     uintptr_t sum = 0;
-    for (void *&block : blocks) {
+    for (void *&block: blocks) {
       block = mi_malloc(bytes);
       sum += touch(block);
     }
-    for (void *block : blocks) {
+    for (void *block: blocks) {
       mi_free(block);
     }
     return sum;
@@ -98,7 +98,8 @@ namespace {
   }
 
   // Runs work on every thread at once and waits for all of them.
-  template <typename Work> void on_threads(size_t threads, Work work) {
+  template<typename Work>
+  void on_threads(size_t threads, Work work) {
     std::vector<std::jthread> workers;
     workers.reserve(threads);
     for (size_t t = 0; t < threads; ++t) {

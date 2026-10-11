@@ -167,7 +167,7 @@ TEST_CASE("AtomicQueue Stress and Wrap-Around", "[threading][atomic_queue]") {
       });
     }
 
-    for (auto &t : threads) {
+    for (auto &t: threads) {
       t.join();
     }
 
@@ -259,7 +259,7 @@ TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
       });
     }
 
-    for (auto &t : threads) {
+    for (auto &t: threads) {
       t.join();
     }
 

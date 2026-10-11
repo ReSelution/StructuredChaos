@@ -25,7 +25,7 @@ namespace sc::threading::impl {
     Queues() = default;
 
     bool try_pop_any(MoveOnlyFunction &task, int threadId) {
-      for (auto &q : pQueues) {
+      for (auto &q: pQueues) {
         if (q.try_pop(task, threadId)) {
           return true;
         }
@@ -37,11 +37,13 @@ namespace sc::threading::impl {
       return std::ranges::all_of(pQueues, [](const auto &q) { return q.empty(); });
     }
 
-    template <Priority p> void enqueue(MoveOnlyFunction &&task) {
+    template<Priority p>
+    void enqueue(MoveOnlyFunction &&task) {
       pQueues[static_cast<size_t>(p)].push(std::move(task));
     }
 
-    template <Priority p, typename Arg> void emplace(Arg &&arg) {
+    template<Priority p, typename Arg>
+    void emplace(Arg &&arg) {
       pQueues[static_cast<size_t>(p)].emplace(MoveOnlyFunction(std::forward<Arg>(arg)));
     }
   };

@@ -14,7 +14,8 @@ namespace sc::threading {
   /// @brief Aggregates multiple std::future instances into a single
   /// synchronizable unit.
   /// @tparam T The return type of the underlying asynchronous tasks.
-  template <typename T> class [[nodiscard]] FutureGroup {
+  template<typename T>
+  class [[nodiscard]] FutureGroup {
   public:
     FutureGroup() = default;
 
@@ -32,7 +33,7 @@ namespace sc::threading {
     void reserve(size_t capacity) { futures_.reserve(capacity); }
 
     void wait() const {
-      for (const auto &f : futures_) {
+      for (const auto &f: futures_) {
         if (f.valid()) {
           f.wait();
         }
@@ -73,7 +74,7 @@ namespace sc::threading {
       };
 
       if constexpr (std::is_void_v<T>) {
-        for (auto &f : futures_) {
+        for (auto &f: futures_) {
           if (f.valid()) {
             consume([&f] { f.get(); });
           }
@@ -84,7 +85,7 @@ namespace sc::threading {
       } else {
         std::vector<T> results;
         results.reserve(futures_.size());
-        for (auto &f : futures_) {
+        for (auto &f: futures_) {
           if (f.valid()) {
             consume([&f, &results] { results.push_back(f.get()); });
           }

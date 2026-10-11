@@ -118,7 +118,8 @@ namespace sc {
   // messages of all its categories. The console only shows messages from the
   // level given to init() upwards, info by default.
   constexpr FixedString NoCat = "";
-  template <FixedString M, FixedString C = NoCat> class Logger {
+  template<FixedString M, FixedString C = NoCat>
+  class Logger {
 
   public:
     using LogLevel = spdlog::level::level_enum;
@@ -131,40 +132,47 @@ namespace sc {
     // warnings and above.
     static void flush() { get()->flush(); }
     // Logging
-    template <typename... Args> static void log(LogLevel level, spdlog::format_string_t<Args...> fmt, Args &&...args) {
+    template<typename... Args>
+    static void log(LogLevel level, spdlog::format_string_t<Args...> fmt, Args &&...args) {
       get()->log(level, fmt, std::forward<Args>(args)...);
     }
 
-    template <typename... Args> static void info(spdlog::format_string_t<Args...> fmt, Args &&...args) {
+    template<typename... Args>
+    static void info(spdlog::format_string_t<Args...> fmt, Args &&...args) {
       get()->info(fmt, std::forward<Args>(args)...);
     }
 
-    template <typename... Args> static void trace(spdlog::format_string_t<Args...> fmt, Args &&...args) {
+    template<typename... Args>
+    static void trace(spdlog::format_string_t<Args...> fmt, Args &&...args) {
       get()->trace(fmt, std::forward<Args>(args)...);
     }
 
-    template <typename... Args> static void debug(spdlog::format_string_t<Args...> fmt, Args &&...args) {
+    template<typename... Args>
+    static void debug(spdlog::format_string_t<Args...> fmt, Args &&...args) {
       get()->debug(fmt, std::forward<Args>(args)...);
     }
 
-    template <typename... Args> static void warn(spdlog::format_string_t<Args...> fmt, Args &&...args) {
+    template<typename... Args>
+    static void warn(spdlog::format_string_t<Args...> fmt, Args &&...args) {
       get()->warn(fmt, std::forward<Args>(args)...);
     }
 
-    template <typename... Args> static void err(spdlog::format_string_t<Args...> fmt, Args &&...args) {
+    template<typename... Args>
+    static void err(spdlog::format_string_t<Args...> fmt, Args &&...args) {
       get()->error(fmt, std::forward<Args>(args)...);
     }
 
-    template <typename... Args> static void critical(spdlog::format_string_t<Args...> fmt, Args &&...args) {
+    template<typename... Args>
+    static void critical(spdlog::format_string_t<Args...> fmt, Args &&...args) {
       get()->critical(fmt, std::forward<Args>(args)...);
     }
     // Stats
-    template <typename... StatsTypes, typename... Args>
+    template<typename... StatsTypes, typename... Args>
     static void stats(spdlog::format_string_t<Args...> fmt, Args &&...args) {
       stats<StatsTypes...>(LogLevel::info, fmt, std::forward<Args>(args)...);
     }
 
-    template <typename... StatsTypes, typename... Args>
+    template<typename... StatsTypes, typename... Args>
     static void stats(LogLevel level, spdlog::format_string_t<Args...> fmt, Args &&...args) {
       if constexpr (sizeof...(StatsTypes) == 0) {
         return;
@@ -181,7 +189,8 @@ namespace sc {
     }
 
     // Timer
-    template <typename... Args> [[nodiscard]] static auto time(std::string_view fmt_str, Args &&...args) {
+    template<typename... Args>
+    [[nodiscard]] static auto time(std::string_view fmt_str, Args &&...args) {
       return time(spdlog::level::info, fmt_str, std::forward<Args>(args)...);
     }
 
@@ -190,7 +199,7 @@ namespace sc {
     // so the line shows the values they have at the end of the measurement;
     // they have to outlive the timer. Temporaries and the format string are
     // copied.
-    template <typename... Args>
+    template<typename... Args>
     [[nodiscard]] static auto time(spdlog::level::level_enum level, std::string_view fmt_str, Args &&...args) {
       return sc::stats::Timer([level, format = std::string(fmt_str),
                                kept = std::tuple<Args...>(std::forward<Args>(args)...)](sc::stats::TimeResult res) {
@@ -217,7 +226,7 @@ namespace sc {
       if (!collected_stats.empty()) {
         stats_msg.reserve(collected_stats.size() * 64);
         bool first = true;
-        for (const auto &[name, value_str] : collected_stats) {
+        for (const auto &[name, value_str]: collected_stats) {
           if (!first) {
             stats_msg += " | ";
           }
@@ -241,7 +250,8 @@ namespace sc {
     }
   };
 
-  template <FixedString M, FixedString C> spdlog::logger *Logger<M, C>::get() {
+  template<FixedString M, FixedString C>
+  spdlog::logger *Logger<M, C>::get() {
     auto *ptr = rawLogger.load(std::memory_order_acquire);
     if (ptr == nullptr) [[unlikely]] {
       init();
@@ -250,7 +260,8 @@ namespace sc {
     return ptr;
   }
 
-  template <FixedString M, FixedString C> void Logger<M, C>::init(spdlog::level::level_enum level) {
+  template<FixedString M, FixedString C>
+  void Logger<M, C>::init(spdlog::level::level_enum level) {
     if (rawLogger.load(std::memory_order_acquire) != nullptr) {
       return;
     }

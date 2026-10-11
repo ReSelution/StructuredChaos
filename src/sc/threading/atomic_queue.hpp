@@ -32,7 +32,8 @@ namespace sc::threading {
   // whole block of the previous lap was popped, which can keep up to one block
   // of capacity unused. Smaller queues use one slot per granule and keep their
   // memory.
-  template <typename T, size_t Capacity = 4096> class AtomicQueue {
+  template<typename T, size_t Capacity = 4096>
+  class AtomicQueue {
 
     struct Slot {
       alignas(64) std::atomic<size_t> state{0};
@@ -76,7 +77,8 @@ namespace sc::threading {
     AtomicQueue &operator=(const AtomicQueue &) = delete;
 
     // Blocks (spinning) while the queue is full.
-    template <typename... Args> void emplace(Args &&...args) {
+    template<typename... Args>
+    void emplace(Args &&...args) {
       const size_t pos = m_tail.fetch_add(1, std::memory_order_relaxed);
 
       const std::atomic<size_t> &lap = m_laps[granule_of(pos)];

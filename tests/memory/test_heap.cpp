@@ -47,7 +47,8 @@ namespace {
 
   // A type with a destructor and a chosen alignment and size, which notes the
   // address it is destroyed at.
-  template <size_t Align, size_t Size> struct alignas(Align) Probe {
+  template<size_t Align, size_t Size>
+  struct alignas(Align) Probe {
     static inline std::vector<const void *> destroyed;
 
     unsigned char data[Size];
@@ -92,7 +93,8 @@ namespace {
 
   // Creates a few objects, overwrites them completely and checks that each one
   // is aligned and destroyed again at the address make() returned.
-  template <size_t Align, size_t Size> void checkProbe() {
+  template<size_t Align, size_t Size>
+  void checkProbe() {
     using Type = Probe<Align, Size>;
     static_assert(alignof(Type) == Align);
     Type::destroyed.clear();
@@ -124,7 +126,7 @@ static_assert(!std::is_move_constructible_v<sc::Heap>);
 static_assert(!std::is_move_assignable_v<sc::Heap>);
 
 // makePmr is only there for types that take the allocator.
-template <typename T>
+template<typename T>
 concept PmrMakeable = requires(sc::Heap heap) { heap.template makePmr<T>(); };
 static_assert(PmrMakeable<std::pmr::vector<int>>);
 static_assert(PmrMakeable<std::pmr::string>);
@@ -153,8 +155,8 @@ TEST_CASE("Heap: allocations are aligned and do not overlap", "[memory][heap]") 
   sc::Heap heap;
 
   std::vector<std::pair<std::byte *, size_t>> chunks;
-  for (size_t alignment : {size_t{1}, size_t{8}, size_t{16}, size_t{64}, size_t{4096}}) {
-    for (size_t bytes : {size_t{1}, size_t{24}, size_t{100}, size_t{5000}}) {
+  for (size_t alignment: {size_t{1}, size_t{8}, size_t{16}, size_t{64}, size_t{4096}}) {
+    for (size_t bytes: {size_t{1}, size_t{24}, size_t{100}, size_t{5000}}) {
       auto *ptr = static_cast<std::byte *>(heap.allocate(bytes, alignment));
       REQUIRE(ptr != nullptr);
       CHECK(isAligned(ptr, alignment));
@@ -173,7 +175,7 @@ TEST_CASE("Heap: allocations are aligned and do not overlap", "[memory][heap]") 
 TEST_CASE("Heap: the default alignment fits every basic type", "[memory][heap]") {
   sc::Heap heap;
 
-  for (size_t bytes : {size_t{16}, size_t{64}, size_t{1000}}) {
+  for (size_t bytes: {size_t{16}, size_t{64}, size_t{1000}}) {
     CHECK(isAligned(heap.allocate(bytes), alignof(std::max_align_t)));
   }
 }
@@ -182,7 +184,7 @@ TEST_CASE("Heap: an alignment known at compile time", "[memory][heap]") {
   sc::Heap heap;
 
   SECTION("up to the one of the basic types") {
-    for (size_t bytes : {size_t{1}, size_t{24}, size_t{5000}}) {
+    for (size_t bytes: {size_t{1}, size_t{24}, size_t{5000}}) {
       CHECK(isAligned(heap.allocate<1>(bytes), 1));
       CHECK(isAligned(heap.allocate<8>(bytes), 8));
       void *ptr = heap.allocate<alignof(std::max_align_t)>(bytes);
@@ -192,7 +194,7 @@ TEST_CASE("Heap: an alignment known at compile time", "[memory][heap]") {
   }
 
   SECTION("stricter than that") {
-    for (size_t bytes : {size_t{1}, size_t{64}, size_t{192}, size_t{5000}}) {
+    for (size_t bytes: {size_t{1}, size_t{64}, size_t{192}, size_t{5000}}) {
       CHECK(isAligned(heap.allocate<32>(bytes), 32));
       CHECK(isAligned(heap.allocate<64>(bytes), 64));
       void *ptr = heap.allocate<4096>(bytes);
@@ -246,7 +248,7 @@ TEST_CASE("Heap: reset destroys the objects in reverse order", "[memory][heap]")
   heap.make<Tracked>(&log, 1);
   heap.make<Trivial>(0, 0.0);
   heap.make<Tracked>(&log, 2);
-  (void)heap.allocate(100);
+  (void) heap.allocate(100);
   heap.make<Tracked>(&log, 3);
   REQUIRE(log.empty());
 
@@ -687,7 +689,7 @@ TEST_CASE("Heap: reset frees everything and leaves a usable heap", "[memory][hea
 
   REQUIRE(heap.get() != nullptr);
   size_t stillOwned = 0;
-  for (void *block : blocks) {
+  for (void *block: blocks) {
     stillOwned += static_cast<size_t>(heap.contains(block));
   }
   CHECK(stillOwned == 0);
@@ -731,7 +733,7 @@ TEST_CASE("Heap: concurrent allocations do not overlap", "[memory][heap]") {
   size_t corrupted = 0;
   size_t foreign = 0;
   for (size_t t = 0; t < Threads; ++t) {
-    for (std::byte *ptr : results[t]) {
+    for (std::byte *ptr: results[t]) {
       for (size_t i = 0; i < Bytes; ++i) {
         corrupted += static_cast<size_t>(ptr[i] != static_cast<std::byte>(t + 1));
       }

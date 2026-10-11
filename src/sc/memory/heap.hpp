@@ -45,7 +45,7 @@ namespace sc {
     };
 
     // Distance from the object to its node.
-    template <typename T>
+    template<typename T>
     static constexpr size_t nodeOffset = (sizeof(T) + alignof(CleanupNode) - 1) & ~(alignof(CleanupNode) - 1);
 
   public:
@@ -71,7 +71,8 @@ namespace sc {
 
     // For an alignment that is known at compile time, which decides there
     // whether the aligned allocation of mimalloc is needed.
-    template <size_t Align> [[nodiscard]] void *allocate(size_t size) {
+    template<size_t Align>
+    [[nodiscard]] void *allocate(size_t size) {
       static_assert(Align != 0 && (Align & (Align - 1)) == 0, "the alignment has to be a power of two");
       if constexpr (Align <= alignof(std::max_align_t)) {
         return checked(mi_heap_malloc(m_heap, size));
@@ -83,7 +84,8 @@ namespace sc {
     // The object lives until the heap is reset or destroyed. Its destructor
     // is run then, if it has one. For a pmr container that is to live in this
     // heap, use makePmr().
-    template <typename T, typename... Args> T *make(Args &&...args) {
+    template<typename T, typename... Args>
+    T *make(Args &&...args) {
       if constexpr (std::is_trivially_destructible_v<T>) {
         return new (allocate<alignof(T)>(sizeof(T))) T(std::forward<Args>(args)...);
       } else {
@@ -98,7 +100,7 @@ namespace sc {
     // itself as that allocator, behind or in front of args as the type wants
     // it. The object and everything it allocates lives in the heap, so a
     // container whose elements own nothing else needs no destructor call.
-    template <typename T, typename... Args>
+    template<typename T, typename... Args>
       requires std::uses_allocator_v<T, std::pmr::polymorphic_allocator<>>
     T *makePmr(Args &&...args) {
       const std::pmr::polymorphic_allocator<> allocator(this);
@@ -114,7 +116,8 @@ namespace sc {
     }
 
     // Uninitialized room for count elements.
-    template <typename T = uint8_t> [[nodiscard]] std::span<T> allocateSpan(size_t count) {
+    template<typename T = uint8_t>
+    [[nodiscard]] std::span<T> allocateSpan(size_t count) {
       if (count == 0) [[unlikely]] {
         return {};
       }
@@ -125,7 +128,8 @@ namespace sc {
     }
 
     // The same with an alignment stricter than the one of the type.
-    template <typename T = uint8_t> [[nodiscard]] std::span<T> allocateSpan(size_t count, size_t alignment) {
+    template<typename T = uint8_t>
+    [[nodiscard]] std::span<T> allocateSpan(size_t count, size_t alignment) {
       if (count == 0) [[unlikely]] {
         return {};
       }
@@ -156,13 +160,15 @@ namespace sc {
     }
 
     // Room for an object and the node behind it.
-    template <typename T> void *allocateWithNode() {
+    template<typename T>
+    void *allocateWithNode() {
       constexpr size_t Align = std::max(alignof(T), alignof(CleanupNode));
       return allocate<Align>(nodeOffset<T> + sizeof(CleanupNode));
     }
 
     // Gives the block back if the constructor throws.
-    template <typename T, typename... Args> static T *construct(void *block, Args &&...args) {
+    template<typename T, typename... Args>
+    static T *construct(void *block, Args &&...args) {
       try {
         return new (block) T(std::forward<Args>(args)...);
       } catch (...) {
@@ -171,7 +177,7 @@ namespace sc {
       }
     }
 
-    template <typename T, typename... Args>
+    template<typename T, typename... Args>
     static T *constructPmr(void *block, const std::pmr::polymorphic_allocator<> &allocator, Args &&...args) {
       try {
         return std::uninitialized_construct_using_allocator(static_cast<T *>(block), allocator,
@@ -184,7 +190,8 @@ namespace sc {
 
     // Puts the object of a block from allocateWithNode() on the list. Only an
     // object that exists is remembered.
-    template <typename T> void remember(void *block) noexcept {
+    template<typename T>
+    void remember(void *block) noexcept {
       auto *node = new (static_cast<std::byte *>(block) + nodeOffset<T>)
           CleanupNode{.destroy =
                           [](CleanupNode *n) noexcept {
@@ -204,7 +211,8 @@ namespace sc {
       return ptr;
     }
 
-    template <typename T> static size_t byteCount(size_t count) {
+    template<typename T>
+    static size_t byteCount(size_t count) {
       if (count > SIZE_MAX / sizeof(T)) [[unlikely]] {
         throw std::bad_alloc();
       }

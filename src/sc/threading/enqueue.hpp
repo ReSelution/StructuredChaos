@@ -13,7 +13,7 @@
 
 namespace sc::threading::impl {
 
-  template <Priority P, typename F, typename... Args>
+  template<Priority P, typename F, typename... Args>
     requires std::invocable<F, Args...>
   auto enqueue(F &&f, Args &&...args) -> std::future<std::invoke_result_t<F, Args...>> {
     using return_type = std::invoke_result_t<F, Args...>;
@@ -67,7 +67,7 @@ namespace sc::threading::impl {
   }
 
   // --- VOID PATHS ---
-  template <typename F, typename Arg, typename... Args>
+  template<typename F, typename Arg, typename... Args>
   auto make_void_individual(F &&f, Arg &&item, const std::tuple<Args...> &args, std::shared_ptr<BatchState> &state) {
     return [f, args, item = std::forward<Arg>(item), state]() mutable {
       auto completion_guard = [&]() {
@@ -90,7 +90,7 @@ namespace sc::threading::impl {
     };
   }
 
-  template <typename F, typename Arg, typename... Args>
+  template<typename F, typename Arg, typename... Args>
   auto make_void_individualWithCallback(F &&f, Arg &&item, const std::tuple<Args...> &args,
                                         std::shared_ptr<DetachBatchState> &state) {
     return [f, args, item = std::forward<Arg>(item), state]() mutable {
@@ -112,7 +112,8 @@ namespace sc::threading::impl {
     };
   }
 
-  template <typename F, typename Shared> auto make_void_merged(F &&f, Shared shared, size_t i) {
+  template<typename F, typename Shared>
+  auto make_void_merged(F &&f, Shared shared, size_t i) {
     return [f, shared, i]() {
       try {
         std::apply([&](auto &&...extra) { f(std::move(shared->payload[i]), extra...); }, shared->saved_args);
@@ -126,7 +127,7 @@ namespace sc::threading::impl {
   }
 
   // --- NON-VOID PATHS ---
-  template <typename F, typename Arg, typename... Args, typename Promise>
+  template<typename F, typename Arg, typename... Args, typename Promise>
   auto make_nonvoid_individual(F &&f, Arg &&item, const std::tuple<Args...> &args, Promise p) {
     return [f, args, item = std::forward<Arg>(item), p = std::move(p)]() mutable {
       try {
@@ -142,13 +143,13 @@ namespace sc::threading::impl {
   // =========================================================================
 
   // Case 1a: SFO + Void Return Type -> Liefert std::future<void>
-  template <Priority P, typename R, typename F, typename TupleArgs>
+  template<Priority P, typename R, typename F, typename TupleArgs>
   auto enqueueBatchSfoVoid(R &&r, F &&f, TupleArgs &&arg_tuple) {
     const size_t size = std::ranges::size(r);
 
     auto state = std::make_shared<BatchState>(size);
 
-    for (auto &&item : r) {
+    for (auto &&item: r) {
 
       queues.emplace<P>(make_void_individual(f, std::forward<decltype(item)>(item), arg_tuple, state));
     }
@@ -158,13 +159,13 @@ namespace sc::threading::impl {
 
   // Case 1b: SFO + Non-Void Return Type -> Liefert
   // std::vector<std::future<RetType>>
-  template <Priority P, typename RetType, typename R, typename F, typename TupleArgs>
+  template<Priority P, typename RetType, typename R, typename F, typename TupleArgs>
   auto enqueueBatchSfoNonVoid(R &&r, size_t size, F &&f, TupleArgs &&arg_tuple) {
 
     FutureGroup<RetType> futures;
     futures.reserve(size);
 
-    for (auto &&item : r) {
+    for (auto &&item: r) {
       std::promise<RetType> p;
       futures.push(p.get_future());
       queues.emplace<P>(make_nonvoid_individual(f, std::forward<decltype(item)>(item), arg_tuple, std::move(p)));
@@ -178,7 +179,7 @@ namespace sc::threading::impl {
   // =========================================================================
 
   // Case 2a: Merged + Void Return Type -> Liefert std::future<void>
-  template <Priority P, typename R, typename F, typename... Args>
+  template<Priority P, typename R, typename F, typename... Args>
   auto enqueueBatchMergedVoid(R &&r, F &&f, Args &&...args) {
     const size_t size = std::ranges::size(r);
     auto shared = std::make_shared<MergedState<R, Args...>>(size, std::forward<R>(r), std::forward<Args>(args)...);
@@ -209,20 +210,20 @@ namespace sc::threading::impl {
 
   // Case 2b: Merged + Non-Void Return Type -> Liefert
   // std::vector<std::future<RetType>>
-  template <Priority P, typename RetType, typename R, typename F, typename... Args>
+  template<Priority P, typename RetType, typename R, typename F, typename... Args>
   auto enqueueBatchMergedNonVoid(R &&r, F &&f, Args &&...args) {
     struct MergedNonVoidState : MergedState<R, Args...> {
       std::vector<std::promise<RetType>> promises;
 
-      MergedNonVoidState(size_t n, R &&r, Args &&...a)
-          : MergedState<R, Args...>(n, std::forward<R>(r), std::forward<Args>(a)...), promises(n) {}
+      MergedNonVoidState(size_t n, R &&r, Args &&...a) :
+          MergedState<R, Args...>(n, std::forward<R>(r), std::forward<Args>(a)...), promises(n) {}
     };
     const size_t size = std::ranges::size(r);
 
     auto shared = std::make_shared<MergedNonVoidState>(size, std::forward<R>(r), std::forward<Args>(args)...);
     FutureGroup<RetType> futures;
     futures.reserve(size);
-    for (auto &p : shared->promises) {
+    for (auto &p: shared->promises) {
       futures.push(p.get_future());
     }
 
@@ -246,7 +247,7 @@ namespace sc::threading::impl {
     return futures;
   }
 
-  template <Priority P, std::ranges::sized_range R, typename F, typename... Args>
+  template<Priority P, std::ranges::sized_range R, typename F, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...>
   auto enqueueBatch(R &&r, F &&f, Args &&...args) {
     const size_t count = std::ranges::size(r);

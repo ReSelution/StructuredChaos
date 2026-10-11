@@ -18,7 +18,8 @@ namespace sc::stats {
     static constexpr std::array suffixes{"", "K", "M", "B", "T"}; // for counts (1K, 1M...)
   };
 
-  template <typename System> struct ChaosFormatter {
+  template<typename System>
+  struct ChaosFormatter {
     [[nodiscard]] static std::string format(double value, std::string_view time_suffix = "") {
       size_t i = 0;
       double v = value;

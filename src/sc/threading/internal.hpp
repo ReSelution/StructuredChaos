@@ -18,11 +18,12 @@ namespace sc::threading {
     BatchState(size_t n) : remaining(n) {}
   };
 
-  template <typename R, typename... Args> struct MergedState : BatchState {
+  template<typename R, typename... Args>
+  struct MergedState : BatchState {
     std::decay_t<R> payload;
     std::tuple<std::decay_t<Args>...> saved_args;
-    MergedState(size_t n, R &&r, Args &&...a)
-        : BatchState(n), payload(std::forward<R>(r)), saved_args(std::forward<Args>(a)...) {}
+    MergedState(size_t n, R &&r, Args &&...a) :
+        BatchState(n), payload(std::forward<R>(r)), saved_args(std::forward<Args>(a)...) {}
   };
 
   struct DetachBatchState {
@@ -31,20 +32,23 @@ namespace sc::threading {
     DetachBatchState(size_t n, MoveOnlyFunction &&cb) : remaining(n), on_finished(std::move(cb)) {}
   };
 
-  template <typename R, typename... Args> struct DetachedMergedState : DetachBatchState {
+  template<typename R, typename... Args>
+  struct DetachedMergedState : DetachBatchState {
     std::decay_t<R> payload;
     std::tuple<std::decay_t<Args>...> saved_args;
-    DetachedMergedState(size_t n, R &&r, MoveOnlyFunction &&cb, Args &&...a)
-        : DetachBatchState(n, std::move(cb)), payload(std::forward<R>(r)), saved_args(std::forward<Args>(a)...) {}
+    DetachedMergedState(size_t n, R &&r, MoveOnlyFunction &&cb, Args &&...a) :
+        DetachBatchState(n, std::move(cb)), payload(std::forward<R>(r)), saved_args(std::forward<Args>(a)...) {}
   };
-  template <typename R, typename... Args> struct DetachedMergedStateNoCallback {
+  template<typename R, typename... Args>
+  struct DetachedMergedStateNoCallback {
     std::decay_t<R> payload;
     std::tuple<std::decay_t<Args>...> saved_args;
-    DetachedMergedStateNoCallback(R &&r, Args &&...a)
-        : payload(std::forward<R>(r)), saved_args(std::forward<Args>(a)...) {}
+    DetachedMergedStateNoCallback(R &&r, Args &&...a) :
+        payload(std::forward<R>(r)), saved_args(std::forward<Args>(a)...) {}
   };
 
-  template <typename R, typename... Args> struct MergedNonVoidState {
+  template<typename R, typename... Args>
+  struct MergedNonVoidState {
     std::decay_t<R> payload;
     std::tuple<std::decay_t<Args>...> saved_args;
     MergedNonVoidState(R &&r, Args &&...a) : payload(std::forward<R>(r)), saved_args(std::forward<Args>(a)...) {}

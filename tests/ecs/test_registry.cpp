@@ -256,7 +256,7 @@ TEST_CASE("Registry Access Cache", "[ecs][registry]") {
       });
     }
     start.store(true, std::memory_order_release);
-    for (auto &thread : threads) {
+    for (auto &thread: threads) {
       thread.join();
     }
 
@@ -366,12 +366,12 @@ TEST_CASE("Registry Parallel Entity Creation", "[ecs][registry]") {
     });
   }
   start.store(true, std::memory_order_release);
-  for (auto &thread : threads) {
+  for (auto &thread: threads) {
     thread.join();
   }
 
   std::vector<entt::entity> all;
-  for (const auto &part : created) {
+  for (const auto &part: created) {
     all.insert(all.end(), part.begin(), part.end());
   }
   std::ranges::sort(all);
@@ -416,13 +416,13 @@ TEST_CASE("Registry Entity Creation From Many Threads", "[ecs][registry]") {
       std::this_thread::yield();
     }
     start.store(true, std::memory_order_release);
-    for (auto &thread : threads) {
+    for (auto &thread: threads) {
       thread.join();
     }
 
     std::vector<entt::entity> all;
     all.reserve(static_cast<size_t>(thread_count) * per_thread);
-    for (const auto &part : created) {
+    for (const auto &part: created) {
       all.insert(all.end(), part.begin(), part.end());
     }
     std::ranges::sort(all);

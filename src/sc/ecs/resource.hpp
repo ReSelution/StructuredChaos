@@ -9,20 +9,21 @@
 #include "anchor.hpp"
 namespace sc::ecs {
 
-  template <typename T>
+  template<typename T>
   concept IsContiguousResource = requires(T t) {
     { t.data() };
     { t.size() } -> std::convertible_to<std::size_t>;
     typename T::value_type;
   };
 
-  template <IsContiguousResource ResourceType> struct Resource {
+  template<IsContiguousResource ResourceType>
+  struct Resource {
     static constexpr bool is_resource = true;
     // Only needed to allocate; a buffer is freed without it.
     mi_heap_t *heap = HeapAnchor::current;
     ResourceType view{};
 
-    template <typename T>
+    template<typename T>
       requires requires(T t) {
         { t.data() };
         { t.size() };
@@ -41,7 +42,7 @@ namespace sc::ecs {
         mi_free(const_cast<void *>(static_cast<const void *>(view.data())));
       }
     }
-    template <typename T>
+    template<typename T>
       requires requires(T t) {
         { t.data() };
         { t.size() };
@@ -101,7 +102,7 @@ namespace sc::ecs {
     [[nodiscard]] bool empty() const { return view.empty(); }
   };
 
-  template <typename T>
+  template<typename T>
   concept IsResource = requires {
     { T::is_resource } -> std::convertible_to<bool>;
   } && T::is_resource;

@@ -54,7 +54,7 @@ TEST_CASE("ComponentLock Writers Exclude Each Other", "[ecs][lock]") {
       }
     });
   }
-  for (auto &thread : threads) {
+  for (auto &thread: threads) {
     thread.join();
   }
 
@@ -101,11 +101,11 @@ TEST_CASE("ComponentLock Readers Never See A Writer At Work", "[ecs][lock]") {
     });
   }
 
-  for (auto &thread : writers) {
+  for (auto &thread: writers) {
     thread.join();
   }
   stop.store(true);
-  for (auto &thread : readers) {
+  for (auto &thread: readers) {
     thread.join();
   }
 
@@ -155,7 +155,7 @@ TEST_CASE("ComponentLock Writer Gets In Between Overlapping Readers", "[ecs][loc
   const int reached = written.load();
 
   stop.store(true);
-  for (auto &thread : readers) {
+  for (auto &thread: readers) {
     thread.join();
   }
   writer.join();

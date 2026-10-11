@@ -49,7 +49,8 @@ namespace {
     FastTask(int i) : id(i) {}
   };
 
-  template <typename TaskType> void execute_batch_run(bool force_no_sfo, bool use_detach) {
+  template<typename TaskType>
+  void execute_batch_run(bool force_no_sfo, bool use_detach) {
     constexpr size_t TASKS = 20000;
     std::vector<TaskType> tasks;
     tasks.reserve(TASKS);
@@ -70,14 +71,14 @@ namespace {
     if (use_detach) {
       if (force_no_sfo) {
         sc::threading::detachBatch(
-            std::move(tasks), [breaker](TaskType t [[maybe_unused]]) { (void)breaker; }, nullptr);
+            std::move(tasks), [breaker](TaskType t [[maybe_unused]]) { (void) breaker; }, nullptr);
       } else {
         sc::threading::detachBatch(std::move(tasks), [](TaskType t [[maybe_unused]]) {}, nullptr);
       }
     } else {
       if (force_no_sfo) {
         auto f =
-            sc::threading::enqueueBatch(std::move(tasks), [breaker](TaskType t [[maybe_unused]]) { (void)breaker; });
+            sc::threading::enqueueBatch(std::move(tasks), [breaker](TaskType t [[maybe_unused]]) { (void) breaker; });
       } else {
         auto f = sc::threading::enqueueBatch(std::move(tasks), [](TaskType t [[maybe_unused]]) {});
       }
@@ -257,7 +258,7 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
     auto future = sc::threading::enqueue(
         [](const SFOBreaker &b) {
           size_t sum = 0;
-          for (const auto value : b.weight) {
+          for (const auto value: b.weight) {
             sum += std::to_integer<size_t>(value);
           }
           return sum;

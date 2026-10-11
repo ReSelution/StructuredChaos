@@ -39,10 +39,11 @@ namespace {
     return entities;
   }
 
-  template <typename... Components> size_t count_of(sc::ecs::Registry &registry) {
+  template<typename... Components>
+  size_t count_of(sc::ecs::Registry &registry) {
     auto view = registry.view<Components...>();
     size_t count = 0;
-    for ([[maybe_unused]] auto e : view) {
+    for ([[maybe_unused]] auto e: view) {
       ++count;
     }
     return count;
@@ -55,7 +56,7 @@ TEST_CASE("Registry Destroy", "[ecs][registry][destroy]") {
 
   SECTION("Removes The Entity And Its Components") {
     auto entities = make_entities(registry, 10);
-    for (auto e : entities) {
+    for (auto e: entities) {
       registry.emplace<DestroyPosition>(e, number_of(e));
       registry.emplace<DestroyVelocity>(e, number_of(e));
     }
@@ -93,7 +94,7 @@ TEST_CASE("Registry Destroy", "[ecs][registry][destroy]") {
     // Enough new entities for the freed number to come around again.
     auto fresh = make_entities(registry, 8);
     bool number_reused = false;
-    for (auto e : fresh) {
+    for (auto e: fresh) {
       REQUIRE(static_cast<entt::entity>(e) != old);
       number_reused = number_reused || entt::to_entity(static_cast<entt::entity>(e)) == entt::to_entity(old);
     }
@@ -104,7 +105,7 @@ TEST_CASE("Registry Destroy", "[ecs][registry][destroy]") {
   SECTION("Releases Resources Of The Components") {
     CountingResource::cleared.store(0);
     auto entities = make_entities(registry, 3);
-    for (auto e : entities) {
+    for (auto e: entities) {
       registry.emplace<DestroyOwner>(e);
     }
 
@@ -114,7 +115,7 @@ TEST_CASE("Registry Destroy", "[ecs][registry][destroy]") {
 
   SECTION("Range Of Entities") {
     auto entities = make_entities(registry, 100);
-    for (auto e : entities) {
+    for (auto e: entities) {
       registry.emplace<DestroyPosition>(e, number_of(e));
     }
 
@@ -128,7 +129,7 @@ TEST_CASE("Registry Destroy", "[ecs][registry][destroy]") {
 
   SECTION("Entity In A Group") {
     auto entities = make_entities(registry, 20);
-    for (auto e : entities) {
+    for (auto e: entities) {
       registry.emplace<DestroyPosition>(e, number_of(e));
       registry.emplace<DestroyVelocity>(e, number_of(e));
     }
@@ -158,7 +159,7 @@ TEST_CASE("Registry Destroy From Several Threads", "[ecs][registry][destroy][thr
 
   sc::ecs::Registry registry;
   auto entities = make_entities(registry, (thread_count * per_thread) + survivors);
-  for (auto e : entities) {
+  for (auto e: entities) {
     registry.emplace<DestroyPosition>(e, number_of(e));
     registry.emplace<DestroyVelocity>(e, number_of(e));
   }
@@ -188,7 +189,7 @@ TEST_CASE("Registry Destroy From Several Threads", "[ecs][registry][destroy][thr
       }
     });
   }
-  for (auto &thread : destroyers) {
+  for (auto &thread: destroyers) {
     thread.join();
   }
   stop.store(true);

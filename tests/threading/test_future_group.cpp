@@ -34,13 +34,14 @@ namespace {
   };
 
   // A group over fresh promises, which the test resolves by hand.
-  template <typename T> struct Pending {
+  template<typename T>
+  struct Pending {
     std::vector<std::promise<T>> promises;
     FutureGroup<T> group;
 
     explicit Pending(size_t count) : promises(count) {
       group.reserve(count);
-      for (auto &p : promises) {
+      for (auto &p: promises) {
         group.push(p.get_future());
       }
     }
@@ -156,7 +157,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
 
   SECTION("Void Group") {
     Pending<void> pending(3);
-    for (auto &p : pending.promises) {
+    for (auto &p: pending.promises) {
       p.set_value();
     }
 
@@ -279,7 +280,7 @@ TEST_CASE("FutureGroup Ownership", "[threading][future_group]") {
   SECTION("Constructs From A Vector Of Futures") {
     std::vector<std::promise<std::string>> promises(2);
     std::vector<std::future<std::string>> futures;
-    for (auto &p : promises) {
+    for (auto &p: promises) {
       futures.push_back(p.get_future());
     }
 
@@ -407,7 +408,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
     SFOBreaker breaker;
 
     auto group = sc::threading::enqueueBatch(std::move(tasks), [breaker](int value) -> int {
-      (void)breaker;
+      (void) breaker;
       if (value == 500) {
         throw std::runtime_error("task 500");
       }

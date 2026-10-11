@@ -11,7 +11,8 @@
 
 namespace sc::stats {
 
-  template <typename UnitSystem = MetricUnits> struct Counter {
+  template<typename UnitSystem = MetricUnits>
+  struct Counter {
     struct alignas(64) Storage {
       const std::string_view name;
       std::atomic<uint64_t> value{0};

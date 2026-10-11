@@ -221,7 +221,7 @@ TEST_CASE("Logger From Several Threads", "[logger][threading]") {
       }
     });
   }
-  for (auto &thread : threads) {
+  for (auto &thread: threads) {
     thread.join();
   }
   Log::flush();
@@ -232,7 +232,7 @@ TEST_CASE("Logger From Several Threads", "[logger][threading]") {
   // Every line is complete: no two messages ran into each other.
   size_t broken = 0;
   const std::regex whole(TIME + R"(\[debug\]: thread \d line \d+)");
-  for (const auto &line : lines) {
+  for (const auto &line: lines) {
     if (!std::regex_match(line, whole)) {
       ++broken;
     }

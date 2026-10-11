@@ -35,9 +35,10 @@ namespace sc::stats {
   }
   void reset_all();
 
-  template <typename LoggerType> void report_all(typename LoggerType::LogLevel level = LoggerType::LogLevel::info) {
+  template<typename LoggerType>
+  void report_all(typename LoggerType::LogLevel level = LoggerType::LogLevel::info) {
     if constexpr (StatsEnabled) {
-      for (auto *s : reg() | std::views::values) {
+      for (auto *s: reg() | std::views::values) {
         LoggerType::log(level, "{} -> {}", s->internal_name(), s->internal_str());
       }
     }
@@ -45,7 +46,7 @@ namespace sc::stats {
 
   void report_all_to(auto &&callback) {
     if constexpr (StatsEnabled) {
-      for (auto *s : reg() | std::views::values) {
+      for (auto *s: reg() | std::views::values) {
         callback(s->internal_name(), s->internal_str());
       }
     }

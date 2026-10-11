@@ -38,7 +38,7 @@ TEST_CASE("ArenaPool: hands out and takes back resources", "[memory][pool]") {
       REQUIRE(arenas.back() != nullptr);
       CHECK(arenas.back()->allocate(64, 8) != nullptr);
     }
-    for (auto &arena : arenas) {
+    for (auto &arena: arenas) {
       sc::ArenaPool::release(arena);
     }
   }
@@ -74,7 +74,7 @@ TEST_CASE("ArenaPool: hands out and takes back resources", "[memory][pool]") {
       arenas.back()->make<Tracked>(&log, i);
     }
 
-    for (auto &arena : arenas) {
+    for (auto &arena: arenas) {
       sc::ArenaPool::release(arena);
       REQUIRE(arena == nullptr);
     }

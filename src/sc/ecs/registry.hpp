@@ -16,16 +16,17 @@
 #include <mimalloc.h>
 #include <pfr.hpp>
 
+#include "sc/stats/stats.hpp"
+#include "sc/stats/throughput.hpp"
+
 #include "anchor.hpp"
 #include "component_lock.hpp"
 #include "entity.hpp"
 #include "resource.hpp"
-#include "sc/stats/stats.hpp"
-#include "sc/stats/throughput.hpp"
 #include "view.hpp"
 
 namespace sc::ecs::internal {
-  template <typename It>
+  template<typename It>
     requires IsEntity<typename std::iterator_traits<It>::value_type>
   struct EntityOutputIterator {
     It current;
@@ -62,7 +63,8 @@ namespace sc::ecs::internal {
   // Index of a component type, the same in every registry. Assigned on first
   // use, counted over all component types of the program. Not stable across
   // shared library boundaries, where every module would count on its own.
-  template <typename Component> size_t componentIndex() {
+  template<typename Component>
+  size_t componentIndex() {
     static const size_t index = [] {
       const size_t next = nextComponentIndex.fetch_add(1, std::memory_order_relaxed);
       if (next >= MAX_COMPONENT_TYPES) {
@@ -79,7 +81,8 @@ namespace sc::ecs::internal {
   inline std::atomic<size_t> nextGroupIndex{0};
 
   // Index of a group type, assigned like componentIndex.
-  template <typename Group> size_t groupIndex() {
+  template<typename Group>
+  size_t groupIndex() {
     static const size_t index = [] {
       const size_t next = nextGroupIndex.fetch_add(1, std::memory_order_relaxed);
       if (next >= MAX_GROUP_TYPES) {
@@ -121,7 +124,7 @@ namespace sc::ecs::internal {
 namespace sc::ecs {
   using Entities = sc::stats::Stat<"Entities", sc::stats::Throughput<sc::stats::MetricUnits>>;
 
-  template <typename T>
+  template<typename T>
   concept Mutable = !std::is_const_v<T>;
 
   // Shared locks on several components, held for as long as the object lives.
@@ -134,7 +137,8 @@ namespace sc::ecs {
   // that name the same components in a different order therefore cannot block
   // each other through a writer waiting in between, and no back-off algorithm
   // like the one of std::lock is needed.
-  template <typename... Components> struct [[nodiscard]] Lock {
+  template<typename... Components>
+  struct [[nodiscard]] Lock {
     static constexpr size_t COUNT = sizeof...(Components);
 
     std::array<internal::ComponentAccessBase *, COUNT> accesses;
@@ -144,8 +148,8 @@ namespace sc::ecs {
 
     explicit Lock(std::array<internal::ComponentAccessBase *, COUNT> a) : accesses(a) { lock(); }
 
-    Lock(Lock &&other) noexcept
-        : accesses(other.accesses), mutexes(other.mutexes), owns(std::exchange(other.owns, false)) {}
+    Lock(Lock &&other) noexcept :
+        accesses(other.accesses), mutexes(other.mutexes), owns(std::exchange(other.owns, false)) {}
 
     Lock &operator=(Lock &&other) noexcept {
       if (this != &other) {
@@ -221,11 +225,12 @@ namespace sc::ecs {
   };
 
   class Registry {
-    template <typename Component> using StorageFor = entt::storage_for_t<std::remove_const_t<Component>>;
+    template<typename Component>
+    using StorageFor = entt::storage_for_t<std::remove_const_t<Component>>;
 
     // Whether a component has Resource fields, which own memory outside of the
     // component storage.
-    template <typename Component>
+    template<typename Component>
     static constexpr bool hasResource = []() {
       if constexpr (!pfr::is_implicitly_reflectable_v<Component, void>) {
         return false;
@@ -241,7 +246,8 @@ namespace sc::ecs {
       }
     }();
 
-    template <typename Component> struct alignas(64) ComponentAccess : internal::ComponentAccessBase {
+    template<typename Component>
+    struct alignas(64) ComponentAccess : internal::ComponentAccessBase {
       // Heap the Resource fields of the component allocate from, null for a
       // component without any. Components are trivially destructible, so their
       // buffers are not freed one by one: destroying the heap frees them all.
@@ -265,29 +271,34 @@ namespace sc::ecs {
   public:
     Entity create();
 
-    template <typename Component> void reserve(size_t count) {
+    template<typename Component>
+    void reserve(size_t count) {
       executeWrite<Component>([&](auto &storage) -> void { storage.reserve(count); });
     }
 
-    template <typename It>
+    template<typename It>
       requires IsEntity<typename std::iterator_traits<It>::value_type>
     void create(It begin, It end);
 
-    template <typename Component, typename... Args> decltype(auto) emplace(const entity e, Args &&...args) {
+    template<typename Component, typename... Args>
+    decltype(auto) emplace(const entity e, Args &&...args) {
       return executeWrite<Component>(
           [&](auto &storage) -> decltype(auto) { return storage.emplace(e, std::forward<Args>(args)...); });
     }
 
-    template <typename Component> void setStorageAnchor() {
+    template<typename Component>
+    void setStorageAnchor() {
       auto *acc = getComponentAccess<Component>();
       HeapAnchor::current = acc->heap;
     }
 
-    template <typename Component, typename It, typename DataIt> void insert(It first, It last, DataIt dataBegin) {
+    template<typename Component, typename It, typename DataIt>
+    void insert(It first, It last, DataIt dataBegin) {
       executeWrite<Component>([&](auto &storage) -> void { storage.insert(first, last, dataBegin); });
     }
 
-    template <typename Component> void erase(entt::entity e) {
+    template<typename Component>
+    void erase(entt::entity e) {
       executeWrite<Component>([&](auto &storage) { storage.erase(e); });
     }
 
@@ -305,13 +316,16 @@ namespace sc::ecs {
     bool destroy(entt::entity e);
 
     // The same for a range of entities, taking each component only once.
-    template <typename It> void destroy(It first, It last);
+    template<typename It>
+    void destroy(It first, It last);
 
-    template <typename... Components> decltype(auto) get(entt::entity e);
+    template<typename... Components>
+    decltype(auto) get(entt::entity e);
 
-    template <typename... Components> decltype(auto) cget(entt::entity e) const;
+    template<typename... Components>
+    decltype(auto) cget(entt::entity e) const;
 
-    template <typename... Components>
+    template<typename... Components>
 
     auto view();
 
@@ -322,36 +336,44 @@ namespace sc::ecs {
     // exclusively and, from then on, makes them share one lock: writing one of
     // them blocks access to all of them. Do not make that first call while
     // holding a lock of this registry (a view, a group, a reference from get).
-    template <typename... Owned, typename... Get, typename... Exclude>
+    template<typename... Owned, typename... Get, typename... Exclude>
     auto group(entt::get_t<Get...> = entt::get_t{}, entt::exclude_t<Exclude...> = entt::exclude_t{});
 
   private:
     void refillEntities();
 
-    template <typename Component> auto *getComponentAccess();
+    template<typename Component>
+    auto *getComponentAccess();
 
-    template <typename Component> auto *getComponentAccess() const;
+    template<typename Component>
+    auto *getComponentAccess() const;
 
-    template <typename Component> auto *findOrCreateComponentAccess() const;
+    template<typename Component>
+    auto *findOrCreateComponentAccess() const;
 
-    template <typename GroupType> struct GroupAccess {
+    template<typename GroupType>
+    struct GroupAccess {
       GroupType group;
       // Any component of the group; they all share one lock.
       internal::ComponentAccessBase *member;
     };
 
-    template <typename... Owned, typename... Get, typename... Exclude>
+    template<typename... Owned, typename... Get, typename... Exclude>
     auto *createGroup(entt::get_t<Get...>, entt::exclude_t<Exclude...>);
 
-    template <typename Component> static void connectOnDestroy(StorageFor<Component> &storage);
+    template<typename Component>
+    static void connectOnDestroy(StorageFor<Component> &storage);
 
-    template <typename Component, typename Func> decltype(auto) executeWrite(Func &&func);
+    template<typename Component, typename Func>
+    decltype(auto) executeWrite(Func &&func);
 
-    template <Mutable... Component, typename Func> decltype(auto) executeRead(Func &&func);
+    template<Mutable... Component, typename Func>
+    decltype(auto) executeRead(Func &&func);
 
-    template <typename... Component, typename Func> decltype(auto) cexecuteRead(Func &&func) const;
+    template<typename... Component, typename Func>
+    decltype(auto) cexecuteRead(Func &&func) const;
 
-    template <typename Component>
+    template<typename Component>
     static void cleanupResources(StorageFor<Component> &storage, entt::registry &reg, entt::entity e);
 
     // The access object of every component type used with this registry, at
@@ -388,7 +410,7 @@ namespace sc::ecs {
     mutable entt::registry m_reg;
   };
 
-  template <typename It>
+  template<typename It>
     requires IsEntity<typename std::iterator_traits<It>::value_type>
   void Registry::create(It begin, It end) {
 
@@ -400,7 +422,8 @@ namespace sc::ecs {
     Entities::record(std::distance(begin, end));
   }
 
-  template <typename It> void Registry::destroy(It first, It last) {
+  template<typename It>
+  void Registry::destroy(It first, It last) {
     const size_t componentCount =
         std::min(internal::nextComponentIndex.load(std::memory_order_acquire), internal::MAX_COMPONENT_TYPES);
     for (size_t i = 0; i < componentCount; ++i) {
@@ -424,7 +447,8 @@ namespace sc::ecs {
     }
   }
 
-  template <typename... Components> decltype(auto) Registry::get(entt::entity e) {
+  template<typename... Components>
+  decltype(auto) Registry::get(entt::entity e) {
     return executeRead<Components...>([&](auto &...storage) -> decltype(auto) {
       if constexpr (sizeof...(storage) == 1) {
         return (storage.get(e), ...);
@@ -434,7 +458,8 @@ namespace sc::ecs {
     });
   }
 
-  template <typename... Components> decltype(auto) Registry::cget(entt::entity e) const {
+  template<typename... Components>
+  decltype(auto) Registry::cget(entt::entity e) const {
     return cexecuteRead<Components...>([&](const auto &...storage) -> decltype(auto) {
       if constexpr (sizeof...(storage) == 1) {
         return (storage.get(e), ...);
@@ -444,11 +469,12 @@ namespace sc::ecs {
     });
   }
 
-  template <typename... Components> auto Registry::view() {
+  template<typename... Components>
+  auto Registry::view() {
     return View{executeRead<Components...>([](auto &...storage) { return entt::basic_view{storage...}; })};
   }
 
-  template <typename... Owned, typename... Get, typename... Exclude>
+  template<typename... Owned, typename... Get, typename... Exclude>
   auto Registry::group(entt::get_t<Get...> get, entt::exclude_t<Exclude...> exclude) {
     using GroupType = decltype(m_reg.group<Owned...>(get, exclude));
 
@@ -460,7 +486,7 @@ namespace sc::ecs {
     return View{std::move(lock), access->group};
   }
 
-  template <typename... Owned, typename... Get, typename... Exclude>
+  template<typename... Owned, typename... Get, typename... Exclude>
   auto *Registry::createGroup(entt::get_t<Get...> get, entt::exclude_t<Exclude...> exclude) {
     using GroupType = decltype(m_reg.group<Owned...>(get, exclude));
     constexpr size_t COUNT = sizeof...(Owned) + sizeof...(Get) + sizeof...(Exclude);
@@ -502,7 +528,7 @@ namespace sc::ecs {
       // every component guarded by one of the locks moves to a single lock.
       // That includes components of earlier groups that overlap with this one.
       internal::ComponentLock *const shared = locks[0];
-      for (internal::ComponentAccessBase *component : m_allAccesses) {
+      for (internal::ComponentAccessBase *component: m_allAccesses) {
         internal::ComponentLock *const current = component->lock.load(std::memory_order_relaxed);
         if (current != shared && std::find(locks.begin(), locksEnd, current) != locksEnd) {
           component->lock.store(shared, std::memory_order_release);
@@ -518,11 +544,13 @@ namespace sc::ecs {
     return access;
   }
 
-  template <typename Component> auto *Registry::getComponentAccess() {
+  template<typename Component>
+  auto *Registry::getComponentAccess() {
     return std::as_const(*this).template getComponentAccess<Component>();
   }
 
-  template <typename Component> auto *Registry::getComponentAccess() const {
+  template<typename Component>
+  auto *Registry::getComponentAccess() const {
     // A const-qualified component would get an access object, and with it a
     // mutex, of its own for the same storage.
     static_assert(!std::is_const_v<Component>);
@@ -536,7 +564,8 @@ namespace sc::ecs {
     return static_cast<AccessType *>(access);
   }
 
-  template <typename Component> auto *Registry::findOrCreateComponentAccess() const {
+  template<typename Component>
+  auto *Registry::findOrCreateComponentAccess() const {
     using AccessType = ComponentAccess<Component>;
     std::atomic<internal::ComponentAccessBase *> &slot = m_access[internal::componentIndex<Component>()];
 
@@ -565,13 +594,14 @@ namespace sc::ecs {
     return ptr;
   }
 
-  template <typename Component> void Registry::connectOnDestroy(StorageFor<Component> &storage) {
+  template<typename Component>
+  void Registry::connectOnDestroy(StorageFor<Component> &storage) {
     if constexpr (hasResource<std::remove_const_t<Component>>) {
       storage.on_destroy().template connect<&Registry::cleanupResources<Component>>(storage);
     }
   }
 
-  template <typename Component>
+  template<typename Component>
   void Registry::cleanupResources(StorageFor<Component> &storage, entt::registry &, entt::entity e) {
     auto &comp = storage.get(e);
     pfr::for_each_field(comp, [](auto &field) {
@@ -582,7 +612,8 @@ namespace sc::ecs {
     });
   }
 
-  template <typename Component, typename Func> decltype(auto) Registry::executeWrite(Func &&func) {
+  template<typename Component, typename Func>
+  decltype(auto) Registry::executeWrite(Func &&func) {
     auto *acc = getComponentAccess<Component>();
     static_assert(std::is_move_constructible_v<Component>, "Component must be moveable");
     static_assert(std::is_nothrow_move_constructible_v<Component>, "Move must be no-throw for EnTT performance");
@@ -601,7 +632,8 @@ namespace sc::ecs {
     }
   }
 
-  template <Mutable... Components, typename Func> decltype(auto) Registry::executeRead(Func &&func) {
+  template<Mutable... Components, typename Func>
+  decltype(auto) Registry::executeRead(Func &&func) {
 
     auto accessors = std::make_tuple(getComponentAccess<Components>()...);
     Lock<Components...> lock{{std::get<ComponentAccess<Components> *>(accessors)...}};
@@ -627,7 +659,8 @@ namespace sc::ecs {
     }
   }
 
-  template <typename... Components, typename Func> decltype(auto) Registry::cexecuteRead(Func &&func) const {
+  template<typename... Components, typename Func>
+  decltype(auto) Registry::cexecuteRead(Func &&func) const {
     auto accessors = std::make_tuple(getComponentAccess<Components>()...);
     Lock<Components...> lock{{std::get<ComponentAccess<Components> *>(accessors)...}};
 
@@ -652,9 +685,13 @@ namespace sc::ecs {
     }
   }
 
-  template <typename T, typename... Args> decltype(auto) Entity::add(Args &&...args) {
+  template<typename T, typename... Args>
+  decltype(auto) Entity::add(Args &&...args) {
     return registry->emplace<T>(entity, std::forward<Args>(args)...);
   }
 
-  template <typename T> decltype(auto) sc::ecs::Entity::get() const { return registry->get<T>(entity); }
+  template<typename T>
+  decltype(auto) sc::ecs::Entity::get() const {
+    return registry->get<T>(entity);
+  }
 } // namespace sc::ecs

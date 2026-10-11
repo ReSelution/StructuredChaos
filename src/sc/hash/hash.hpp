@@ -32,7 +32,7 @@ namespace sc {
 
   using h64 = uint64_t;
 
-  template <typename T>
+  template<typename T>
   concept SizedBuffer = requires(T a) {
     a.data();
     a.size();
@@ -43,12 +43,13 @@ namespace sc {
 
   namespace internal {
 
-    template <typename T>
+    template<typename T>
     concept Byte = sizeof(T) == 1 && (std::integral<T> || std::same_as<T, std::byte>);
 
     // The one place that picks between the two implementations of rapidhash: the
     // run-time one cannot be evaluated by the compiler.
-    template <Byte T> SC_FORCE_INLINE constexpr h64 hashBytes(const T *data, size_t length) noexcept {
+    template<Byte T>
+    SC_FORCE_INLINE constexpr h64 hashBytes(const T *data, size_t length) noexcept {
       if consteval {
         return rapid::constExpr::rapidhash(data, length);
       } else {
@@ -59,7 +60,8 @@ namespace sc {
     // Writes an integer in little-endian order and returns its size. Hashing
     // these bytes instead of the integer's memory keeps the result independent
     // of the platform, and lets the compiler do it as well.
-    template <std::integral T> SC_FORCE_INLINE constexpr size_t storeBytes(uint8_t *out, T value) noexcept {
+    template<std::integral T>
+    SC_FORCE_INLINE constexpr size_t storeBytes(uint8_t *out, T value) noexcept {
       static_assert(sizeof(T) <= sizeof(uint64_t));
       // Widening keeps the low bytes of a negative number as they are in memory.
       // NOLINTNEXTLINE(bugprone-signed-char-misuse): the sign extension is cut off again below
@@ -72,24 +74,28 @@ namespace sc {
 
   } // namespace internal
 
-  template <std::integral T> SC_FORCE_INLINE constexpr h64 hash(T value) noexcept {
+  template<std::integral T>
+  SC_FORCE_INLINE constexpr h64 hash(T value) noexcept {
     uint8_t bytes[sizeof(T)]{};
     internal::storeBytes(bytes, value);
     return internal::hashBytes(bytes, sizeof(T));
   }
 
-  template <std::integral A, std::integral B> SC_FORCE_INLINE constexpr h64 hash(A first, B second) noexcept {
+  template<std::integral A, std::integral B>
+  SC_FORCE_INLINE constexpr h64 hash(A first, B second) noexcept {
     uint8_t bytes[sizeof(A) + sizeof(B)]{};
     const size_t offset = internal::storeBytes(bytes, first);
     internal::storeBytes(bytes + offset, second);
     return internal::hashBytes(bytes, sizeof(bytes));
   }
 
-  template <internal::Byte T> SC_FORCE_INLINE constexpr h64 hash(const T *data, std::integral auto length) noexcept {
+  template<internal::Byte T>
+  SC_FORCE_INLINE constexpr h64 hash(const T *data, std::integral auto length) noexcept {
     return internal::hashBytes(data, static_cast<size_t>(length));
   }
 
-  template <SizedBuffer T> SC_FORCE_INLINE constexpr h64 hash(const T &buffer) noexcept {
+  template<SizedBuffer T>
+  SC_FORCE_INLINE constexpr h64 hash(const T &buffer) noexcept {
     static_assert(sizeof(*buffer.data()) == 1, "hash() of a buffer needs elements of one byte; pass a "
                                                "pointer and the length in bytes for anything else");
     return internal::hashBytes(buffer.data(), buffer.size());
@@ -102,7 +108,7 @@ namespace sc {
   // Like hash(), but for a strongly typed hash value:
   //   enum class ItemId : sc::h64 {};
   //   ItemId id = sc::hash<ItemId>(name);
-  template <typename T, typename... Args>
+  template<typename T, typename... Args>
     requires std::is_enum_v<T> && std::same_as<h64, std::underlying_type_t<T>>
   SC_FORCE_INLINE constexpr T hash(Args &&...args) noexcept {
     return static_cast<T>(hash(std::forward<Args>(args)...));

@@ -150,20 +150,20 @@ TEST_CASE("Registry Group Under Concurrent Writes", "[ecs][registry][group][thre
 
   std::thread position_writer([&]() {
     for (int round = 0; round < rounds; ++round) {
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.emplace<GroupPosition>(e, number_of(e));
       }
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.erase<GroupPosition>(e);
       }
     }
   });
   std::thread velocity_writer([&]() {
     for (int round = 0; round < rounds; ++round) {
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.emplace<GroupVelocity>(e, number_of(e));
       }
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.erase<GroupVelocity>(e);
       }
     }
@@ -188,7 +188,7 @@ TEST_CASE("Registry Group Created While Its Components Are In Use", "[ecs][regis
 
   sc::ecs::Registry registry;
   auto entities = make_entities(registry, count);
-  for (auto e : entities) {
+  for (auto e: entities) {
     registry.emplace<GroupPosition>(e, number_of(e));
   }
 
@@ -198,11 +198,11 @@ TEST_CASE("Registry Group Created While Its Components Are In Use", "[ecs][regis
 
   std::thread velocity_writer([&]() {
     for (int round = 0; round < rounds; ++round) {
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.emplace<GroupVelocity>(e, number_of(e));
       }
       started.store(true, std::memory_order_release);
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.erase<GroupVelocity>(e);
       }
     }
@@ -256,7 +256,7 @@ TEST_CASE("Registry Overlapping Groups", "[ecs][registry][group][threading]") {
 
   sc::ecs::Registry registry;
   auto entities = make_entities(registry, count);
-  for (auto e : entities) {
+  for (auto e: entities) {
     registry.emplace<GroupVelocity>(e, number_of(e));
   }
 
@@ -294,20 +294,20 @@ TEST_CASE("Registry Overlapping Groups", "[ecs][registry][group][threading]") {
   });
   std::thread position_writer([&]() {
     for (int round = 0; round < rounds; ++round) {
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.emplace<GroupPosition>(e, number_of(e));
       }
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.erase<GroupPosition>(e);
       }
     }
   });
   std::thread health_writer([&]() {
     for (int round = 0; round < rounds; ++round) {
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.emplace<GroupHealth>(e, number_of(e));
       }
-      for (auto e : entities) {
+      for (auto e: entities) {
         registry.erase<GroupHealth>(e);
       }
     }

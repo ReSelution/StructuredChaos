@@ -11,7 +11,7 @@
 
 namespace sc::threading::impl {
 
-  template <Priority P, typename F, typename... Args>
+  template<Priority P, typename F, typename... Args>
     requires std::invocable<F, Args...> && std::is_void_v<std::invoke_result_t<F, Args...>>
   void detach(F &&f, Args &&...args) {
     constexpr size_t SizeF = sizeof(std::decay_t<F>);
@@ -44,9 +44,9 @@ namespace sc::threading::impl {
   }
 
   // Case 1: Fast Path WITHOUT Callback (Finished == nullptr_t)
-  template <Priority P, typename R, typename F, typename... Args>
+  template<Priority P, typename R, typename F, typename... Args>
   void detachBatchSfoNoCallback(R &&r, F &&f, Args &&...args) {
-    for (auto &&item : r) {
+    for (auto &&item: r) {
       queues.emplace<P>([f, args..., arg = std::move(item)]() mutable {
         try {
           f(std::move(arg), args...);
@@ -58,12 +58,12 @@ namespace sc::threading::impl {
   }
 
   // Case 2: Fast Path WITH Callback
-  template <Priority P, typename R, typename F, typename Finished, typename... Args>
+  template<Priority P, typename R, typename F, typename Finished, typename... Args>
   void detachBatchSfoWithCallback(R &&r, F &&f, Finished &&finished, size_t count, Args &&...args) {
 
     auto state = std::make_shared<DetachBatchState>(count, std::forward<Finished>(finished));
 
-    for (auto &&item : r) {
+    for (auto &&item: r) {
       queues.emplace<P>([f, args..., arg = std::move(item), state]() mutable {
         auto invoke_finished_if_last = [&]() {
           if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -88,7 +88,7 @@ namespace sc::threading::impl {
   // =========================================================================
 
   // Case 3: Heap Path WITHOUT Callback (Finished == nullptr_t)
-  template <Priority P, typename R, typename F, typename... Args>
+  template<Priority P, typename R, typename F, typename... Args>
   void detachBatchHeapNoCallback(R &&r, F &&f, size_t count, Args &&...args) {
 
     auto shared =
@@ -106,7 +106,7 @@ namespace sc::threading::impl {
   }
 
   // Case 4: Heap Path WITH Callback
-  template <Priority P, typename R, typename F, typename Finished, typename... Args>
+  template<Priority P, typename R, typename F, typename Finished, typename... Args>
   void detachBatchHeapWithCallback(R &&r, F &&f, Finished &&finished, size_t count, Args &&...args) {
 
     auto shared = std::make_shared<DetachBatchState>(count, std::forward<R>(r), std::forward<Finished>(finished),
@@ -132,7 +132,7 @@ namespace sc::threading::impl {
     }
   }
 
-  template <Priority P, std::ranges::sized_range R, typename F, typename Finished, typename... Args>
+  template<Priority P, std::ranges::sized_range R, typename F, typename Finished, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...> &&
              std::is_void_v<std::invoke_result_t<F, std::ranges::range_value_t<R>, Args...>>
   void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {

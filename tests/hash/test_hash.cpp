@@ -32,7 +32,7 @@ namespace {
 
   constexpr std::array<char, MAX_LENGTH> make_lower_text() {
     std::array<char, MAX_LENGTH> text = TEXT;
-    for (char &c : text) {
+    for (char &c: text) {
       c = lower(c);
     }
     return text;
@@ -41,7 +41,7 @@ namespace {
   constexpr std::array<char, MAX_LENGTH> LOWER_TEXT = make_lower_text();
 
   // The hash of every prefix of a text, computed while compiling.
-  template <typename Hash>
+  template<typename Hash>
   constexpr std::array<sc::h64, MAX_LENGTH + 1> hash_prefixes(const std::array<char, MAX_LENGTH> &text, Hash hash) {
     std::array<sc::h64, MAX_LENGTH + 1> result{};
     for (size_t length = 0; length <= MAX_LENGTH; ++length) {
@@ -210,10 +210,10 @@ TEST_CASE("Lowercase Hash", "[hash]") {
     int differences = 0;
     for (int value = 0; value < 256; ++value) {
       const char c = static_cast<char>(value);
-      for (const std::string &sample : {std::string(1, c), std::string("x") + c, std::string("xy") + c,
-                                        std::string("0123456") + c, std::string(40, 'q') + c}) {
+      for (const std::string &sample: {std::string(1, c), std::string("x") + c, std::string("xy") + c,
+                                       std::string("0123456") + c, std::string(40, 'q') + c}) {
         std::string expected = sample;
-        for (char &e : expected) {
+        for (char &e: expected) {
           e = lower(e);
         }
         if (sc::hash_lowercase(std::string_view{sample}) != sc::hash(std::string_view{expected})) {

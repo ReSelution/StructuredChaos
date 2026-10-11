@@ -49,7 +49,7 @@ TEST_CASE("Benchmark: storing texts", "[!benchmark][magpie]") {
 
   BENCHMARK("storeStr: 10000 texts, then clear") {
     size_t sum = 0;
-    for (const Text &text : texts) {
+    for (const Text &text: texts) {
       sum += magpie.storeStr(text.value).size();
     }
     magpie.clear();
@@ -58,7 +58,7 @@ TEST_CASE("Benchmark: storing texts", "[!benchmark][magpie]") {
 
   BENCHMARK("storeStrUTF16: 10000 texts, then clear") {
     size_t sum = 0;
-    for (const Text &text : texts) {
+    for (const Text &text: texts) {
       sum += magpie.storeStrUTF16(text.value16.data(), text.value16.size()).size();
     }
     magpie.clear();
@@ -66,7 +66,7 @@ TEST_CASE("Benchmark: storing texts", "[!benchmark][magpie]") {
   };
 
   BENCHMARK("insert: 10000 texts, then clear") {
-    for (const Text &text : texts) {
+    for (const Text &text: texts) {
       MagpieKey key("bench", text.key);
       magpie.insert(key, text.value, "bench", text.key);
     }
@@ -92,7 +92,7 @@ TEST_CASE("Benchmark: filling the table from several threads", "[!benchmark][mag
       for (size_t t = 0; t < THREADS; ++t) {
         workers.emplace_back([&, t] {
           Magpie::mt_reserve(PER_THREAD);
-          for (const Text &text : texts[t]) {
+          for (const Text &text: texts[t]) {
             Magpie::mt_InsertStored(MagpieKey("bench", text.key), magpie.storeStr(text.value), "bench", text.key);
           }
           magpie.mt_Merge(false);
@@ -109,7 +109,7 @@ TEST_CASE("Benchmark: filling the table from several threads", "[!benchmark][mag
       std::vector<std::jthread> workers;
       for (size_t t = 0; t < THREADS; ++t) {
         workers.emplace_back([&, t] {
-          for (const Text &text : texts[t]) {
+          for (const Text &text: texts[t]) {
             MagpieKey key("bench", text.key);
             magpie.insert(key, text.value, "bench", text.key);
           }

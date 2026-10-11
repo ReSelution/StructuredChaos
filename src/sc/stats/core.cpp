@@ -2,7 +2,7 @@
 namespace sc::stats {
   void reset_all() {
     if constexpr (StatsEnabled) {
-      for (auto *s : reg() | std::views::values) {
+      for (auto *s: reg() | std::views::values) {
         s->internal_reset();
       }
     }

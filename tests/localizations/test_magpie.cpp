@@ -236,7 +236,7 @@ TEST_CASE("Stored Strings Are Copies With A Terminator", "[magpie][store]") {
   }
 
   SECTION("Storing alone adds no entry") {
-    (void)magpie.storeStr("Starten");
+    (void) magpie.storeStr("Starten");
 
     REQUIRE(magpie.size() == 0);
   }
@@ -359,7 +359,7 @@ TEST_CASE("Many Threads Fill The Table", "[magpie][threads]") {
         magpie.mt_Merge(false);
       });
     }
-    for (auto &worker : workers) {
+    for (auto &worker: workers) {
       worker.join();
     }
 
@@ -388,7 +388,7 @@ TEST_CASE("Many Threads Fill The Table", "[magpie][threads]") {
         }
       });
     }
-    for (auto &worker : workers) {
+    for (auto &worker: workers) {
       worker.join();
     }
 
@@ -403,7 +403,7 @@ TEST_CASE("Many Threads Fill The Table", "[magpie][threads]") {
 TEST_CASE("Clear Forgets Everything", "[magpie]") {
   auto &magpie = emptyMagpie();
   put("menu", "start", "Starten");
-  (void)MagpieString::fromStr("Hello");
+  (void) MagpieString::fromStr("Hello");
   REQUIRE(magpie.size() == 2);
 
   magpie.clear();
@@ -432,7 +432,7 @@ TEST_CASE("Clear Forgets Everything", "[magpie]") {
   SECTION("From another thread than the one that stored") {
     std::thread([&] {
       put("menu", "start", "Starten");
-      (void)magpie.storeStr(std::string(100'000, 'x'));
+      (void) magpie.storeStr(std::string(100'000, 'x'));
     }).join();
     REQUIRE(magpie.size() == 1);
 

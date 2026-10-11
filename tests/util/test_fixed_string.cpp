@@ -11,11 +11,13 @@ namespace {
   using sc::FixedString;
 
   // Mirrors how Logger and Stat take their names.
-  template <FixedString Name> struct Named {
+  template<FixedString Name>
+  struct Named {
     static constexpr std::string_view name = Name;
   };
 
-  template <FixedString A, FixedString B = ""> struct Pair {
+  template<FixedString A, FixedString B = "">
+  struct Pair {
     static constexpr std::string_view first = A;
     static constexpr std::string_view second = B;
   };

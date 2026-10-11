@@ -62,10 +62,10 @@ namespace sc::threading::impl {
   void shutdown() {
     {
       std::scoped_lock lock(threadMutex);
-      for (auto &t : threads) {
+      for (auto &t: threads) {
         t.request_stop();
       }
-      for (auto &t : longRunningThreads) {
+      for (auto &t: longRunningThreads) {
         t.request_stop();
       }
     }

@@ -62,7 +62,7 @@ namespace sc {
     // Total memory: ~60,000 * 8 bytes = ~480KB. Very cache-friendly.
     std::vector<const std::pair<MagpieKey, std::string_view> *> sortedEntries;
     sortedEntries.reserve(entries.size());
-    for (const auto &pair : entries) {
+    for (const auto &pair: entries) {
       sortedEntries.push_back(&pair);
     }
 
@@ -81,51 +81,51 @@ namespace sc {
     // we use a large buffer or raw fwrite for speed.
     std::string_view currentNS = "\1"; // Impossible starting NS
 
-    for (const auto *entry : sortedEntries) {
+    for (const auto *entry: sortedEntries) {
       const auto &[key, value] = *entry;
 
       if (key.ns_str != currentNS) {
         currentNS = key.ns_str;
-        printf("\n--- Namespace: %.*s ---\n", (int)currentNS.size(), currentNS.data());
+        printf("\n--- Namespace: %.*s ---\n", (int) currentNS.size(), currentNS.data());
       }
 
       // Fast write
-      printf("  %.*s: %.*s\n", (int)key.key_str.size(), key.key_str.data(), (int)value.size(), value.data());
+      printf("  %.*s: %.*s\n", (int) key.key_str.size(), key.key_str.data(), (int) value.size(), value.data());
     }
 #endif
   }
 
 #ifdef DUMP_MAGPIE
   static void writeEscaped(FILE *f, std::string_view s) {
-    for (char c : s) {
+    for (char c: s) {
       switch (c) {
-      case '\"':
-        fprintf(f, "\\\"");
-        break;
-      case '\\':
-        fprintf(f, "\\\\");
-        break;
-      case '\b':
-        fprintf(f, "\\b");
-        break;
-      case '\f':
-        fprintf(f, "\\f");
-        break;
-      case '\n':
-        fprintf(f, "\\n");
-        break;
-      case '\r':
-        fprintf(f, "\\r");
-        break;
-      case '\t':
-        fprintf(f, "\\t");
-        break;
-      default:
-        if ((unsigned char)c < 32) {
-          fprintf(f, "\\u%04x", c);
-        } else {
-          fputc(c, f);
-        }
+        case '\"':
+          fprintf(f, "\\\"");
+          break;
+        case '\\':
+          fprintf(f, "\\\\");
+          break;
+        case '\b':
+          fprintf(f, "\\b");
+          break;
+        case '\f':
+          fprintf(f, "\\f");
+          break;
+        case '\n':
+          fprintf(f, "\\n");
+          break;
+        case '\r':
+          fprintf(f, "\\r");
+          break;
+        case '\t':
+          fprintf(f, "\\t");
+          break;
+        default:
+          if ((unsigned char) c < 32) {
+            fprintf(f, "\\u%04x", c);
+          } else {
+            fputc(c, f);
+          }
       }
     }
   }
@@ -133,7 +133,7 @@ namespace sc {
   // NOLINTNEXTLINE ignoring make static when DUMP_MAGPIE is not set
   void Magpie::dumpToFile(std::string_view file) noexcept {
 #ifndef DUMP_MAGPIE
-    (void)file;
+    (void) file;
 #else
     std::shared_lock lock(sh_mtx);
     if (entries.empty())
@@ -153,7 +153,7 @@ namespace sc {
     // 1. Sort entries
     std::vector<const std::pair<MagpieKey, std::string_view> *> sorted;
     sorted.reserve(entries.size());
-    for (const auto &pair : entries)
+    for (const auto &pair: entries)
       sorted.push_back(&pair);
 
     std::sort(sorted.begin(), sorted.end(), [](auto *a, auto *b) {
@@ -195,7 +195,7 @@ namespace sc {
       writeEscaped(f, key.key_str);
       fputs("\": \"", f);
       writeEscaped(f, value);
-      fprintf(f, "\", \"h\": \"0x%llX\"", (unsigned long long)key.key);
+      fprintf(f, "\", \"h\": \"0x%llX\"", (unsigned long long) key.key);
     }
 
     if (!firstNS)
@@ -240,8 +240,8 @@ namespace sc {
         key.ns_str = g_nsDeduplicator.get(ns, *this);
         key.key_str = storeStr(keyStr);
 #else
-        (void)keyStr;
-        (void)ns;
+        (void) keyStr;
+        (void) ns;
 #endif
         return;
       }
@@ -250,8 +250,8 @@ namespace sc {
     key.ns_str = g_nsDeduplicator.get(ns, *this);
     key.key_str = storeStr(keyStr);
 #else
-    (void)keyStr;
-    (void)ns;
+    (void) keyStr;
+    (void) ns;
 #endif
     auto s = storeStr(valueStr);
     std::unique_lock lock(sh_mtx);
@@ -266,8 +266,8 @@ namespace sc {
     key.ns_str = g_nsDeduplicator.get(ns, *this);
     key.key_str = storeStr(keyStr);
 #else
-    (void)ns;
-    (void)keyStr;
+    (void) ns;
+    (void) keyStr;
 #endif
 
     tl_map.emplace(key, storedValue);
@@ -278,7 +278,7 @@ namespace sc {
     if (override) {
       std::unique_lock lock(sh_mtx);
       entries.reserve(entries.size() + tl_map.size());
-      for (auto [key, value] : tl_map) {
+      for (auto [key, value]: tl_map) {
         entries.insert_or_assign(key, value);
       }
     } else {

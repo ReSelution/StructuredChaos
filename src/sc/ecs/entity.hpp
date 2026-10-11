@@ -9,7 +9,8 @@ namespace sc::ecs {
   class Entity {
     friend class Registry;
 
-    template <typename, typename, typename> friend class entt::basic_storage;
+    template<typename, typename, typename>
+    friend class entt::basic_storage;
 
   public:
     Entity(entt::entity entity, Registry *registry);
@@ -24,9 +25,11 @@ namespace sc::ecs {
 
     operator entt::entity() const { return entity; }
 
-    template <typename T, typename... Args> decltype(auto) add(Args &&...args);
+    template<typename T, typename... Args>
+    decltype(auto) add(Args &&...args);
 
-    template <typename T> decltype(auto) get() const;
+    template<typename T>
+    decltype(auto) get() const;
 
     entt::entity entity{entt::null};
     Registry *registry{nullptr};
@@ -35,7 +38,7 @@ namespace sc::ecs {
     Entity(entt::entity entity);
   };
 
-  template <typename T>
+  template<typename T>
   concept IsEntity = std::is_same_v<T, Entity>;
 
 } // namespace sc::ecs

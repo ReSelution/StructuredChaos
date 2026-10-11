@@ -211,7 +211,7 @@ TEST_CASE("Throughput", "[stats]") {
           for (int i = 0; i < rounds; ++i) {
             Tracker::record(storage, 2);
             if (i % 1000 == 0) {
-              (void)Tracker::format(storage);
+              (void) Tracker::format(storage);
             }
           }
         });
@@ -427,7 +427,7 @@ TEST_CASE("List Of All Stats", "[stats]") {
 
     if (StatsEnabled) {
       bool found = false;
-      for (const auto &[level, line] : CollectingLogger::lines) {
+      for (const auto &[level, line]: CollectingLogger::lines) {
         REQUIRE(level == CollectingLogger::LogLevel::warn);
         found = found || line == "Test Counter -> 3.00";
       }

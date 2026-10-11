@@ -4,7 +4,8 @@
 
 namespace sc::ecs {
 
-  template <typename Lock, typename EnTTView> class View {
+  template<typename Lock, typename EnTTView>
+  class View {
     Lock m_lock;
     EnTTView m_view;
 
@@ -18,11 +19,15 @@ namespace sc::ecs {
     auto begin() { return m_view.begin(); }
     auto end() { return m_view.end(); }
 
-    template <typename... Args> decltype(auto) get(Args &&...args) const {
+    template<typename... Args>
+    decltype(auto) get(Args &&...args) const {
       return m_view.get(std::forward<Args>(args)...);
     }
 
-    template <typename... Args> decltype(auto) get(Args &&...args) { return m_view.get(std::forward<Args>(args)...); }
+    template<typename... Args>
+    decltype(auto) get(Args &&...args) {
+      return m_view.get(std::forward<Args>(args)...);
+    }
 
     [[nodiscard]] auto size() const noexcept { return m_view.size(); }
     [[nodiscard]] bool empty() const noexcept { return m_view.empty(); }
@@ -31,6 +36,7 @@ namespace sc::ecs {
     EnTTView &raw() noexcept { return m_view; }
   };
 
-  template <typename Lock, typename EnTTView> View(std::tuple<Lock, EnTTView> &&) -> View<Lock, EnTTView>;
+  template<typename Lock, typename EnTTView>
+  View(std::tuple<Lock, EnTTView> &&) -> View<Lock, EnTTView>;
 
 } // namespace sc::ecs

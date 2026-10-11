@@ -51,7 +51,7 @@ namespace sc {
     };
 
     // Distance from the object to its node.
-    template <typename T>
+    template<typename T>
     static constexpr size_t nodeOffset = (sizeof(T) + alignof(CleanupNode) - 1) & ~(alignof(CleanupNode) - 1);
 
     alignas(64) std::atomic<BlockRange> m_range;
@@ -64,14 +64,15 @@ namespace sc {
 
   public:
     explicit MonotonicResource(size_t initial_size = 1024 * 32,
-                               memory_resource *upstream = std::pmr::get_default_resource())
-        : m_upstream(upstream), m_next_block_size(initial_size) {
+                               memory_resource *upstream = std::pmr::get_default_resource()) :
+        m_upstream(upstream), m_next_block_size(initial_size) {
       allocate_new_block(initial_size);
     }
 
-    explicit MonotonicResource(void *buffer, size_t size, memory_resource *upstream = std::pmr::get_default_resource())
-        : m_initial_block(static_cast<std::byte *>(buffer), size, alignof(std::max_align_t)), m_upstream(upstream),
-          m_next_block_size(size * 2) {
+    explicit MonotonicResource(void *buffer, size_t size,
+                               memory_resource *upstream = std::pmr::get_default_resource()) :
+        m_initial_block(static_cast<std::byte *>(buffer), size, alignof(std::max_align_t)), m_upstream(upstream),
+        m_next_block_size(size * 2) {
       m_range.store({m_initial_block.ptr, m_initial_block.ptr + size}, std::memory_order_release);
     }
 
@@ -107,7 +108,8 @@ namespace sc {
     // The object lives until the resource is reset, released or destroyed.
     // Its destructor is run then, if it has one. For a pmr container that is
     // to live in this resource, use makePmr().
-    template <typename T, typename... Args> T *make(Args &&...args) {
+    template<typename T, typename... Args>
+    T *make(Args &&...args) {
       if constexpr (std::is_trivially_destructible_v<T>) {
         return new (allocate(sizeof(T), alignof(T))) T(std::forward<Args>(args)...);
       } else {
@@ -124,7 +126,7 @@ namespace sc {
     // itself as that allocator, behind or in front of args as the type wants
     // it. The object and everything it allocates lives in the resource, so a
     // container whose elements own nothing else needs no destructor call.
-    template <typename T, typename... Args>
+    template<typename T, typename... Args>
       requires std::uses_allocator_v<T, std::pmr::polymorphic_allocator<>>
     T *makePmr(Args &&...args) {
       const std::pmr::polymorphic_allocator<> allocator(this);
@@ -142,7 +144,7 @@ namespace sc {
     }
 
     // Uninitialized room for count elements.
-    template <typename T = uint8_t>
+    template<typename T = uint8_t>
     [[nodiscard]] std::span<T> allocateSpan(size_t count, size_t alignment = alignof(T)) {
       if (count == 0) [[unlikely]] {
         return {};
@@ -174,13 +176,15 @@ namespace sc {
     [[nodiscard]] bool do_is_equal(const memory_resource &other) const noexcept override { return this == &other; }
 
     // Room for an object and the node behind it.
-    template <typename T> void *allocateWithNode() {
+    template<typename T>
+    void *allocateWithNode() {
       return allocate(nodeOffset<T> + sizeof(CleanupNode), std::max(alignof(T), alignof(CleanupNode)));
     }
 
     // Puts the object of a block from allocateWithNode() on the list. Only an
     // object that exists is remembered.
-    template <typename T> void remember(void *block) noexcept {
+    template<typename T>
+    void remember(void *block) noexcept {
       auto *node = new (static_cast<std::byte *>(block) + nodeOffset<T>)
           CleanupNode{.destroy =
                           [](CleanupNode *n) noexcept {

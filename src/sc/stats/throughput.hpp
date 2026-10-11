@@ -9,7 +9,8 @@
 
 namespace sc::stats {
 
-  template <typename UnitSystem = DataUnits> struct Throughput {
+  template<typename UnitSystem = DataUnits>
+  struct Throughput {
     using DurationNS = std::chrono::nanoseconds;
     // A clock that never jumps: with the system clock a correction of the time
     // in between would show up as a negative or huge duration.

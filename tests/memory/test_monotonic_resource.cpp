@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "sc/memory/monotonic_resource.hpp"
+
 #include "test_upstream.hpp"
 
 namespace {
@@ -56,8 +57,8 @@ TEST_CASE("MonotonicResource: allocations are aligned and do not overlap", "[mem
   sc::MonotonicResource res(1024, &upstream);
 
   std::vector<std::pair<std::byte *, size_t>> chunks;
-  for (size_t alignment : {size_t{1}, size_t{2}, size_t{4}, size_t{8}, size_t{16}}) {
-    for (size_t bytes : {size_t{1}, size_t{3}, size_t{8}, size_t{24}}) {
+  for (size_t alignment: {size_t{1}, size_t{2}, size_t{4}, size_t{8}, size_t{16}}) {
+    for (size_t bytes: {size_t{1}, size_t{3}, size_t{8}, size_t{24}}) {
       auto *ptr = static_cast<std::byte *>(res.allocate(bytes, alignment));
       REQUIRE(ptr != nullptr);
       CHECK(isAligned(ptr, alignment));
@@ -207,10 +208,10 @@ TEST_CASE("MonotonicResource: release returns every block as it was requested", 
   TrackingUpstream upstream;
   sc::MonotonicResource res(256, &upstream);
 
-  (void)res.allocate(200, 8);
-  (void)res.allocate(200, 8);
-  (void)res.allocate(4096, 64);
-  (void)res.allocate(250, 128);
+  (void) res.allocate(200, 8);
+  (void) res.allocate(200, 8);
+  (void) res.allocate(4096, 64);
+  (void) res.allocate(250, 128);
   REQUIRE(upstream.liveBlocks() == 4);
 
   res.release();
@@ -238,7 +239,7 @@ TEST_CASE("MonotonicResource: release goes back to the caller buffer", "[memory]
   sc::MonotonicResource res(buffer.data(), buffer.size(), &upstream);
 
   void *first = res.allocate(64, 8);
-  (void)res.allocate(1024, 8);
+  (void) res.allocate(1024, 8);
   REQUIRE(upstream.liveBlocks() == 1);
 
   res.release();
@@ -252,9 +253,9 @@ TEST_CASE("MonotonicResource: the destructor releases all blocks", "[memory][mon
   TrackingUpstream upstream;
   {
     sc::MonotonicResource res(256, &upstream);
-    (void)res.allocate(200, 8);
-    (void)res.allocate(200, 8);
-    (void)res.allocate(1000, 64);
+    (void) res.allocate(200, 8);
+    (void) res.allocate(200, 8);
+    (void) res.allocate(1000, 64);
     REQUIRE(upstream.liveBlocks() == 3);
   }
 
@@ -322,7 +323,7 @@ TEST_CASE("MonotonicResource: concurrent allocations do not overlap", "[memory][
   std::vector<std::byte *> all;
   size_t corrupted = 0;
   for (size_t t = 0; t < Threads; ++t) {
-    for (std::byte *ptr : results[t]) {
+    for (std::byte *ptr: results[t]) {
       for (size_t i = 0; i < Bytes; ++i) {
         corrupted += ptr[i] != static_cast<std::byte>(t + 1);
       }
@@ -409,7 +410,7 @@ TEST_CASE("MonotonicResource: reset makes the memory available again", "[memory]
   sc::MonotonicResource res(1024);
 
   void *first = res.allocate(64, 8);
-  (void)res.allocate(4096, 8);
+  (void) res.allocate(4096, 8);
   res.reset();
 
   CHECK(res.allocate(64, 8) == first);
@@ -429,7 +430,7 @@ TEST_CASE("MonotonicResource: grows beyond its initial size", "[memory][monotoni
 
   size_t corrupted = 0;
   for (int i = 0; i < 100; ++i) {
-    for (uint8_t byte : spans[i]) {
+    for (uint8_t byte: spans[i]) {
       corrupted += byte != static_cast<uint8_t>(i);
     }
   }
@@ -554,8 +555,8 @@ TEST_CASE("MonotonicResource: reset keeps the first block", "[memory][monotonic]
   sc::MonotonicResource res(256, &upstream);
 
   void *first = res.allocate(64, 8);
-  (void)res.allocate(200, 8);
-  (void)res.allocate(4096, 64);
+  (void) res.allocate(200, 8);
+  (void) res.allocate(4096, 64);
   REQUIRE(upstream.liveBlocks() == 3);
 
   res.reset();

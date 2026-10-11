@@ -28,7 +28,7 @@ namespace sc {
   void MonotonicResource::release() noexcept {
     runCleanups();
     std::lock_guard lock(m_block_mutex);
-    for (const auto &block : m_blocks) {
+    for (const auto &block: m_blocks) {
       m_upstream->deallocate(block.ptr, block.size, block.alignment);
     }
 

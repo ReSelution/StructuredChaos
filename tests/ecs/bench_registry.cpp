@@ -43,7 +43,8 @@ namespace {
 
   // One fresh registry per run of a sample, built outside the timing. Only used
   // for entity creation, where the registries hold no components.
-  template <typename Registry> std::vector<std::unique_ptr<Registry>> make_registries(int count) {
+  template<typename Registry>
+  std::vector<std::unique_ptr<Registry>> make_registries(int count) {
     std::vector<std::unique_ptr<Registry>> registries;
     registries.reserve(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
@@ -239,7 +240,7 @@ TEST_CASE("Registry Benchmarks: Groups", "[ecs][registry][!benchmark]") {
   {
     // Create the groups outside of the timing.
     auto group = sc_world.registry.group<BenchPosition, BenchVelocity>();
-    (void)entt_world.registry.group<BenchPosition, BenchVelocity>();
+    (void) entt_world.registry.group<BenchPosition, BenchVelocity>();
   }
 
   BENCHMARK("sc: iterate group, 2 components") {
@@ -298,7 +299,7 @@ TEST_CASE("Registry Benchmarks: Parallel Reads", "[ecs][registry][threading][!be
             sum += position.x + velocity.dx;
           }
           volatile float sink = sum;
-          (void)sink;
+          (void) sink;
         },
         nullptr);
     sc::threading::wait_until_finished();
@@ -315,7 +316,7 @@ TEST_CASE("Registry Benchmarks: Parallel Reads", "[ecs][registry][threading][!be
             sum += position.x + velocity.dx;
           });
           volatile float sink = sum;
-          (void)sink;
+          (void) sink;
         },
         nullptr);
     sc::threading::wait_until_finished();
