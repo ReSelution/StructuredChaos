@@ -26,6 +26,12 @@ mimalloc_options = [
   # containers give their memory back right away. Use an address sanitizer
   # build to check our own code instead.
   'mi_debug=off',
+
+  # mimalloc asks for transparent huge pages by default. Their first touch
+  # zeroes 2 MiB at once, which costs more than it gains for many short-lived
+  # allocations: the asset crawl of SAA took about 65 ms with them and 51 ms
+  # without.
+  'mi_allow_thp=off',
 ]
 
 # Sanitizer runtimes interpose malloc themselves, so mimalloc must not override
