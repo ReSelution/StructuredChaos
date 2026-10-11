@@ -1,12 +1,61 @@
+# Shared by StructuredChaos and SatisfactoryAssetAssembler.
+---
+Language: Cpp
 BasedOnStyle: LLVM
 
+ColumnLimit: 120
+TabWidth: 2
 NamespaceIndentation: All
-ColumnLimit:     120
+IndentCaseLabels: true
+MaxEmptyLinesToKeep: 2
+InsertNewlineAtEOF: true
 
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignOperands: true
+AlignTrailingComments: false
+
+AlwaysBreakTemplateDeclarations: Yes
+BreakConstructorInitializers: AfterColon
+BreakConstructorInitializersBeforeComma: false
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+
+# Everything on the line of its statement, nothing split off.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: false
+  AfterClass: false
+  AfterControlStatement: false
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterStruct: false
+  AfterUnion: false
+  AfterExternBlock: false
+  BeforeCatch: false
+  BeforeElse: false
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+
+SpaceAfterCStyleCast: true
+SpaceAfterTemplateKeyword: false
+SpaceBeforeRangeBasedForLoopColon: false
+SpaceInEmptyParentheses: false
+SpacesInAngles: false
+SpacesInConditionalStatement: false
+SpacesInCStyleCastParentheses: false
+SpacesInParentheses: false
+
+MacroBlockBegin: ''
+MacroBlockEnd: ''
 
 # Includes are sorted into blocks, separated by an empty line:
-# own header, Catch2, standard library, third party, project.
+# own header, Catch2, standard library, third party, StructuredChaos, project.
 IncludeBlocks: Regroup
+IncludeIsMainRegex: '([-_](test|unittest))?$'
 IncludeCategories:
   - Regex: '^<catch2/'
     Priority: 1
@@ -14,7 +63,10 @@ IncludeCategories:
     Priority: 2
   - Regex: '^<'
     Priority: 3
-  - Regex: '^"(ankerl|entt|glm|mimalloc|pfr|rapidhash|simdutf|spdlog|xsimd)'
+  - Regex: '^"(ankerl|bcdec|entt|fastgltf|glm|mimalloc|pfr|rapidhash|simdjson|simdutf|spdlog|stb|xsimd)'
     Priority: 3
-  - Regex: '^"'
+  - Regex: '^"sc/'
     Priority: 4
+  - Regex: '^"'
+    Priority: 5
+...
