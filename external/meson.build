@@ -30,8 +30,11 @@ mimalloc_options = [
   # mimalloc asks for transparent huge pages by default. Their first touch
   # zeroes 2 MiB at once, which costs more than it gains for many short-lived
   # allocations: the asset crawl of SAA took about 65 ms with them and 51 ms
-  # without.
-  'mi_allow_thp=off',
+  # without. MI_NO_THP only removes that request. mi_allow_thp=off would also
+  # disable huge pages for the whole process, including memory that the
+  # application asks them for itself. On a system whose THP mode is "always"
+  # the memory of mimalloc still gets huge pages.
+  'mi_extra_cppdefs=MI_NO_THP',
 ]
 
 # Sanitizer runtimes interpose malloc themselves, so mimalloc must not override
