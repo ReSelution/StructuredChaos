@@ -32,9 +32,9 @@ jobs:
           - name: release
             setup: --buildtype=release
           - name: asan-ubsan
-            setup: -Db_sanitize=address,undefined
+            setup: --buildtype=debug -Db_sanitize=address,undefined
           - name: tsan
-            setup: -Db_sanitize=thread
+            setup: --buildtype=debug -Db_sanitize=thread
     env:
       CCACHE_DIR: /home/runner/.cache/ccache
       CCACHE_MAXSIZE: 500M
@@ -183,7 +183,7 @@ jobs:
           key: subprojects-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'subprojects/packagefiles/**') }}
 
       - name: Configure
-        run: meson setup build --native-file cross/linux-clang.ini
+        run: meson setup build --native-file cross/linux-clang.ini --buildtype=debug
 
       - name: clang-format
         run: ninja -C build clang-format-check

@@ -2,13 +2,13 @@ project(
   'StructuredChaos',
   'cpp',
   version: '0.1.0',
-  default_options: ['cpp_std=c++23', 'warning_level=3'],
+  default_options: ['cpp_std=c++23', 'warning_level=3', 'buildtype=release', 'b_ndebug=if-release'],
   meson_version: '>= 1.1.0',
 )
 
 # Sanitizer builds are selected with the built-in option, for example
-#   meson setup build-asan -Db_sanitize=address,undefined
-#   meson setup build-tsan -Db_sanitize=thread
+#   meson setup build-asan --buildtype=debug -Db_sanitize=address,undefined
+#   meson setup build-tsan --buildtype=debug -Db_sanitize=thread
 sc_sanitizers = get_option('b_sanitize')
 sc_asan = 'address' in sc_sanitizers
 sc_tsan = 'thread' in sc_sanitizers
