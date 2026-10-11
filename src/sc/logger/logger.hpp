@@ -186,15 +186,18 @@ namespace sc {
     }
 
     // The timer logs when it is destroyed, which is after this call returned.
-    // It therefore keeps copies of the format string and the arguments.
+    // Arguments passed as lvalues are kept as references and read only then,
+    // so the line shows the values they have at the end of the measurement;
+    // they have to outlive the timer. Temporaries and the format string are
+    // copied.
     template <typename... Args>
     [[nodiscard]] static auto time(spdlog::level::level_enum level, std::string_view fmt_str, Args &&...args) {
       return sc::stats::Timer([level, format = std::string(fmt_str),
-                               kept = std::tuple<std::decay_t<Args>...>(std::forward<Args>(args)...)](
-                                  sc::stats::TimeResult res) mutable {
+                               kept = std::tuple<Args...>(std::forward<Args>(args)...)](sc::stats::TimeResult res) {
         std::string timeStr = spdlog::fmt_lib::format("{:.2f}{}", res.value, res.suffix);
-        std::apply([&](auto &...values) { get()->log(level, spdlog::fmt_lib::runtime(format), timeStr, values...); },
-                   kept);
+        std::apply(
+            [&](const auto &...values) { get()->log(level, spdlog::fmt_lib::runtime(format), timeStr, values...); },
+            kept);
       });
     }
 

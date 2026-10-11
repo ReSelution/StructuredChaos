@@ -156,12 +156,21 @@ TEST_CASE("Logger Timer", "[logger]") {
   {
     auto timer = Log::time(spdlog::level::warn, "{} in total");
   }
+  {
+    // Lvalues are only read when the timer logs.
+    int items = 0;
+    std::string stage = "start";
+    auto timer = Log::time("{} for {} items, stopped at {}", items, stage);
+    items = 42;
+    stage = "end";
+  }
   Log::flush();
 
   const auto lines = lines_of("TestTimer");
-  REQUIRE(lines.size() == 2);
+  REQUIRE(lines.size() == 3);
   REQUIRE(matches(lines[0], TIME + R"(\[info\]: \d+\.\d\d(ns|µs|ms|s) to load a save game with a rather long name)"));
   REQUIRE(matches(lines[1], TIME + R"(\[warning\]: \d+\.\d\d(ns|µs|ms|s) in total)"));
+  REQUIRE(matches(lines[2], TIME + R"(\[info\]: \d+\.\d\d(ns|µs|ms|s) for 42 items, stopped at end)"));
 }
 
 TEST_CASE("Logger Stats", "[logger]") {
