@@ -130,6 +130,7 @@ test_memory = executable(
     'memory/bench_heap.cpp',
     'memory/test_arena_pool.cpp',
     'memory/test_heap.cpp',
+    'memory/test_huge_page_resource.cpp',
     'memory/test_monotonic_resource.cpp',
   ],
   dependencies: [
