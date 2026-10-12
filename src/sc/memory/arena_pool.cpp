@@ -17,7 +17,7 @@ namespace sc {
       return;
     }
     if (!MonotonicResource::checkLockFree()) {
-      PoolLogger::warn("MonotonicResource BlockRange is not lock-free");
+      PoolLogger::warn("MonotonicResource bump pointer is not lock-free");
     }
 
     m_defaultSize = arenaSize;

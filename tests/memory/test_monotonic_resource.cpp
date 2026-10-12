@@ -265,12 +265,22 @@ TEST_CASE("MonotonicResource: the destructor releases all blocks", "[memory][mon
   CHECK(upstream.mismatches == 0);
 }
 
-#if defined(__x86_64__) && !defined(_MSC_VER)
 TEST_CASE("MonotonicResource: the bump pointer is lock-free", "[memory][monotonic]") {
-  // Needs -mcx16, which the build adds on x86-64.
   CHECK(sc::MonotonicResource::checkLockFree());
 }
-#endif
+
+TEST_CASE("MonotonicResource: the last byte of a block is not handed out", "[memory][monotonic]") {
+  TrackingUpstream upstream;
+  sc::MonotonicResource res(256, &upstream);
+
+  // Would end exactly at the end of the block, where another block may start.
+  void *first = res.allocate(128, 8);
+  void *second = res.allocate(128, 8);
+
+  CHECK(upstream.owns(first));
+  CHECK(upstream.owns(second));
+  CHECK(upstream.allocations == 2);
+}
 
 TEST_CASE("MonotonicResource: is only equal to itself", "[memory][monotonic]") {
   sc::MonotonicResource a(256);

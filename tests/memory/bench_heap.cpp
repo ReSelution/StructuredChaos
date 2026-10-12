@@ -11,6 +11,7 @@
 #include <mimalloc.h>
 
 #include "sc/memory/heap.hpp"
+#include "sc/memory/monotonic_resource.hpp"
 
 // Hidden by the [!benchmark] tag, so that a plain test run stays fast. Run with
 //   meson test --benchmark -C <builddir>
@@ -20,6 +21,9 @@
 // a number of allocations, give everything back at once. The entries are
 //   Heap             a fresh sc::Heap per scope
 //   Heap, reset      one sc::Heap for all scopes, emptied with reset()
+//   Monotonic        a fresh sc::MonotonicResource per scope
+//   Monotonic, reset one sc::MonotonicResource for all scopes, emptied with
+//                    reset()
 //   mi_heap          the bare mimalloc calls, to show what the wrapper costs
 //   mi_malloc        plain mimalloc, every block freed on its own
 //   pmr monotonic    std::pmr::monotonic_buffer_resource, a bump allocator
@@ -35,22 +39,29 @@ namespace {
     return reinterpret_cast<uintptr_t>(ptr);
   }
 
-  uintptr_t fill(sc::Heap &heap, size_t count, size_t bytes) {
+  template<typename Allocator>
+  uintptr_t fill(Allocator &allocator, size_t count, size_t bytes) {
     uintptr_t sum = 0;
     for (size_t i = 0; i < count; ++i) {
-      sum += touch(heap.allocate(bytes, 8));
+      sum += touch(allocator.allocate(bytes, 8));
     }
     return sum;
   }
 
-  uintptr_t heap_scope(size_t count, size_t bytes) {
-    sc::Heap heap;
-    return fill(heap, count, bytes);
+  template<typename Allocator>
+  uintptr_t fresh_scope(size_t count, size_t bytes) {
+    Allocator allocator;
+    return fill(allocator, count, bytes);
   }
 
-  uintptr_t reset_scope(sc::Heap &heap, size_t count, size_t bytes) {
-    uintptr_t sum = fill(heap, count, bytes);
-    heap.reset();
+  uintptr_t heap_scope(size_t count, size_t bytes) { return fresh_scope<sc::Heap>(count, bytes); }
+
+  uintptr_t monotonic_scope(size_t count, size_t bytes) { return fresh_scope<sc::MonotonicResource>(count, bytes); }
+
+  template<typename Allocator>
+  uintptr_t reset_scope(Allocator &allocator, size_t count, size_t bytes) {
+    uintptr_t sum = fill(allocator, count, bytes);
+    allocator.reset();
     return sum;
   }
 
@@ -89,12 +100,15 @@ namespace {
     const std::string label = std::to_string(count) + " x " + std::to_string(bytes) + " B";
     std::vector<void *> blocks(count);
     sc::Heap reused;
+    sc::MonotonicResource reused_monotonic;
 
-    BENCHMARK("Heap:          " + label) { return heap_scope(count, bytes); };
-    BENCHMARK("Heap, reset:   " + label) { return reset_scope(reused, count, bytes); };
-    BENCHMARK("mi_heap:       " + label) { return mi_heap_scope(count, bytes); };
-    BENCHMARK("mi_malloc:     " + label) { return malloc_scope(blocks, bytes); };
-    BENCHMARK("pmr monotonic: " + label) { return pmr_scope(count, bytes); };
+    BENCHMARK("Heap:             " + label) { return heap_scope(count, bytes); };
+    BENCHMARK("Heap, reset:      " + label) { return reset_scope(reused, count, bytes); };
+    BENCHMARK("Monotonic:        " + label) { return monotonic_scope(count, bytes); };
+    BENCHMARK("Monotonic, reset: " + label) { return reset_scope(reused_monotonic, count, bytes); };
+    BENCHMARK("mi_heap:          " + label) { return mi_heap_scope(count, bytes); };
+    BENCHMARK("mi_malloc:        " + label) { return malloc_scope(blocks, bytes); };
+    BENCHMARK("pmr monotonic:    " + label) { return pmr_scope(count, bytes); };
   }
 
   // Runs work on every thread at once and waits for all of them.
@@ -219,6 +233,16 @@ TEST_CASE("Benchmark: every thread with its own scopes", "[!benchmark][memory]")
       return sum;
     });
   };
+
+  BENCHMARK("Monotonic: 8 threads x 200 scopes") {
+    on_threads(THREADS, [] {
+      uintptr_t sum = 0;
+      for (size_t i = 0; i < SCOPES; ++i) {
+        sum += monotonic_scope(COUNT, BYTES);
+      }
+      return sum;
+    });
+  };
 }
 
 TEST_CASE("Benchmark: all threads share one allocator", "[!benchmark][memory]") {
@@ -229,5 +253,10 @@ TEST_CASE("Benchmark: all threads share one allocator", "[!benchmark][memory]") 
   BENCHMARK("Heap: 8 threads x 20000 allocations") {
     sc::Heap heap;
     on_threads(THREADS, [&heap] { return fill(heap, COUNT, BYTES); });
+  };
+
+  BENCHMARK("Monotonic: 8 threads x 20000 allocations") {
+    sc::MonotonicResource resource;
+    on_threads(THREADS, [&resource] { return fill(resource, COUNT, BYTES); });
   };
 }

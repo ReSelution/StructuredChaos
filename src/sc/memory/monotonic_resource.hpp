@@ -38,11 +38,6 @@ namespace sc {
       size_t alignment;
     };
 
-    struct BlockRange {
-      std::byte *current;
-      std::byte *end;
-    };
-
     // Remembers one object that needs its destructor run. Lies right behind
     // the object, in the same allocation.
     struct CleanupNode {
@@ -54,7 +49,20 @@ namespace sc {
     template<typename T>
     static constexpr size_t nodeOffset = (sizeof(T) + alignof(CleanupNode) - 1) & ~(alignof(CleanupNode) - 1);
 
-    alignas(64) std::atomic<BlockRange> m_range;
+    // The range to allocate from, as two words instead of one pair that would
+    // need a 16 byte compare-exchange. Only m_current is contended.
+    //
+    // What keeps the two consistent:
+    //  - m_end is one byte short of the block. So m_current never reaches the
+    //    end of its block, which may be the start of another one, and every
+    //    value it takes belongs to exactly one block. It never takes one twice
+    //    either, since it only moves forward inside a block.
+    //  - A new range is installed as nullptr, end, start, see installRange().
+    // An allocation reads m_current, then m_end. If its compare-exchange
+    // succeeds, m_current was the same the whole time, so no range was
+    // installed in between and the end it read belongs to that block.
+    alignas(64) std::atomic<std::byte *> m_current{nullptr};
+    std::atomic<std::byte *> m_end{nullptr};
     alignas(64) std::mutex m_block_mutex;
     std::vector<Block> m_blocks;
     Block m_initial_block{};
@@ -73,7 +81,7 @@ namespace sc {
                                memory_resource *upstream = std::pmr::get_default_resource()) :
         m_initial_block(static_cast<std::byte *>(buffer), size, alignof(std::max_align_t)), m_upstream(upstream),
         m_next_block_size(size * 2) {
-      m_range.store({.current = m_initial_block.ptr, .end = m_initial_block.ptr + size}, std::memory_order_release);
+      installRange(m_initial_block.ptr, size);
     }
 
     MonotonicResource(const MonotonicResource &) = delete;
@@ -87,10 +95,11 @@ namespace sc {
     // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
     [[nodiscard]] void *allocate(size_t bytes, size_t alignment = alignof(std::max_align_t)) {
       while (true) {
-        auto block = m_range.load(std::memory_order::acquire);
-        if (std::byte *aligned_ptr = fit(block, bytes, alignment)) {
-          BlockRange next{.current = aligned_ptr + bytes, .end = block.end};
-          if (m_range.compare_exchange_weak(block, next, std::memory_order_acq_rel)) {
+        // In this order, see m_current.
+        std::byte *current = m_current.load(std::memory_order::acquire);
+        std::byte *end = m_end.load(std::memory_order::acquire);
+        if (std::byte *aligned_ptr = fit(current, end, bytes, alignment)) {
+          if (m_current.compare_exchange_weak(current, aligned_ptr + bytes, std::memory_order_acq_rel)) {
 
             return aligned_ptr;
           }
@@ -166,7 +175,7 @@ namespace sc {
     // upstream. Only a caller buffer is kept.
     void release() noexcept;
 
-    [[nodiscard]] static bool checkLockFree() { return std::atomic<BlockRange>{}.is_lock_free(); }
+    [[nodiscard]] static bool checkLockFree() { return std::atomic<std::byte *>{}.is_lock_free(); }
 
   private:
     void *do_allocate(size_t bytes, size_t alignment) override { return allocate(bytes, alignment); }
@@ -209,24 +218,40 @@ namespace sc {
       }
     }
 
+    // Makes [ptr, ptr + size) the range to allocate from, without its last
+    // byte. No range at all for nullptr or a size of zero. Needs the block
+    // mutex once other threads allocate.
+    void installRange(std::byte *ptr, size_t size) noexcept {
+      // Fails every allocation that is under way and sends new ones to the
+      // mutex, before the end changes.
+      m_current.store(nullptr, std::memory_order_release);
+      if (ptr == nullptr || size == 0) {
+        m_end.store(nullptr, std::memory_order_release);
+        return;
+      }
+      m_end.store(ptr + size - 1, std::memory_order_release);
+      m_current.store(ptr, std::memory_order_release);
+    }
+
     // Start of the allocation inside the range, or nullptr if it does not fit.
     // Compares sizes instead of pointers, because current + bytes can wrap
     // around for huge requests.
-    [[nodiscard]] static std::byte *fit(const BlockRange &range, size_t bytes, size_t alignment) noexcept {
-      if (range.current == nullptr) {
+    [[nodiscard]] static std::byte *fit(std::byte *current, std::byte *end, size_t bytes, size_t alignment) noexcept {
+      if (current == nullptr) {
         return nullptr;
       }
-      auto curr_addr = reinterpret_cast<uintptr_t>(range.current);
-      auto end_addr = reinterpret_cast<uintptr_t>(range.end);
+      auto curr_addr = reinterpret_cast<uintptr_t>(current);
+      auto end_addr = reinterpret_cast<uintptr_t>(end);
       uintptr_t aligned_addr = (curr_addr + alignment - 1) & ~(alignment - 1);
       if (aligned_addr < curr_addr || aligned_addr > end_addr || bytes > end_addr - aligned_addr) {
         return nullptr;
       }
-      return range.current + (aligned_addr - curr_addr);
+      return current + (aligned_addr - curr_addr);
     }
 
     // New blocks are only aligned to max_align_t, so a stricter request can
-    // lose up to alignment bytes of a fresh block to padding.
+    // lose up to alignment bytes of a fresh block to padding. The last byte of
+    // a block is never handed out, see m_current.
     [[nodiscard]] bool fits_new_block(size_t bytes, size_t alignment) const noexcept {
       if (bytes >= m_next_block_size) {
         return false;
