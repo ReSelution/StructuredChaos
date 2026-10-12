@@ -61,9 +61,11 @@ namespace sc::threading::impl {
     };
 
     // One thread per chunk at most, this one included.
-    shareParallel(job, std::min(helpers, ((count + grain - 1) / grain) - 1));
+    ParallelSlot *slot = shareParallel(job, std::min(helpers, ((count + grain - 1) / grain) - 1));
     job.run(job);
-    finishParallel(job);
+    if (slot != nullptr) {
+      finishParallel(*slot);
+    }
 
     if (job.error) {
       std::rethrow_exception(job.error);

@@ -5,11 +5,15 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <future>
+#include <mutex>
 #include <numeric>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -397,6 +401,115 @@ TEST_CASE("Threading Parallel For", "[threading][parallel_for]") {
     });
     done.get();
     REQUIRE(std::ranges::all_of(visits, [](const std::atomic<int> &n) { return n.load() == 1; }));
+  }
+
+  SECTION("Free Pool Threads Join In") {
+    std::mutex lock;
+    std::set<std::thread::id> seen;
+    sc::threading::parallelFor(64, 1, [&](size_t, size_t) {
+      {
+        const std::scoped_lock guard(lock);
+        seen.insert(std::this_thread::get_id());
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    });
+    REQUIRE(seen.size() > 1);
+  }
+
+  // Keeps every pool thread in a task until it is released, so that tickets
+  // stay in the queue.
+  struct BusyPool {
+    std::atomic<bool> release{false};
+    std::atomic<size_t> busy{0};
+
+    BusyPool() {
+      const size_t workers = sc::threading::thread_slots() - 1;
+      for (size_t i = 0; i < workers; ++i) {
+        sc::threading::detach([this] {
+          busy.fetch_add(1);
+          while (!release.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+        });
+      }
+      while (busy.load() != workers) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
+    BusyPool(const BusyPool &) = delete;
+    BusyPool &operator=(const BusyPool &) = delete;
+    ~BusyPool() {
+      release.store(true);
+      sc::threading::wait_until_finished();
+    }
+  };
+
+  SECTION("Without A Free Pool Thread The Caller Does It Alone") {
+    const BusyPool pool;
+    const auto caller = std::this_thread::get_id();
+    std::atomic<size_t> items{0};
+    std::atomic<size_t> elsewhere{0};
+    sc::threading::parallelFor(1000, 10, [&](size_t first, size_t last) {
+      items.fetch_add(last - first);
+      if (std::this_thread::get_id() != caller) {
+        elsewhere.fetch_add(1);
+      }
+    });
+    REQUIRE(items.load() == 1000);
+    REQUIRE(elsewhere.load() == 0);
+  }
+
+  SECTION("The Caller Leaves The Loops Of Others Alone") {
+    // The tickets of the long loop are in the queue in front of those of the
+    // short one. The short one must not pick them up.
+    const BusyPool pool;
+    std::atomic<bool> longStarted{false};
+    std::atomic<bool> shortDone{false};
+    std::atomic<size_t> longItems{0};
+    std::atomic<size_t> longOnForeignThread{0};
+    std::thread longLoop([&] {
+      const auto owner = std::this_thread::get_id();
+      sc::threading::parallelFor(64, 1, [&](size_t first, size_t last) {
+        longStarted.store(true);
+        longItems.fetch_add(last - first);
+        if (std::this_thread::get_id() != owner) {
+          longOnForeignThread.fetch_add(1);
+        }
+        // Still running when the short loop is through.
+        while (!shortDone.load()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      });
+    });
+    while (!longStarted.load()) {
+      std::this_thread::yield();
+    }
+    std::atomic<size_t> shortItems{0};
+    sc::threading::parallelFor(4, 1, [&](size_t first, size_t last) { shortItems.fetch_add(last - first); });
+    shortDone.store(true);
+    longLoop.join();
+
+    REQUIRE(shortItems.load() == 4);
+    REQUIRE(longItems.load() == 64);
+    REQUIRE(longOnForeignThread.load() == 0);
+  }
+
+  SECTION("Tickets Nobody Took Are Void") {
+    std::atomic<size_t> late{0};
+    {
+      const BusyPool pool;
+      for (int round = 0; round < 50; ++round) {
+        // Gone when the pool threads get to the tickets.
+        std::atomic<size_t> items{0};
+        sc::threading::parallelFor(100, 1, [&](size_t first, size_t last) { items.fetch_add(last - first); });
+        late.fetch_add(items.load() == 100 ? 0 : 1);
+      }
+      // The pool threads are released here and take what is in the queue.
+    }
+    REQUIRE(late.load() == 0);
+    const auto [once, largest] = visit(10'000, 16);
+    REQUIRE(once);
+    REQUIRE(largest <= 16);
   }
 }
 

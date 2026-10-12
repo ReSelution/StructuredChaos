@@ -4,6 +4,8 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <semaphore>
 #include <string_view>
@@ -79,31 +81,53 @@ namespace sc::threading::impl {
   MoveOnlyFunction helpThread(int id);
 
   // A loop that several threads work on, see parallelFor. It lives on the
-  // stack of the thread that started it and is handed around as tickets: a
-  // pointer to it in the queue for every thread that may help.
+  // stack of the thread that started it, its owner.
   struct ParallelJob {
-    // Works on the loop until nothing is left to take. Called by the thread
-    // that started the loop and by everyone who got a ticket.
+    // Works on the loop until nothing is left to take. Called by the owner
+    // and by every pool thread that got into the loop with a ticket.
     void (*run)(ParallelJob &) = nullptr;
-    // Tickets that were handed out and not given back yet. The job must not
-    // go away before this is zero.
-    std::atomic<size_t> tickets{0};
   };
 
-  // Fixed in size and never freed, which is fine for a few pointers. A loop
-  // that finds it full gets fewer helpers.
-  inline atomic_queue::AtomicQueue<ParallelJob *, 1024> parallelJobs;
+  // Where a loop is open for helpers. The owner takes a slot, hands out
+  // tickets for it and closes it when its own part of the loop is done. A
+  // ticket names the slot and the generation the slot had when the ticket was
+  // made: closing the slot moves the generation on, so a ticket that is still
+  // in the queue then is void and the thread that takes it later does not
+  // touch the job, which may be long gone. The owner only has to wait for the
+  // threads that are inside its loop at that moment.
+  struct alignas(64) ParallelSlot {
+    static constexpr unsigned HELPER_BITS = 16;
+    static constexpr uint64_t HELPER_MASK = (uint64_t{1} << HELPER_BITS) - 1;
 
-  // Hands out up to the given number of tickets, at most one for every pool
-  // thread, and wakes the threads up.
-  void shareParallel(ParallelJob &job, size_t helpers);
+    // The generation in the upper bits, below it the number of pool threads
+    // that are inside the loop.
+    std::atomic<uint64_t> state{0};
+    std::atomic<bool> used{false};
+    std::atomic<ParallelJob *> job{nullptr};
+  };
 
-  // Takes a ticket, if there is one, and works on its loop.
+  inline constexpr size_t PARALLEL_SLOTS = 1024;
+  inline std::array<ParallelSlot, PARALLEL_SLOTS> parallelSlots;
+
+  // The tickets: generation and slot, see ticketOf(). Fixed in size and never
+  // freed, which is fine for a few numbers. A loop that finds it full gets
+  // fewer helpers.
+  inline atomic_queue::AtomicQueue<uint64_t, PARALLEL_SLOTS> parallelTickets;
+
+  // Opens a slot for the job, hands out up to the given number of tickets, at
+  // most one for every pool thread, and wakes the threads up. Null if no
+  // ticket was handed out; there is nothing to finish then.
+  [[nodiscard]] ParallelSlot *shareParallel(ParallelJob &job, size_t helpers);
+
+  // Takes a ticket, if there is one, and works on its loop unless the ticket
+  // is void. Only for threads that have nothing else to do.
   bool helpParallel();
 
-  // Returns once every ticket of the job was given back. Works on the loops
-  // of waiting tickets in the meantime, also on those of other jobs.
-  void finishParallel(ParallelJob &job);
+  // Closes the slot, which makes the tickets nobody has taken void, and
+  // returns once the threads that are inside the loop have left it. Does not
+  // work on anything in the meantime: what is left of the loop is the chunk
+  // each of those threads is in the middle of.
+  void finishParallel(ParallelSlot &slot);
 
   void workerThread(const std::stop_token &st, int id);
 

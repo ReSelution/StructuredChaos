@@ -29,8 +29,11 @@ namespace sc::threading {
   //
   // The function is called from several threads at once. May be called from
   // anywhere, also from a task of the pool and from inside another
-  // parallelFor: the calling thread never sleeps, it works on the loop itself
-  // and, while it waits for the last chunks, on the loops of others.
+  // parallelFor: the calling thread works on the loop itself and does not
+  // depend on anybody joining in. If no pool thread is free, it does all of
+  // it alone. Once nothing of the loop is left to take, it only waits for the
+  // pool threads that are in the middle of a chunk of it; it never works on
+  // the loop of somebody else, that is left to threads with nothing to do.
   //
   // If the function throws, no further chunk is started and the first
   // exception is rethrown once the running ones are done.
