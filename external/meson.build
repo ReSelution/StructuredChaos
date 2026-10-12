@@ -68,6 +68,12 @@ simdutf_dep = dependency(
 )
 rapidHash_dep = dependency('rapidHash', fallback: ['rapidHash', 'rapidHash_dep'])
 pfr_dep = dependency('pfr', fallback: ['pfr', 'pfr_dep'])
+# Its tests need Boost.
+atomic_queue_dep = dependency(
+  'atomic_queue',
+  fallback: ['atomic_queue', 'atomic_queue_dep'],
+  default_options: ['tests=false'],
+)
 
 all_deps = [
   entt_dep,
@@ -79,4 +85,5 @@ all_deps = [
   simdutf_dep,
   pfr_dep,
   rapidHash_dep,
+  atomic_queue_dep,
 ]
