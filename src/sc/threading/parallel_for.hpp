@@ -11,7 +11,8 @@
 
 namespace sc::threading::impl {
 
-  template <typename F> void parallelFor(size_t count, size_t grain, size_t helpers, F &function) {
+  template<typename F>
+  void parallelFor(size_t count, size_t grain, size_t helpers, F &function) {
     grain = std::max<size_t>(grain, 1);
     if (count <= grain) {
       if (count != 0) {

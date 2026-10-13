@@ -9,6 +9,11 @@
 #include <utility>
 
 #ifdef _WIN32
+// Without it windows.h defines min and max as macros, which breaks std::min
+// and std::max in everything that includes this header.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <intrin.h>
 #include <windows.h>
 #else

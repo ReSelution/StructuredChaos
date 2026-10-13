@@ -333,8 +333,8 @@ TEST_CASE("Threading Parallel For", "[threading][parallel_for]") {
   };
 
   SECTION("Every Item Once, In Chunks Of At Most The Grain") {
-    for (const size_t count : {size_t{1}, size_t{7}, size_t{1000}, size_t{100'003}}) {
-      for (const size_t grain : {size_t{1}, size_t{64}, size_t{1000}, size_t{1'000'000}}) {
+    for (const size_t count: {size_t{1}, size_t{7}, size_t{1000}, size_t{100'003}}) {
+      for (const size_t grain: {size_t{1}, size_t{64}, size_t{1000}, size_t{1'000'000}}) {
         const auto [once, largest] = visit(count, grain);
         REQUIRE(once);
         REQUIRE(largest <= grain);
@@ -391,7 +391,7 @@ TEST_CASE("Threading Parallel For", "[threading][parallel_for]") {
     constexpr size_t items = 5000;
     std::vector<std::atomic<int>> visits(tasks * items);
     std::vector<size_t> ids(tasks);
-    std::iota(ids.begin(), ids.end(), size_t{0});
+    std::ranges::iota(ids, size_t{0});
     auto done = sc::threading::enqueueBatch(ids, [&](size_t task) {
       sc::threading::parallelFor(items, 100, [&, task](size_t first, size_t last) {
         for (size_t i = first; i < last; ++i) {

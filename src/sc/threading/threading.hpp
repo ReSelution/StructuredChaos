@@ -37,7 +37,7 @@ namespace sc::threading {
   //
   // If the function throws, no further chunk is started and the first
   // exception is rethrown once the running ones are done.
-  template <typename F>
+  template<typename F>
     requires std::invocable<F &, size_t, size_t>
   void parallelFor(size_t count, size_t grain, F &&function) {
     impl::parallelFor(count, grain, SIZE_MAX, function);
@@ -47,7 +47,7 @@ namespace sc::threading {
   // loop that knows it has too little work for all of them: waking a thread
   // up costs more than a small chunk. With no helpers the calling thread does
   // everything itself.
-  template <typename F>
+  template<typename F>
     requires std::invocable<F &, size_t, size_t>
   void parallelFor(size_t count, size_t grain, size_t helpers, F &&function) {
     impl::parallelFor(count, grain, helpers, function);

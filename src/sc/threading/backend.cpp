@@ -16,7 +16,8 @@ namespace sc::threading::impl {
     if (wokenForWork) {
       wokenForWork = false;
     } else {
-      pool_sema.try_acquire();
+      // Nothing to take back if the woken thread was faster.
+      (void) pool_sema.try_acquire();
     }
   }
 
@@ -178,8 +179,7 @@ namespace sc::threading::impl {
         // Void: the loop is over, or the slot belongs to another one by now.
         return true;
       }
-    } while (!slot.state.compare_exchange_weak(state, state + 1, std::memory_order_acq_rel,
-                                               std::memory_order_acquire));
+    } while (!slot.state.compare_exchange_weak(state, state + 1, std::memory_order_acq_rel, std::memory_order_acquire));
 
     ParallelJob *job = slot.job.load(std::memory_order_acquire);
     job->run(*job);
