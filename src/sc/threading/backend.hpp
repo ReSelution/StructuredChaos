@@ -117,13 +117,25 @@ namespace sc::threading::impl {
 
   // Opens a slot for the job, hands out up to the given number of tickets, at
   // most one for every pool thread, and wakes the threads up. Null if no
-  // ticket was handed out; there is nothing to finish then.
-  [[nodiscard]] ParallelSlot *shareParallel(ParallelJob &job, size_t helpers);
+  // ticket was handed out; there is nothing to finish then. With ticket the
+  // slot is opened in any case, unless all of them are taken, and its ticket
+  // is written there for threads that join the loop by it.
+  [[nodiscard]] ParallelSlot *shareParallel(ParallelJob &job, size_t helpers, uint64_t *ticket = nullptr);
 
   // Takes a ticket, if there is one, and works on its loop unless the ticket
   // is void. Only for threads that have nothing else to do. With a stop
   // check it leaves the loop before the first chunk for which stop is true.
   bool helpParallel(StopCheck stop = nullptr, void *context = nullptr);
+
+  // Works on the loop of the ticket like helpParallel, without taking a
+  // ticket from the queue. False if the ticket is void.
+  bool joinParallel(uint64_t ticket, StopCheck stop = nullptr, void *context = nullptr);
+
+  // The StopCheck for a predicate, which is passed as the context.
+  template<typename S>
+  bool stopCheckOf(void *context) noexcept {
+    return static_cast<bool>((*static_cast<S *>(context))());
+  }
 
   // Closes the slot, which makes the tickets nobody has taken void, and
   // returns once the threads that are inside the loop have left it. Does not

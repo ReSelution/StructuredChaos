@@ -637,6 +637,52 @@ TEST_CASE("Threading Help Thread", "[threading][help]") {
     REQUIRE(complete);
     REQUIRE(helpedChunks == 0);
   }
+
+  SECTION("Joins The Loop Of Its Ticket, Even Without Helpers") {
+    constexpr size_t COUNT = 1000;
+    std::vector<std::atomic<int>> visits(COUNT);
+    std::atomic<size_t> mine{0};
+    std::atomic<uint64_t> published{0};
+    const std::thread::id self = std::this_thread::get_id();
+    std::thread owner([&] {
+      sc::threading::parallelFor(
+          COUNT, 1, 0,
+          [&](size_t first, size_t) {
+            visits[first].fetch_add(1);
+            if (std::this_thread::get_id() == self) {
+              mine.fetch_add(1);
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+          },
+          [&](sc::threading::LoopTicket ticket) { published.store(ticket.value); });
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (published.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::yield();
+    }
+    const sc::threading::LoopTicket ticket{published.load()};
+    const bool helped = sc::threading::helpThread(ticket, [&] { return mine.load() >= 3; });
+    owner.join();
+    const bool voidAfterwards = !sc::threading::helpThread(ticket);
+    REQUIRE(ticket.value != 0);
+    REQUIRE(helped);
+    REQUIRE(mine.load() == 3);
+    REQUIRE(std::ranges::all_of(visits, [](const std::atomic<int> &n) { return n.load() == 1; }));
+    REQUIRE(voidAfterwards);
+  }
+
+  SECTION("A Default Ticket Is Void") { REQUIRE(!sc::threading::helpThread(sc::threading::LoopTicket{})); }
+
+  SECTION("An Exception From onTicket Starts No Chunk") {
+    std::atomic<int> chunks{0};
+    const auto failing = [&] {
+      sc::threading::parallelFor(
+          100, 1, 0, [&](size_t, size_t) { chunks.fetch_add(1); },
+          [](sc::threading::LoopTicket) { throw std::runtime_error("onTicket"); });
+    };
+    REQUIRE_THROWS_AS(failing(), std::runtime_error);
+    REQUIRE(chunks.load() == 0);
+  }
 }
 
 TEST_CASE("Threading Raw Speed Benchmarks", "[threading][efficiency][benchmark]") {

@@ -37,10 +37,24 @@ namespace sc::threading {
   template<typename Stop>
     requires std::predicate<Stop &>
   bool helpThread(Stop &&stop) {
-    using S = std::remove_reference_t<Stop>;
-    return impl::helpParallel(
-        [](void *context) noexcept { return static_cast<bool>((*static_cast<S *>(context))()); },
-        const_cast<void *>(static_cast<const void *>(std::addressof(stop))));
+    return impl::helpParallel(impl::stopCheckOf<std::remove_reference_t<Stop>>,
+                              const_cast<void *>(static_cast<const void *>(std::addressof(stop))));
+  }
+
+  // Joins exactly the loop of the ticket, which parallelFor with onTicket
+  // gave out, and works on it like helpThread() does. Only that loop, so a
+  // thread can help with what it waits for without getting into work of
+  // somebody else that may wait for it in turn. False if the ticket is void,
+  // because the loop is over or there was none.
+  bool helpThread(LoopTicket ticket);
+
+  // The same with stop, as for helpThread(stop). Returns true also if stop
+  // was true right away.
+  template<typename Stop>
+    requires std::predicate<Stop &>
+  bool helpThread(LoopTicket ticket, Stop &&stop) {
+    return impl::joinParallel(ticket.value, impl::stopCheckOf<std::remove_reference_t<Stop>>,
+                              const_cast<void *>(static_cast<const void *>(std::addressof(stop))));
   }
 
   /// @brief Id of the calling thread: 0 for the thread that called init and
@@ -79,6 +93,18 @@ namespace sc::threading {
     requires std::invocable<F &, size_t, size_t>
   void parallelFor(size_t count, size_t grain, size_t helpers, F &&function) {
     impl::parallelFor(count, grain, helpers, function);
+  }
+
+  // The same, and before the calling thread starts on the loop, onTicket is
+  // called with its ticket, for threads that wait for the loop to join it by
+  // helpThread(ticket). They can join it even with no helpers. Not called if
+  // the loop is a single chunk, or if all slots for shared loops are taken.
+  // The ticket turns void when parallelFor returns. If onTicket throws, no
+  // chunk is started and the exception is passed on.
+  template<typename F, typename OnTicket>
+    requires std::invocable<F &, size_t, size_t> && std::invocable<OnTicket &, LoopTicket>
+  void parallelFor(size_t count, size_t grain, size_t helpers, F &&function, OnTicket &&onTicket) {
+    impl::parallelFor(count, grain, helpers, function, onTicket);
   }
 
   // detach

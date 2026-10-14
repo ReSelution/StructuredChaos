@@ -8,11 +8,15 @@
 #include <type_traits>
 
 #include "backend.hpp"
+#include "types.hpp"
 
 namespace sc::threading::impl {
 
-  template<typename F>
-  void parallelFor(size_t count, size_t grain, size_t helpers, F &function) {
+  // onTicket is null or called with the ticket of the loop before the
+  // calling thread starts on it, see sc::threading::parallelFor.
+  template<typename F, typename OnTicket = std::nullptr_t>
+  void parallelFor(size_t count, size_t grain, size_t helpers, F &function, OnTicket &&onTicket = nullptr) {
+    constexpr bool wantsTicket = !std::is_same_v<std::decay_t<OnTicket>, std::nullptr_t>;
     grain = std::max<size_t>(grain, 1);
     if (count <= grain) {
       if (count != 0) {
@@ -20,7 +24,7 @@ namespace sc::threading::impl {
       }
       return;
     }
-    if (helpers == 0) {
+    if (helpers == 0 && !wantsTicket) {
       // Nothing to share: no job, no tickets, nobody is woken up.
       for (size_t first = 0; first < count; first += grain) {
         function(first, std::min(first + grain, count));
@@ -64,7 +68,21 @@ namespace sc::threading::impl {
     };
 
     // One thread per chunk at most, this one included.
-    ParallelSlot *slot = shareParallel(job, std::min(helpers, ((count + grain - 1) / grain) - 1));
+    uint64_t ticket = 0;
+    ParallelSlot *slot =
+        shareParallel(job, std::min(helpers, ((count + grain - 1) / grain) - 1), wantsTicket ? &ticket : nullptr);
+    if constexpr (wantsTicket) {
+      if (slot != nullptr) {
+        try {
+          onTicket(LoopTicket{ticket});
+        } catch (...) {
+          // Nobody starts a chunk, the loop ends with the exception.
+          job.next.store(job.count, std::memory_order_relaxed);
+          finishParallel(*slot);
+          throw;
+        }
+      }
+    }
     job.run(job, nullptr, nullptr);
     if (slot != nullptr) {
       finishParallel(*slot);

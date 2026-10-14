@@ -14,6 +14,13 @@ namespace sc::threading {
   using PoolThroughput = sc::stats::Stat<"PoolTasks", sc::stats::Throughput<sc::stats::MetricUnits>>;
   using LongRunningThreads = sc::stats::Stat<"LongRunningThreads", sc::stats::Counter<>>;
 
+  // The ticket of a running parallelFor loop, see parallelFor with onTicket
+  // and helpThread(ticket). Once the loop is over it is void and helpThread
+  // does nothing with it, as with a default constructed one.
+  struct LoopTicket {
+    uint64_t value = 0;
+  };
+
   enum class Priority : int32_t {
     High,
     Normal,

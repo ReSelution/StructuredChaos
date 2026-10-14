@@ -108,9 +108,9 @@ namespace sc::threading::impl {
     }
   } // namespace
 
-  ParallelSlot *shareParallel(ParallelJob &job, size_t helpers) {
+  ParallelSlot *shareParallel(ParallelJob &job, size_t helpers, uint64_t *ticketOut) {
     helpers = std::min(helpers, threads.size());
-    if (helpers == 0) {
+    if (helpers == 0 && ticketOut == nullptr) {
       return nullptr;
     }
 
@@ -137,13 +137,17 @@ namespace sc::threading::impl {
     while (shared < helpers && parallelTickets.try_push(ticket)) {
       ++shared;
     }
-    if (shared == 0) {
+    if (ticketOut != nullptr) {
+      *ticketOut = ticket;
+    } else if (shared == 0) {
       // No ticket is out, the slot can go back as it is.
       slot->job.store(nullptr, std::memory_order_relaxed);
       slot->used.store(false, std::memory_order_release);
       return nullptr;
     }
-    signalWork(shared);
+    if (shared != 0) {
+      signalWork(shared);
+    }
     return slot;
   }
 
@@ -153,8 +157,16 @@ namespace sc::threading::impl {
       return false;
     }
     take_wake_up();
+    joinParallel(ticket, stop, context);
+    return true;
+  }
 
-    ParallelSlot &slot = parallelSlots[(ticket & ParallelSlot::HELPER_MASK) - 1];
+  bool joinParallel(uint64_t ticket, StopCheck stop, void *context) {
+    const uint64_t index = ticket & ParallelSlot::HELPER_MASK;
+    if (index == 0 || index > PARALLEL_SLOTS) {
+      return false;
+    }
+    ParallelSlot &slot = parallelSlots[index - 1];
     const uint64_t generation = ticket >> ParallelSlot::HELPER_BITS;
     // Gets in only while the slot still has the generation of the ticket. The
     // owner closes the slot on the same word, so it either sees this thread
@@ -163,7 +175,7 @@ namespace sc::threading::impl {
     do {
       if ((state >> ParallelSlot::HELPER_BITS) != generation) {
         // Void: the loop is over, or the slot belongs to another one by now.
-        return true;
+        return false;
       }
     } while (!slot.state.compare_exchange_weak(state, state + 1, std::memory_order_acq_rel, std::memory_order_acquire));
 

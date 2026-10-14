@@ -7,4 +7,6 @@ void sc::threading::wait_until_finished() { impl::wait_until_finished(); }
 
 bool sc::threading::helpThread() { return impl::helpParallel(); }
 
+bool sc::threading::helpThread(LoopTicket ticket) { return impl::joinParallel(ticket.value); }
+
 size_t sc::threading::thread_slots() noexcept { return 1 + impl::longRunningThreads.size() + impl::threads.size(); }
