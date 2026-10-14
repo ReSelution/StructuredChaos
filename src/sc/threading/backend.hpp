@@ -78,10 +78,15 @@ namespace sc::threading::impl {
 
   // A loop that several threads work on, see parallelFor. It lives on the
   // stack of the thread that started it, its owner.
+  // Asked by a helper before it takes the next chunk of a loop, see
+  // sc::threading::helpThread(stop). Null for whoever does not stop early.
+  using StopCheck = bool (*)(void *context) noexcept;
+
   struct ParallelJob {
-    // Works on the loop until nothing is left to take. Called by the owner
-    // and by every pool thread that got into the loop with a ticket.
-    void (*run)(ParallelJob &) = nullptr;
+    // Works on the loop until nothing is left to take, or until stop says so
+    // before the next chunk. Called by the owner, which never stops early,
+    // and by every thread that got into the loop with a ticket.
+    void (*run)(ParallelJob &, StopCheck stop, void *context) = nullptr;
   };
 
   // Where a loop is open for helpers. The owner takes a slot, hands out
@@ -116,8 +121,9 @@ namespace sc::threading::impl {
   [[nodiscard]] ParallelSlot *shareParallel(ParallelJob &job, size_t helpers);
 
   // Takes a ticket, if there is one, and works on its loop unless the ticket
-  // is void. Only for threads that have nothing else to do.
-  bool helpParallel();
+  // is void. Only for threads that have nothing else to do. With a stop
+  // check it leaves the loop before the first chunk for which stop is true.
+  bool helpParallel(StopCheck stop = nullptr, void *context = nullptr);
 
   // Closes the slot, which makes the tickets nobody has taken void, and
   // returns once the threads that are inside the loop have left it. Does not

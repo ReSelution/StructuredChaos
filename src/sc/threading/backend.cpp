@@ -147,7 +147,7 @@ namespace sc::threading::impl {
     return slot;
   }
 
-  bool helpParallel() {
+  bool helpParallel(StopCheck stop, void *context) {
     uint64_t ticket = 0;
     if (!parallelTickets.try_pop(ticket)) {
       return false;
@@ -168,7 +168,7 @@ namespace sc::threading::impl {
     } while (!slot.state.compare_exchange_weak(state, state + 1, std::memory_order_acq_rel, std::memory_order_acquire));
 
     ParallelJob *job = slot.job.load(std::memory_order_acquire);
-    job->run(*job);
+    job->run(*job, stop, context);
     // Nothing may touch the job after this: its owner is free to go.
     slot.state.fetch_sub(1, std::memory_order_release);
     return true;

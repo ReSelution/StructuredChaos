@@ -3,7 +3,9 @@
 #include <concepts>
 #include <cstdint>
 #include <future>
+#include <memory>
 #include <thread>
+#include <type_traits>
 
 #include "detach.hpp"
 #include "enqueue.hpp"
@@ -23,6 +25,23 @@ namespace sc::threading {
   // otherwise only yield, typically for what that thread loads in a
   // parallelFor. Before init there is nothing to help.
   bool helpThread();
+
+  // The same, but before every chunk it would take next, the first one
+  // included, stop() is asked, and once it is true the thread leaves the loop:
+  // the chunk it is in is always finished, the rest is left to the others.
+  // For a wait that is over long before the loop: helpThread([&] { return
+  // ready.load(); }). Returns true also if stop was true right away.
+  //
+  // stop is called on this thread only, but in the middle of the loop of
+  // another one, so it must not throw: an exception ends the program.
+  template<typename Stop>
+    requires std::predicate<Stop &>
+  bool helpThread(Stop &&stop) {
+    using S = std::remove_reference_t<Stop>;
+    return impl::helpParallel(
+        [](void *context) noexcept { return static_cast<bool>((*static_cast<S *>(context))()); },
+        const_cast<void *>(static_cast<const void *>(std::addressof(stop))));
+  }
 
   /// @brief Id of the calling thread: 0 for the thread that called init and
   /// for threads outside the pool, a positive number for pool workers.

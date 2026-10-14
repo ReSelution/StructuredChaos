@@ -42,10 +42,12 @@ namespace sc::threading::impl {
     job.count = count;
     job.grain = grain;
     job.function = &function;
-    job.run = [](ParallelJob &base) {
+    job.run = [](ParallelJob &base, StopCheck stop, void *context) {
       Job &job = static_cast<Job &>(base);
       try {
-        while (true) {
+        // A helper that stops early leaves nothing behind: the owner works on
+        // the loop until the last chunk is taken.
+        while (stop == nullptr || !stop(context)) {
           const size_t first = job.next.fetch_add(job.grain, std::memory_order_relaxed);
           if (first >= job.count) {
             break;
@@ -63,7 +65,7 @@ namespace sc::threading::impl {
 
     // One thread per chunk at most, this one included.
     ParallelSlot *slot = shareParallel(job, std::min(helpers, ((count + grain - 1) / grain) - 1));
-    job.run(job);
+    job.run(job, nullptr, nullptr);
     if (slot != nullptr) {
       finishParallel(*slot);
     }

@@ -592,6 +592,51 @@ TEST_CASE("Threading Help Thread", "[threading][help]") {
     const std::thread::id self = std::this_thread::get_id();
     REQUIRE(((ranOn[0] == self && ranOn[1] == ownerId) || (ranOn[0] == ownerId && ranOn[1] == self)));
   }
+
+  // A loop of many small chunks on a thread outside the pool, joined by the
+  // test thread with a stop check. Returns how many chunks the test thread
+  // did, and whether every item was visited exactly once.
+  const auto helpWithStop = [&](auto &&stop, size_t &helpedChunks) {
+    constexpr size_t COUNT = 1000;
+    std::vector<std::atomic<int>> visits(COUNT);
+    std::atomic<size_t> mine{0};
+    const std::thread::id self = std::this_thread::get_id();
+    std::thread owner([&] {
+      sc::threading::parallelFor(COUNT, 1, [&](size_t first, size_t) {
+        visits[first].fetch_add(1);
+        if (std::this_thread::get_id() == self) {
+          mine.fetch_add(1);
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      });
+    });
+    bool helped = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!helped && std::chrono::steady_clock::now() < deadline) {
+      helped = sc::threading::helpThread([&] { return stop(mine.load()); });
+    }
+    owner.join();
+    helpedChunks = mine.load();
+    return helped && std::ranges::all_of(visits, [](const std::atomic<int> &n) { return n.load() == 1; });
+  };
+
+  SECTION("Stops After Its Chunk") {
+    REQUIRE(blockWorkers());
+    size_t helpedChunks = 0;
+    const bool complete = helpWithStop([](size_t done) { return done >= 1; }, helpedChunks);
+    releaseWorkers();
+    REQUIRE(complete);
+    REQUIRE(helpedChunks == 1);
+  }
+
+  SECTION("Takes Nothing If Stop Is True Right Away") {
+    REQUIRE(blockWorkers());
+    size_t helpedChunks = 0;
+    const bool complete = helpWithStop([](size_t) { return true; }, helpedChunks);
+    releaseWorkers();
+    REQUIRE(complete);
+    REQUIRE(helpedChunks == 0);
+  }
 }
 
 TEST_CASE("Threading Raw Speed Benchmarks", "[threading][efficiency][benchmark]") {
