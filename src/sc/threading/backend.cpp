@@ -59,13 +59,6 @@ namespace sc::threading::impl {
     const size_t longCount = longRunningThreads.size();
     const size_t maxHardware = std::thread::hardware_concurrency();
     const size_t threadCount = std::min<size_t>(numThreads, maxHardware - 1 - longCount);
-    const size_t totalSlots = 1 + longCount + threadCount;
-
-    workerStores.reserve(totalSlots);
-    for (uint32_t i = 0; i < totalSlots; ++i) {
-      workerStores.push_back(std::make_unique<aQueue>());
-    }
-
     std::atexit(shutdown);
     for (uint32_t i = 0; i < threadCount; ++i) {
       threads.emplace_back(workerThread, i + 1 + longRunningThreads.size());
@@ -89,27 +82,6 @@ namespace sc::threading::impl {
     longRunningThreads.clear();
   }
 
-  bool help_impl() {
-    // Before init there is nobody to help.
-    if (workerStores.empty()) {
-      return false;
-    }
-    if (helpParallel()) {
-      return true;
-    }
-    MoveOnlyFunction task;
-    if (!queues.try_pop_any(task, threadId)) {
-      task = helpThread(threadId);
-      if (!task) {
-        return false;
-      }
-    }
-    on_task_started();
-    task();
-    on_task_finished();
-    return true;
-  }
-
   void workerThread(const std::stop_token &st, int id) {
     threadId = id;
     while (!st.stop_requested()) {
@@ -119,13 +91,6 @@ namespace sc::threading::impl {
       }
       MoveOnlyFunction task;
       if (queues.try_pop_any(task, threadId)) {
-        on_task_started();
-        task();
-        on_task_finished();
-        continue;
-      }
-      task = helpThread(id);
-      if (task) {
         on_task_started();
         task();
         on_task_finished();
@@ -236,25 +201,5 @@ namespace sc::threading::impl {
     name.copy(shortName, sizeof(shortName) - 1);
     pthread_setname_np(pthread_self(), shortName);
 #endif
-  }
-  MoveOnlyFunction helpThread(int id) {
-    uint64_t mask = available.load(std::memory_order_acquire);
-    if (mask == 0) {
-      return {};
-    }
-
-    const auto n = workerStores.size();
-    uint32_t shift = (id + 1) % n;
-    uint64_t rotated = (mask >> shift) | (mask << (n - shift));
-    rotated &= (1ULL << n) - 1;
-
-    int rotatedIdx = std::countr_zero(rotated);
-    uint32_t targetIdx = (rotatedIdx + shift) % n;
-
-    MoveOnlyFunction task;
-    if (workerStores[targetIdx]->try_pop(task, id)) [[likely]] {
-      return task;
-    }
-    return {};
   }
 } // namespace sc::threading::impl

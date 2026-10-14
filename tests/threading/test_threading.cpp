@@ -548,32 +548,16 @@ TEST_CASE("Threading Help Thread", "[threading][help]") {
 
   SECTION("Nothing To Do") { REQUIRE(!sc::threading::helpThread()); }
 
-  SECTION("Takes A Task") {
+  SECTION("Leaves Tasks To The Pool") {
     REQUIRE(blockWorkers());
-    std::thread::id ranOn;
-    sc::threading::detach([&] { ranOn = std::this_thread::get_id(); });
+    std::atomic<bool> ran{false};
+    sc::threading::detach([&] { ran.store(true); });
     const bool helped = sc::threading::helpThread();
-    const bool nothingLeft = !sc::threading::helpThread();
+    const bool ranHere = ran.load();
     releaseWorkers();
-    REQUIRE(helped);
-    REQUIRE(ranOn == std::this_thread::get_id());
-    REQUIRE(nothingLeft);
-  }
-
-  SECTION("A Task That Throws Stays Inside It") {
-    REQUIRE(blockWorkers());
-    sc::threading::detach([] { throw std::runtime_error("task"); });
-    bool helped = false;
-    bool threw = false;
-    try {
-      helped = sc::threading::helpThread();
-    } catch (...) {
-      threw = true;
-    }
-    // Would not return if the task were still outstanding.
-    releaseWorkers();
-    REQUIRE(helped);
-    REQUIRE(!threw);
+    REQUIRE(!helped);
+    REQUIRE(!ranHere);
+    REQUIRE(ran.load());
   }
 
   SECTION("Joins A parallelFor") {

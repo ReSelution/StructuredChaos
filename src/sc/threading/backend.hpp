@@ -62,8 +62,6 @@ namespace sc::threading::impl {
 
   inline Queues queues;
   inline std::mutex queueMutex;
-  inline std::vector<std::unique_ptr<aQueue>> workerStores;
-  inline std::atomic<uint64_t> available{0};
   inline thread_local int32_t threadId = 0;
 
   // Tasks that were enqueued and have not finished yet.
@@ -77,8 +75,6 @@ namespace sc::threading::impl {
     outstanding_tasks.fetch_add(count, std::memory_order_relaxed);
     QueueSize::record(count); // stat exists or is a no-op
   }
-
-  MoveOnlyFunction helpThread(int id);
 
   // A loop that several threads work on, see parallelFor. It lives on the
   // stack of the thread that started it, its owner.
@@ -122,9 +118,6 @@ namespace sc::threading::impl {
   // Takes a ticket, if there is one, and works on its loop unless the ticket
   // is void. Only for threads that have nothing else to do.
   bool helpParallel();
-
-  // See sc::threading::helpThread().
-  bool help_impl();
 
   // Closes the slot, which makes the tickets nobody has taken void, and
   // returns once the threads that are inside the loop have left it. Does not
