@@ -3,85 +3,65 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
-#include <semaphore>
-#include <string_view>
-#include <thread>
 #include <utility>
-#include <vector>
 
-#include <atomic_queue/atomic_queue.h>
-
-#include "atomic_queue.hpp"
 #include "internal.hpp"
+#include "ring_queue.hpp"
 #include "types.hpp"
 
-namespace sc::threading::impl {
+// The pool behind sc::threading. Its state lives in backend.cpp; only what the
+// templates of enqueue, detach and parallelFor need is declared here.
+namespace sc::threading::internal {
 
-  void set_thread_name([[maybe_unused]] std::string_view name);
-  using aQueue = AtomicQueue<MoveOnlyFunction, QUEUE_CAP>;
+  using TaskQueue = RingQueue<MoveOnlyFunction, QUEUE_CAP>;
+
+  // Counts a task as outstanding. Has to be called before the task is pushed:
+  // a worker may pop and finish it right away, and it must not find the
+  // counter without that task.
+  void onTaskEnqueued() noexcept;
+
+  // Wakes up to count workers.
+  void signalWork(size_t count);
+
+  // Logs the exception that is being handled. For the catch block of a task
+  // nobody waits for.
+  void logDetachedException() noexcept;
 
   struct Queues {
-    std::array<aQueue, static_cast<size_t>(Priority::PriorityCount)> pQueues;
-    Queues() = default;
+    std::array<TaskQueue, PRIORITY_COUNT> byPriority;
 
-    bool try_pop_any(MoveOnlyFunction &task, int threadId) {
-      for (auto &q: pQueues) {
-        if (q.try_pop(task, threadId)) {
-          return true;
-        }
-      }
-      return false;
+    bool tryPopAny(MoveOnlyFunction &task, int32_t workerId) {
+      return std::ranges::any_of(byPriority, [&](TaskQueue &q) { return q.tryPop(task, workerId); });
     }
 
-    [[nodiscard]] bool was_empty() const {
-      return std::ranges::all_of(pQueues, [](const auto &q) { return q.empty(); });
+    [[nodiscard]] bool empty() const {
+      return std::ranges::all_of(byPriority, [](const TaskQueue &q) { return q.empty(); });
     }
 
-    template<Priority p>
-    void enqueue(MoveOnlyFunction &&task) {
-      pQueues[static_cast<size_t>(p)].push(std::move(task));
-    }
-
-    template<Priority p, typename Arg>
-    void emplace(Arg &&arg) {
-      pQueues[static_cast<size_t>(p)].emplace(MoveOnlyFunction(std::forward<Arg>(arg)));
+    // Builds the task first, which may throw, and only then counts and pushes
+    // it, which does not. A failed task leaves no trace in the pool.
+    template<Priority P, typename Callable>
+    void submit(Callable &&callable) {
+      MoveOnlyFunction task(std::forward<Callable>(callable));
+      onTaskEnqueued();
+      byPriority[static_cast<size_t>(P)].push(std::move(task));
     }
   };
 
-  inline std::mutex threadMutex;
-  inline std::vector<std::jthread> threads;
-  inline std::vector<std::jthread> longRunningThreads;
-  inline std::condition_variable_any wait_cv;
+  extern Queues queues;
 
-  static constexpr size_t MAX_TASKS = QUEUE_CAP * static_cast<size_t>(Priority::PriorityCount);
-  inline std::counting_semaphore<MAX_TASKS> pool_sema{0};
+  // 0 for the thread that called init and for threads outside the pool, a
+  // positive number for pool workers.
+  extern constinit thread_local int32_t currentThreadId;
 
-  inline Queues queues;
-  inline std::mutex queueMutex;
-  inline thread_local int32_t threadId = 0;
-
-  // Tasks that were enqueued and have not finished yet.
-  inline std::atomic<size_t> outstanding_tasks{0};
-  // Threads currently blocked in wait_until_finished.
-  inline std::atomic<size_t> idle_waiters{0};
-
-  // Has to be called before the tasks are pushed: a worker may pop and finish a
-  // task right away, and it must not find the counter without that task.
-  inline void on_task_enqueued(size_t count = 1) {
-    outstanding_tasks.fetch_add(count, std::memory_order_relaxed);
-    QueueSize::record(count); // stat exists or is a no-op
-  }
-
-  // A loop that several threads work on, see parallelFor. It lives on the
-  // stack of the thread that started it, its owner.
   // Asked by a helper before it takes the next chunk of a loop, see
   // sc::threading::helpThread(stop). Null for whoever does not stop early.
   using StopCheck = bool (*)(void *context) noexcept;
 
+  // A loop that several threads work on, see parallelFor. It lives on the
+  // stack of the thread that started it, its owner.
   struct ParallelJob {
     // Works on the loop until nothing is left to take, or until stop says so
     // before the next chunk. Called by the owner, which never stops early,
@@ -106,14 +86,6 @@ namespace sc::threading::impl {
     std::atomic<bool> used{false};
     std::atomic<ParallelJob *> job{nullptr};
   };
-
-  inline constexpr size_t PARALLEL_SLOTS = 1024;
-  inline std::array<ParallelSlot, PARALLEL_SLOTS> parallelSlots;
-
-  // The tickets: generation and slot, see ticketOf(). Fixed in size and never
-  // freed, which is fine for a few numbers. A loop that finds it full gets
-  // fewer helpers.
-  inline atomic_queue::AtomicQueue<uint64_t, PARALLEL_SLOTS> parallelTickets;
 
   // Opens a slot for the job, hands out up to the given number of tickets, at
   // most one for every pool thread, and wakes the threads up. Null if no
@@ -143,14 +115,13 @@ namespace sc::threading::impl {
   // each of those threads is in the middle of.
   void finishParallel(ParallelSlot &slot);
 
-  void workerThread(const std::stop_token &st, int id);
+  void initPool(uint32_t requested);
 
-  void signalWork(size_t count);
+  void shutdownPool();
 
-  void shutdown();
+  void waitUntilFinished();
 
-  void init_impl(uint32_t numThreads = std::thread::hardware_concurrency() - 1);
+  // One more than the highest thread id there is.
+  [[nodiscard]] size_t threadSlots() noexcept;
 
-  void wait_until_finished();
-
-} // namespace sc::threading::impl
+} // namespace sc::threading::internal

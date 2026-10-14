@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "sc/memory/cleanup_list.hpp"
 #include "sc/memory/pmr_traits.hpp"
 
 namespace sc {
@@ -38,17 +38,6 @@ namespace sc {
       size_t alignment;
     };
 
-    // Remembers one object that needs its destructor run. Lies right behind
-    // the object, in the same allocation.
-    struct CleanupNode {
-      void (*destroy)(CleanupNode *) noexcept;
-      CleanupNode *next;
-    };
-
-    // Distance from the object to its node.
-    template<typename T>
-    static constexpr size_t nodeOffset = (sizeof(T) + alignof(CleanupNode) - 1) & ~(alignof(CleanupNode) - 1);
-
     // The range to allocate from, as two words instead of one pair that would
     // need a 16 byte compare-exchange. Only m_current is contended.
     //
@@ -63,25 +52,32 @@ namespace sc {
     // installed in between and the end it read belongs to that block.
     alignas(64) std::atomic<std::byte *> m_current{nullptr};
     std::atomic<std::byte *> m_end{nullptr};
-    alignas(64) std::mutex m_block_mutex;
+    alignas(64) std::mutex m_blockMutex;
     std::vector<Block> m_blocks;
-    Block m_initial_block{};
+    Block m_initialBlock{};
     memory_resource *m_upstream;
-    size_t m_next_block_size;
-    std::atomic<CleanupNode *> m_cleanup{nullptr};
+    // Size of every block taken from the upstream. Fixed: an arena that is
+    // reset and reused keeps working in the same number of blocks.
+    size_t m_blockSize;
+    internal::CleanupList m_cleanup;
 
   public:
-    explicit MonotonicResource(size_t initial_size = size_t{1024} * 32,
+    static constexpr size_t DEFAULT_BLOCK_SIZE = size_t{32} * 1024;
+
+    // A block size of zero means DEFAULT_BLOCK_SIZE.
+    explicit MonotonicResource(size_t blockSize = DEFAULT_BLOCK_SIZE,
                                memory_resource *upstream = std::pmr::get_default_resource()) :
-        m_upstream(upstream), m_next_block_size(initial_size) {
-      allocate_new_block(initial_size);
+        m_upstream(upstream), m_blockSize(blockSize != 0 ? blockSize : DEFAULT_BLOCK_SIZE) {
+      allocateNewBlock(m_blockSize);
     }
 
+    // Starts in the caller's buffer, which it never frees. Further blocks are
+    // twice its size, or DEFAULT_BLOCK_SIZE for an empty buffer.
     explicit MonotonicResource(void *buffer, size_t size,
                                memory_resource *upstream = std::pmr::get_default_resource()) :
-        m_initial_block(static_cast<std::byte *>(buffer), size, alignof(std::max_align_t)), m_upstream(upstream),
-        m_next_block_size(size * 2) {
-      installRange(m_initial_block.ptr, size);
+        m_initialBlock(static_cast<std::byte *>(buffer), size, alignof(std::max_align_t)), m_upstream(upstream),
+        m_blockSize(size != 0 ? size * 2 : DEFAULT_BLOCK_SIZE) {
+      installRange(m_initialBlock.ptr, size);
     }
 
     MonotonicResource(const MonotonicResource &) = delete;
@@ -98,19 +94,17 @@ namespace sc {
         // In this order, see m_current.
         std::byte *current = m_current.load(std::memory_order::acquire);
         std::byte *end = m_end.load(std::memory_order::acquire);
-        if (std::byte *aligned_ptr = fit(current, end, bytes, alignment)) {
-          if (m_current.compare_exchange_weak(current, aligned_ptr + bytes, std::memory_order_acq_rel)) {
-
-            return aligned_ptr;
+        if (std::byte *aligned = fit(current, end, bytes, alignment)) {
+          if (m_current.compare_exchange_weak(current, aligned + bytes, std::memory_order_acq_rel)) {
+            return aligned;
           }
           continue;
         }
 
-        if (!fits_new_block(bytes, alignment)) {
-
-          return allocate_custom_block(bytes, alignment);
+        if (!fitsNewBlock(bytes, alignment)) {
+          return allocateCustomBlock(bytes, alignment);
         }
-        handle_full_block(bytes, alignment);
+        handleFullBlock(bytes, alignment);
       }
     }
 
@@ -126,7 +120,7 @@ namespace sc {
         // If the constructor throws, the block stays unused until the next
         // reset and nothing is remembered.
         T *object = new (block) T(std::forward<Args>(args)...);
-        remember<T>(block);
+        m_cleanup.remember<T>(block);
         return object;
       }
     }
@@ -139,7 +133,7 @@ namespace sc {
       requires std::uses_allocator_v<T, std::pmr::polymorphic_allocator<>>
     T *makePmr(Args &&...args) {
       const std::pmr::polymorphic_allocator<> allocator(this);
-      if constexpr (detail::ownsOnlyResourceMemory<T>) {
+      if constexpr (internal::ownsOnlyResourceMemory<T>) {
         void *block = allocate(sizeof(T), alignof(T));
         return std::uninitialized_construct_using_allocator(static_cast<T *>(block), allocator,
                                                             std::forward<Args>(args)...);
@@ -147,7 +141,7 @@ namespace sc {
         void *block = allocateWithNode<T>();
         T *object = std::uninitialized_construct_using_allocator(static_cast<T *>(block), allocator,
                                                                  std::forward<Args>(args)...);
-        remember<T>(block);
+        m_cleanup.remember<T>(block);
         return object;
       }
     }
@@ -187,35 +181,7 @@ namespace sc {
     // Room for an object and the node behind it.
     template<typename T>
     void *allocateWithNode() {
-      return allocate(nodeOffset<T> + sizeof(CleanupNode), std::max(alignof(T), alignof(CleanupNode)));
-    }
-
-    // Puts the object of a block from allocateWithNode() on the list. Only an
-    // object that exists is remembered.
-    template<typename T>
-    void remember(void *block) noexcept {
-      auto *node = new (static_cast<std::byte *>(block) + nodeOffset<T>)
-          CleanupNode{.destroy =
-                          [](CleanupNode *n) noexcept {
-                            void *start = reinterpret_cast<std::byte *>(n) - nodeOffset<T>;
-                            std::launder(static_cast<T *>(start))->~T();
-                          },
-                      .next = m_cleanup.load(std::memory_order_relaxed)};
-      while (!m_cleanup.compare_exchange_weak(node->next, node, std::memory_order_release, std::memory_order_relaxed)) {
-        ;
-      }
-    }
-
-    // Newest first. Runs again for what a destructor created meanwhile.
-    void runCleanups() noexcept {
-      while (CleanupNode *node = m_cleanup.exchange(nullptr, std::memory_order_acq_rel)) {
-        while (node != nullptr) {
-          // The destructor may not touch the node, but read it first anyway.
-          CleanupNode *next = node->next;
-          node->destroy(node);
-          node = next;
-        }
-      }
+      return allocate(internal::CleanupList::blockSize<T>, internal::CleanupList::blockAlignment<T>);
     }
 
     // Makes [ptr, ptr + size) the range to allocate from, without its last
@@ -240,29 +206,29 @@ namespace sc {
       if (current == nullptr) {
         return nullptr;
       }
-      auto curr_addr = reinterpret_cast<uintptr_t>(current);
-      auto end_addr = reinterpret_cast<uintptr_t>(end);
-      uintptr_t aligned_addr = (curr_addr + alignment - 1) & ~(alignment - 1);
-      if (aligned_addr < curr_addr || aligned_addr > end_addr || bytes > end_addr - aligned_addr) {
+      const auto currentAddress = reinterpret_cast<uintptr_t>(current);
+      const auto endAddress = reinterpret_cast<uintptr_t>(end);
+      const uintptr_t alignedAddress = (currentAddress + alignment - 1) & ~(alignment - 1);
+      if (alignedAddress < currentAddress || alignedAddress > endAddress || bytes > endAddress - alignedAddress) {
         return nullptr;
       }
-      return current + (aligned_addr - curr_addr);
+      return current + (alignedAddress - currentAddress);
     }
 
     // New blocks are only aligned to max_align_t, so a stricter request can
     // lose up to alignment bytes of a fresh block to padding. The last byte of
     // a block is never handed out, see m_current.
-    [[nodiscard]] bool fits_new_block(size_t bytes, size_t alignment) const noexcept {
-      if (bytes >= m_next_block_size) {
+    [[nodiscard]] bool fitsNewBlock(size_t bytes, size_t alignment) const noexcept {
+      if (bytes >= m_blockSize) {
         return false;
       }
-      return alignment <= alignof(std::max_align_t) || alignment <= m_next_block_size - bytes;
+      return alignment <= alignof(std::max_align_t) || alignment <= m_blockSize - bytes;
     }
 
     // Gets a block from the upstream and records it for release().
-    std::byte *allocate_block(size_t size, size_t alignment);
-    void handle_full_block(size_t bytes, size_t alignment);
-    void *allocate_custom_block(size_t size, size_t alignment);
-    void allocate_new_block(size_t size);
+    std::byte *allocateBlock(size_t size, size_t alignment);
+    void handleFullBlock(size_t bytes, size_t alignment);
+    void *allocateCustomBlock(size_t size, size_t alignment);
+    void allocateNewBlock(size_t size);
   };
 } // namespace sc

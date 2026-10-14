@@ -34,7 +34,7 @@ namespace {
   using TestGuarded = sc::stats::Stat<"Test Guarded", sc::stats::Throughput<sc::stats::MetricUnits>>;
   using TestKept = sc::stats::Stat<"Test Kept", sc::stats::Counter<>, false>;
 
-  // Stands in for a logger in report_all.
+  // Stands in for a logger in reportAll.
   struct CollectingLogger {
     enum class LogLevel { info, warn };
 
@@ -47,7 +47,7 @@ namespace {
 
   std::map<std::string, std::string> report() {
     std::map<std::string, std::string> result;
-    sc::stats::report_all_to(
+    sc::stats::reportAllTo(
         [&](std::string_view name, const std::string &text) { result.emplace(std::string(name), text); });
     return result;
   }
@@ -64,22 +64,22 @@ TEST_CASE("Formatter Picks The Unit", "[stats]") {
     REQUIRE(Metric::format(999) == "999.00");
     REQUIRE(Metric::format(1000) == "1.00 K");
     REQUIRE(Metric::format(1'500'000) == "1.50 M");
-    REQUIRE(Metric::format(2'000'000'000.0) == "2.00 B");
+    REQUIRE(Metric::format(2'000'000'000.0) == "2.00 G");
     REQUIRE(Metric::format(-2000) == "-2.00 K");
   }
 
   SECTION("Bytes") {
     REQUIRE(Data::format(0) == "0.00 B");
     REQUIRE(Data::format(512) == "512.00 B");
-    REQUIRE(Data::format(1024) == "1.00 KB");
-    REQUIRE(Data::format(1536) == "1.50 KB");
-    REQUIRE(Data::format(1024.0 * 1024.0 * 1024.0) == "1.00 GB");
+    REQUIRE(Data::format(1024) == "1.00 KiB");
+    REQUIRE(Data::format(1536) == "1.50 KiB");
+    REQUIRE(Data::format(1024.0 * 1024.0 * 1024.0) == "1.00 GiB");
   }
 
   SECTION("A Value That Rounds Up To The Next Unit Moves There") {
     REQUIRE(Metric::format(999.999) == "1.00 K");
     REQUIRE(Metric::format(999'999.9) == "1.00 M");
-    REQUIRE(Data::format(1023.999) == "1.00 KB");
+    REQUIRE(Data::format(1023.999) == "1.00 KiB");
     // Still below the limit after rounding.
     REQUIRE(Metric::format(999.99) == "999.99");
   }
@@ -89,7 +89,7 @@ TEST_CASE("Formatter Picks The Unit", "[stats]") {
   SECTION("With A Suffix For The Time") {
     REQUIRE(Metric::format(5, "/s") == "5.00 /s");
     REQUIRE(Metric::format(5000, "/s") == "5.00 K/s");
-    REQUIRE(Data::format(2048, "/s") == "2.00 KB/s");
+    REQUIRE(Data::format(2048, "/s") == "2.00 KiB/s");
   }
 }
 
@@ -357,7 +357,7 @@ TEST_CASE("Stat Wrapper", "[stats]") {
 
     if (StatsEnabled) {
       REQUIRE(TestCounter::str() == "1.50 K");
-      REQUIRE(TestBytes::str().starts_with("2.00 KB total | "));
+      REQUIRE(TestBytes::str().starts_with("2.00 KiB total | "));
 
       TestCounter::reset();
       REQUIRE(TestCounter::str() == "0.00");
@@ -367,10 +367,10 @@ TEST_CASE("Stat Wrapper", "[stats]") {
     }
   }
 
-  SECTION("ScopeGuard Starts And Stops") {
+  SECTION("StatScope Starts And Stops") {
     TestGuarded::reset();
     {
-      sc::stats::ScopeGuard<TestGuarded> guard;
+      sc::stats::StatScope<TestGuarded> guard;
       TestGuarded::record(1000);
       std::this_thread::sleep_for(5ms);
     }
@@ -391,19 +391,19 @@ TEST_CASE("List Of All Stats", "[stats]") {
   TestKept::record(7);
 
   SECTION("A Stat Is Found By Its Name") {
-    const auto found = sc::stats::get_stat("Test Counter");
+    auto *const found = sc::stats::findStat("Test Counter");
     if (StatsEnabled) {
-      REQUIRE(found.has_value());
-      REQUIRE((*found)->internal_name() == "Test Counter");
+      REQUIRE(found != nullptr);
+      REQUIRE(found->internalName() == "Test Counter");
 
       TestCounter::record(2000);
-      REQUIRE((*found)->internal_str() == "2.00 K");
-      (*found)->internal_reset();
+      REQUIRE(found->internalStr() == "2.00 K");
+      found->internalReset();
       REQUIRE(TestCounter::str() == "0.00");
     } else {
-      REQUIRE_FALSE(found.has_value());
+      REQUIRE(found == nullptr);
     }
-    REQUIRE_FALSE(sc::stats::get_stat("No Such Stat").has_value());
+    REQUIRE(sc::stats::findStat("No Such Stat") == nullptr);
   }
 
   SECTION("The Report Lists Every Stat In Use") {
@@ -423,7 +423,7 @@ TEST_CASE("List Of All Stats", "[stats]") {
   SECTION("The Report Goes To A Logger") {
     TestCounter::record(3);
     CollectingLogger::lines.clear();
-    sc::stats::report_all<CollectingLogger>(CollectingLogger::LogLevel::warn);
+    sc::stats::reportAll<CollectingLogger>(CollectingLogger::LogLevel::warn);
 
     if (StatsEnabled) {
       bool found = false;
@@ -440,7 +440,7 @@ TEST_CASE("List Of All Stats", "[stats]") {
   SECTION("Reset All Spares The Stats That Opted Out") {
     TestCounter::record(3);
     const std::string kept = TestKept::str();
-    sc::stats::reset_all();
+    sc::stats::resetAll();
 
     if (StatsEnabled) {
       REQUIRE(TestCounter::str() == "0.00");

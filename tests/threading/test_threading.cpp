@@ -68,11 +68,6 @@ namespace {
     BatchThroughput::reset();
     BatchThroughput::start();
 
-    sc::threading::PoolThroughput::m_storage.value.store(0, std::memory_order_relaxed);
-    sc::threading::PoolThroughput::m_storage.accumulated_ns.store(0, std::memory_order_relaxed);
-    sc::threading::PoolThroughput::m_storage.running.store(false, std::memory_order_relaxed);
-    sc::threading::PoolThroughput::start();
-
     if (use_detach) {
       if (force_no_sfo) {
         sc::threading::detachBatch(
@@ -91,7 +86,7 @@ namespace {
 
     BatchThroughput::record(TASKS);
     BatchThroughput::stop();
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
   }
 
 } // namespace
@@ -111,7 +106,7 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
     });
 
     future.get();
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(executed_counter.load() == task_count);
   }
@@ -128,7 +123,7 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
         },
         nullptr);
 
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(executed_counter.load() == task_count);
   }
@@ -147,7 +142,7 @@ TEST_CASE("Threading Batch Execution Verification", "[threading][execution]") {
         },
         nullptr);
 
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(data_valid.load() == true);
   }
@@ -188,7 +183,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     std::atomic<int> result{0};
 
     sc::threading::detach([&result](int a, int b) { result.store(a + b); }, 40, 2);
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(result.load() == 42);
   }
@@ -198,7 +193,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     SFOBreaker breaker{};
 
     sc::threading::detach([&weight_size](const SFOBreaker &b) { weight_size.store(b.weight.size()); }, breaker);
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(weight_size.load() == breaker.weight.size());
   }
@@ -208,7 +203,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
 
     sc::threading::detach<sc::threading::Priority::High>([&executed]() { executed.fetch_add(1); });
     sc::threading::detach<sc::threading::Priority::Low>([&executed]() { executed.fetch_add(1); });
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(executed.load() == 2);
   }
@@ -220,7 +215,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     for (int i = 0; i < task_count; ++i) {
       sc::threading::detach([&executed]() { executed.fetch_add(1, std::memory_order_relaxed); });
     }
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(executed.load() == task_count);
   }
@@ -232,7 +227,7 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     sc::threading::detach([]() { throw std::runtime_error("small task"); });
     sc::threading::detach([](const SFOBreaker &) { throw std::runtime_error("large task"); }, breaker);
     sc::threading::detach([&executed]() { executed.store(1); });
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(executed.load() == 1);
   }
@@ -280,10 +275,10 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
   }
 
   SECTION("Reports The Worker Id") {
-    auto future = sc::threading::enqueue([]() { return sc::threading::thread_id(); });
+    auto future = sc::threading::enqueue([]() { return sc::threading::threadId(); });
 
     REQUIRE(future.get() > 0);
-    REQUIRE(sc::threading::thread_id() == 0);
+    REQUIRE(sc::threading::threadId() == 0);
   }
 
   SECTION("Forwards Exceptions Through The Future") {
@@ -297,7 +292,7 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
     REQUIRE_THROWS_AS(large_task.get(), std::runtime_error);
   }
 
-  SECTION("Counts As Outstanding Work For wait_until_finished") {
+  SECTION("Counts As Outstanding Work For waitUntilFinished") {
     constexpr int task_count = 2000;
     std::atomic<int> executed{0};
     std::vector<std::future<void>> futures;
@@ -306,7 +301,7 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
     for (int i = 0; i < task_count; ++i) {
       futures.push_back(sc::threading::enqueue([&executed]() { executed.fetch_add(1, std::memory_order_relaxed); }));
     }
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(executed.load() == task_count);
   }
@@ -423,7 +418,7 @@ TEST_CASE("Threading Parallel For", "[threading][parallel_for]") {
     std::atomic<size_t> busy{0};
 
     BusyPool() {
-      const size_t workers = sc::threading::thread_slots() - 1;
+      const size_t workers = sc::threading::threadSlots() - 1;
       for (size_t i = 0; i < workers; ++i) {
         sc::threading::detach([this] {
           busy.fetch_add(1);
@@ -440,7 +435,7 @@ TEST_CASE("Threading Parallel For", "[threading][parallel_for]") {
     BusyPool &operator=(const BusyPool &) = delete;
     ~BusyPool() {
       release.store(true);
-      sc::threading::wait_until_finished();
+      sc::threading::waitUntilFinished();
     }
   };
 
@@ -515,12 +510,12 @@ TEST_CASE("Threading Parallel For", "[threading][parallel_for]") {
 
 TEST_CASE("Threading Help Thread", "[threading][help]") {
   sc::threading::init();
-  sc::threading::wait_until_finished();
+  sc::threading::waitUntilFinished();
 
   // Keeps every pool thread inside a task until release is set, so that only
   // the test thread can take what comes after. False if not all of them got
   // there in time.
-  const size_t workers = sc::threading::impl::threads.size();
+  const size_t workers = sc::threading::threadSlots() - 1;
   if (workers == 0) {
     SKIP("No pool threads to keep busy");
   }
@@ -543,7 +538,7 @@ TEST_CASE("Threading Help Thread", "[threading][help]") {
   };
   const auto releaseWorkers = [&] {
     release.store(true);
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
   };
 
   SECTION("Nothing To Do") { REQUIRE(!sc::threading::helpThread()); }

@@ -1,24 +1,19 @@
-//
-// Created by oleub on 18.04.26.
-//
-
 #pragma once
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
 
+#include "sc/config/config.h"
+
 #include "magpie_translator.hpp"
 
 namespace sc {
+  // A text by its key, translated whenever it is looked at.
   class MagpieString {
   public:
     MagpieString() = default;
 
     MagpieString(std::string_view ns, std::string_view key) : m_key(ns, key) {}
-
-    MagpieString(std::string_view ns, std::string_view key, std::string_view src) : m_key(ns, key), m_srcKey(src) {
-      Magpie::get()->insert(m_srcKey, src, "", src);
-    }
 
     MagpieString(uint64_t ns, uint64_t key) : m_key(ns, key) {}
 
@@ -26,7 +21,7 @@ namespace sc {
 
     consteval MagpieString(const char *str, size_t len) {
       std::string_view sv{str, len};
-#ifndef NDEBUG
+#ifdef DUMP_MAGPIE
       m_keyString = sv;
 #endif
 
@@ -39,37 +34,55 @@ namespace sc {
       }
     }
 
+    // The text under its own hash, added to the table as its own source.
     static MagpieString fromStr(std::string_view str) {
-      MagpieKey key{str};
-      Magpie::get()->insert(key, str, "", str);
+      const MagpieKey key{str};
+      Magpie::get().insert(key, str, "", str);
       return MagpieString(key);
-    };
+    }
 
-    // The translation, or the source text as long as there is none.
-    [[nodiscard]] std::string_view view() const noexcept {
-      auto *magpie = Magpie::get();
-      if (auto text = magpie->find(m_key)) [[likely]] {
+    // The text of ns:key, which shows src for as long as there is no
+    // translation. Adds src to the table.
+    static MagpieString withSource(std::string_view ns, std::string_view key, std::string_view src) {
+      MagpieString text(ns, key);
+      text.m_srcKey = MagpieKey{src};
+      Magpie::get().insert(text.m_srcKey, src, "", src);
+      return text;
+    }
+
+    // The translation, or the source text as long as there is none. Each call
+    // looks the text up again, so keep the result instead of calling it twice.
+    [[nodiscard]] std::string_view view() const {
+      const Magpie &magpie = Magpie::get();
+      if (auto text = magpie.find(m_key)) [[likely]] {
         return *text;
       }
       if (m_srcKey != MagpieKey{}) {
-        return magpie->translate(m_srcKey);
+        return magpie.translate(m_srcKey);
       }
-      return Magpie::MissingString;
+      return Magpie::MISSING_STRING;
     }
 
     operator std::string_view() const { return view(); }
 
     [[nodiscard]] constexpr MagpieKey key() const { return m_key; }
-    [[nodiscard]] const char *data() const noexcept { return view().data(); }
-    [[nodiscard]] size_t size() const noexcept { return view().size(); }
+    // Each of these looks the text up on its own. If a translation is merged
+    // in between, they may describe two different texts; take view() once
+    // where both are needed.
+    [[nodiscard]] const char *data() const { return view().data(); }
+    [[nodiscard]] size_t size() const { return view().size(); }
 
   private:
-#ifndef NDEBUG
+#ifdef DUMP_MAGPIE
+    // Only for the debugger. Tied to dump_magpie rather than NDEBUG, which may
+    // differ between translation units; this config is the same everywhere.
     std::string_view m_keyString;
 #endif
     MagpieKey m_key;
     MagpieKey m_srcKey;
   };
-} // namespace sc
 
-consteval sc::MagpieString operator""_t(const char *str, size_t len) { return {str, len}; }
+  inline namespace literals {
+    consteval MagpieString operator""_t(const char *str, size_t len) { return {str, len}; }
+  } // namespace literals
+} // namespace sc

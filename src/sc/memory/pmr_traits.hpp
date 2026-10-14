@@ -5,7 +5,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace sc::detail {
+namespace sc::internal {
 
   // A container of the std::pmr kind: all it owns is memory of its resource.
   template<typename T>
@@ -31,4 +31,4 @@ namespace sc::detail {
   template<PmrContainer T>
   struct OwnsOnlyResourceMemory<T> : std::bool_constant<ownsOnlyResourceMemory<typename T::value_type>> {};
 
-} // namespace sc::detail
+} // namespace sc::internal

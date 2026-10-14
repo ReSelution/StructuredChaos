@@ -1,12 +1,24 @@
 #include "threading.hpp"
 
+#include <algorithm>
 #include <cstdint>
-void sc::threading::init(uint32_t threads) { impl::init_impl(threads); }
+#include <thread>
 
-void sc::threading::wait_until_finished() { impl::wait_until_finished(); }
+namespace sc::threading {
+  uint32_t defaultWorkerCount() noexcept {
+    // hardware_concurrency() may report 0 if it does not know.
+    return std::max(std::thread::hardware_concurrency(), 2U) - 1;
+  }
 
-bool sc::threading::helpThread() { return impl::helpParallel(); }
+  void init(uint32_t threads) { internal::initPool(threads); }
 
-bool sc::threading::helpThread(LoopTicket ticket) { return impl::joinParallel(ticket.value); }
+  void shutdown() { internal::shutdownPool(); }
 
-size_t sc::threading::thread_slots() noexcept { return 1 + impl::longRunningThreads.size() + impl::threads.size(); }
+  void waitUntilFinished() { internal::waitUntilFinished(); }
+
+  bool helpThread() { return internal::helpParallel(); }
+
+  bool helpThread(LoopTicket ticket) { return internal::joinParallel(ticket.value); }
+
+  size_t threadSlots() noexcept { return internal::threadSlots(); }
+} // namespace sc::threading

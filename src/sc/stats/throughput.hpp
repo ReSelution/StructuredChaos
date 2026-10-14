@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <format>
 #include <string>
 #include <string_view>
@@ -9,6 +10,10 @@
 
 namespace sc::stats {
 
+  // Amount per second of measured time. The clock runs between start() and
+  // stop(); record() starts it as well if it is not running, so a stat that is
+  // only ever recorded measures from its first record on. Its rate then keeps
+  // falling while nothing is recorded, until stop() is called.
   template<typename UnitSystem = DataUnits>
   struct Throughput {
     using DurationNS = std::chrono::nanoseconds;
@@ -52,6 +57,7 @@ namespace sc::stats {
       s.value.store(0, std::memory_order_relaxed);
       s.accumulated_ns.store(0, std::memory_order_relaxed);
       s.running.store(false, std::memory_order_relaxed);
+      s.startTimeTicks.store(0, std::memory_order_relaxed);
     }
 
     static std::string format(const Storage &s) {

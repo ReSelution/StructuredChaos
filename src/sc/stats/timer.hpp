@@ -48,7 +48,15 @@ namespace sc::stats {
     Timer(const Timer &) = delete;
     Timer &operator=(const Timer &) = delete;
 
-    ~Timer() { stop(); }
+    // A callback that throws here would end the program, since a destructor
+    // must not throw. Its exception is dropped instead; call stop() directly
+    // to see it.
+    ~Timer() {
+      try {
+        stop();
+      } catch (...) { // NOLINT(bugprone-empty-catch)
+      }
+    }
 
     void stop() {
       if (m_stopped) {
@@ -58,8 +66,10 @@ namespace sc::stats {
       auto end = std::chrono::steady_clock::now();
       auto diff = end - m_start;
 
-      m_callback(calculate(diff));
+      // Stopped before the callback runs, so that a throwing callback is not
+      // called a second time by the destructor.
       m_stopped = true;
+      m_callback(calculate(diff));
     }
 
   private:
@@ -75,7 +85,7 @@ namespace sc::stats {
           return {.value = duration<double, std::milli>(diff).count(), .unit = m_unit, .suffix = "ms"};
         case Unit::Seconds:
           return {.value = duration<double>(diff).count(), .unit = m_unit, .suffix = "s"};
-        default: {
+        case Unit::Auto: {
           if (diff < microseconds(1)) {
             return {.value = duration<double, std::nano>(diff).count(), .unit = Unit::Nano, .suffix = "ns"};
           }
@@ -88,6 +98,7 @@ namespace sc::stats {
           return {.value = duration<double>(diff).count(), .unit = Unit::Seconds, .suffix = "s"};
         }
       }
+      std::unreachable();
     }
 
     Unit m_unit;

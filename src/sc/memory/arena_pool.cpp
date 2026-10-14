@@ -1,62 +1,54 @@
-//
-// Created by oleub on 05.03.26.
-//
-
 #include "arena_pool.hpp"
 
+#include <algorithm>
 #include <mutex>
 
-#include "logger/logger.hpp"
-#include "monotonic_resource.hpp"
+#include "sc/logger/logger.hpp"
 
 namespace sc {
   using PoolLogger = sc::Logger<"Mem">;
-  void ArenaPool::init(const size_t poolSize, const size_t arenaSize) {
-    std::scoped_lock lock(m_initLock);
-    if (m_storage.capacity() > 0) [[unlikely]] {
-      return;
-    }
+
+  ArenaPool::ArenaPool(size_t poolSize, size_t arenaSize) : m_arenaSize(arenaSize) {
     if (!MonotonicResource::checkLockFree()) {
       PoolLogger::warn("MonotonicResource bump pointer is not lock-free");
     }
 
-    m_defaultSize = arenaSize;
-    m_storage.reserve(MAX_LOADED_ARENAS);
-    for (size_t i = 0; i < poolSize; ++i) {
-      m_storage.push_back(std::make_unique<MonotonicResource>(m_defaultSize));
+    m_arenas.reserve(MAX_KEPT_ARENAS);
+    for (size_t i = 0; i < std::min(poolSize, MAX_KEPT_ARENAS); ++i) {
+      m_arenas.push_back(std::make_unique<MonotonicResource>(m_arenaSize));
     }
   }
 
   std::unique_ptr<MonotonicResource> ArenaPool::acquire() {
     {
-      SpinLockGuard guard(m_lock);
-      if (!m_storage.empty()) {
-        auto resource = std::move(m_storage.back());
-        m_storage.pop_back();
-        return resource;
+      std::scoped_lock lock(m_lock);
+      if (!m_arenas.empty()) {
+        auto arena = std::move(m_arenas.back());
+        m_arenas.pop_back();
+        return arena;
       }
     }
 
-    return std::make_unique<MonotonicResource>(m_defaultSize);
+    return std::make_unique<MonotonicResource>(m_arenaSize);
   }
 
-  void ArenaPool::release(std::unique_ptr<MonotonicResource> &resource) {
-    if (!resource) {
+  void ArenaPool::release(std::unique_ptr<MonotonicResource> arena) {
+    if (!arena) {
       return;
     }
-    (*resource).reset();
+    // MonotonicResource::reset(), not unique_ptr::reset(): frees what the
+    // arena holds and keeps the arena.
+    (*arena).reset();
 
     {
-      SpinLockGuard guard(m_lock);
-      if (m_storage.size() < MAX_LOADED_ARENAS) {
-        m_storage.push_back(std::move(resource));
+      std::scoped_lock lock(m_lock);
+      if (m_arenas.size() < MAX_KEPT_ARENAS) {
+        m_arenas.push_back(std::move(arena));
         return;
       }
     }
 
-    // The pool is full. Freed outside the lock.
-    resource = nullptr;
+    // The pool is full. The arena is freed when it goes out of scope, outside
+    // the lock.
   }
-
-  size_t ArenaPool::getBufferSize() { return m_defaultSize; }
 } // namespace sc

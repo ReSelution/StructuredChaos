@@ -75,15 +75,25 @@ atomic_queue_dep = dependency(
   default_options: ['tests=false'],
 )
 
-all_deps = [
+# Needed by the public headers, so every consumer gets them as well.
+sc_public_deps = [
   entt_dep,
   spdlog_dep,
   unordered_dense_dep,
   mimalloc_dep,
-  glm_dep,
-  xsimd_dep,
-  simdutf_dep,
   pfr_dep,
   rapidHash_dep,
   atomic_queue_dep,
+]
+
+# Only used inside the library's own sources.
+sc_private_deps = [
+  simdutf_dep,
+]
+
+# Not used by the library at all, passed on to consumers on purpose so that a
+# game gets its math and SIMD libraries from the same place.
+sc_bundled_deps = [
+  glm_dep,
+  xsimd_dep,
 ]

@@ -1,30 +1,33 @@
-sc_internal_inc = include_directories('sc')
 sc_sources = files(
   'sc/ecs/entity.cpp',
   'sc/ecs/registry.cpp',
   'sc/localizations/magpie_translator.cpp',
+  'sc/logger/logger.cpp',
   'sc/memory/arena_pool.cpp',
   'sc/memory/monotonic_resource.cpp',
   'sc/stats/core.cpp',
   'sc/threading/backend.cpp',
+  'sc/threading/ring_queue.cpp',
   'sc/threading/threading.cpp',
 )
 
 sc_lib = static_library(
   'structured_chaos',
   sc_sources,
-  include_directories: sc_internal_inc,
-  dependencies: [chaos_config_dep, all_deps],
+  dependencies: [chaos_config_dep, sc_public_deps, sc_private_deps],
 )
 
-# Reusable dependency object for consumers
+# A static mimalloc cannot override new and delete on Windows, so the override
+# is compiled into every executable that uses sc_dep. Consumers with their own
+# operator new turn it off with -Dmimalloc_new_delete=false.
 sc_dep_sources = []
-if host_machine.system() == 'windows'
+if host_machine.system() == 'windows' and get_option('mimalloc_new_delete')
   sc_dep_sources += files('sc/memory/mi_new_delete.cpp')
 endif
 
+# Reusable dependency object for consumers
 sc_dep = declare_dependency(
   sources: sc_dep_sources,
   link_with: sc_lib,
-  dependencies: [chaos_config_dep, all_deps],
+  dependencies: [chaos_config_dep, sc_public_deps, sc_bundled_deps],
 )

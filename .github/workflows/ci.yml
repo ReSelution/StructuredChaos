@@ -35,6 +35,9 @@ jobs:
             setup: --buildtype=debug -Db_sanitize=address,undefined
           - name: tsan
             setup: --buildtype=debug -Db_sanitize=thread
+          # The options change which code is compiled at all.
+          - name: options
+            setup: --buildtype=debug -Ddump_magpie=true -Denable_chaos_stats=true
     env:
       CCACHE_DIR: /home/runner/.cache/ccache
       CCACHE_MAXSIZE: 500M

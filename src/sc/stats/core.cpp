@@ -1,25 +1,35 @@
 #include "core.hpp"
+
+#include <cassert>
+
 namespace sc::stats {
-  void reset_all() {
+  void resetAll() {
     if constexpr (StatsEnabled) {
-      for (auto *s: reg() | std::views::values) {
-        s->internal_reset();
+      internal::StatRegistry &registry = internal::statRegistry();
+      std::scoped_lock lock(registry.mutex);
+      for (IStat *s: registry.stats | std::views::values) {
+        s->internalReset();
       }
-    }
-  }
-  void register_stat(IStat *stat) {
-    if constexpr (StatsEnabled) {
-      reg().emplace(stat->internal_name(), stat);
     }
   }
 
-  [[nodiscard]] std::optional<IStat *> get_stat(std::string_view name) {
+  void registerStat(IStat *stat) {
     if constexpr (StatsEnabled) {
-      auto &registry = reg();
-      if (auto it = registry.find(name); it != registry.end()) {
+      internal::StatRegistry &registry = internal::statRegistry();
+      std::scoped_lock lock(registry.mutex);
+      [[maybe_unused]] const auto [it, inserted] = registry.stats.emplace(stat->internalName(), stat);
+      assert((inserted || it->second == stat) && "sc::stats: two stats with the same name");
+    }
+  }
+
+  IStat *findStat(std::string_view name) {
+    if constexpr (StatsEnabled) {
+      internal::StatRegistry &registry = internal::statRegistry();
+      std::scoped_lock lock(registry.mutex);
+      if (auto it = registry.stats.find(name); it != registry.stats.end()) {
         return it->second;
       }
     }
-    return std::nullopt;
+    return nullptr;
   }
 } // namespace sc::stats

@@ -1,223 +1,221 @@
-//
-// Created by oleub on 18.04.26.
-//
-
 #include "magpie_translator.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <format>
+#include <fstream>
 #include <mutex>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
-#include "simdutf.h"
+#include <simdutf.h>
+
+#include "sc/logger/logger.hpp"
 
 namespace sc {
+  namespace {
+    using MagpieLog = sc::Logger<"Magpie">;
+
 #ifdef DUMP_MAGPIE
-  struct NamespaceDeduplicator {
-    std::mutex mutex;
-    // We store string_view; the characters are owned by Magpie's storage
-    ankerl::unordered_dense::set<std::string_view> storage;
+    struct NamespaceDeduplicator {
+      std::mutex mutex;
+      // The characters are owned by Magpie's storage.
+      ankerl::unordered_dense::set<std::string_view> storage;
 
-    std::string_view get(std::string_view ns, Magpie &magpie) {
-      if (ns.empty())
-        return "";
+      std::string_view get(std::string_view ns, Magpie &magpie) {
+        if (ns.empty()) {
+          return "";
+        }
 
-      std::lock_guard guard(mutex);
-      auto it = storage.find(ns);
-      if (it == storage.end()) {
-        it = storage.insert(magpie.storeStr(ns)).first;
+        std::scoped_lock lock(mutex);
+        auto it = storage.find(ns);
+        if (it == storage.end()) {
+          it = storage.insert(magpie.storeStr(ns)).first;
+        }
+        return *it;
       }
-      return *it;
+
+      void clear() {
+        std::scoped_lock lock(mutex);
+        storage.clear();
+      }
+    };
+
+    NamespaceDeduplicator &namespaces() {
+      static NamespaceDeduplicator deduplicator;
+      return deduplicator;
     }
 
-    void clear() {
-      std::lock_guard guard(mutex);
-      storage.clear();
+    struct DumpEntry {
+      std::string_view ns;
+      std::string_view key;
+      std::string_view value;
+      uint64_t hash;
+    };
+
+    // Every entry, sorted by namespace and then key. Copied out under the lock
+    // so that the caller can write them without holding it; the texts stay
+    // valid until the next clear().
+    std::vector<DumpEntry> sortedEntries(const MagpieMap &entries) {
+      std::vector<DumpEntry> sorted;
+      sorted.reserve(entries.size());
+      for (const auto &[key, value]: entries) {
+        sorted.push_back({.ns = key.ns_str, .key = key.key_str, .value = value, .hash = key.key});
+      }
+      std::ranges::sort(
+          sorted, [](const DumpEntry &a, const DumpEntry &b) { return std::tie(a.ns, a.key) < std::tie(b.ns, b.key); });
+      return sorted;
     }
-  };
-  static NamespaceDeduplicator g_nsDeduplicator;
+
+    void writeEscaped(std::ostream &out, std::string_view s) {
+      for (const char c: s) {
+        switch (c) {
+          case '\"':
+            out << "\\\"";
+            break;
+          case '\\':
+            out << "\\\\";
+            break;
+          case '\b':
+            out << "\\b";
+            break;
+          case '\f':
+            out << "\\f";
+            break;
+          case '\n':
+            out << "\\n";
+            break;
+          case '\r':
+            out << "\\r";
+            break;
+          case '\t':
+            out << "\\t";
+            break;
+          default:
+            if (static_cast<unsigned char>(c) < 32) {
+              std::array<char, 8> escaped{};
+              std::snprintf(escaped.data(), escaped.size(), "\\u%04x", static_cast<unsigned>(c));
+              out << escaped.data();
+            } else {
+              out << c;
+            }
+        }
+      }
+    }
 #endif
+  } // namespace
 
-  void Magpie::clear() noexcept {
-    std::unique_lock lock(sh_mtx);
+  void Magpie::clear() {
+    std::unique_lock lock(m_mutex);
     MagpieInsert::reset();
-    MagpieMEM::reset();
-    entries.clear();
+    MagpieMemory::reset();
+    m_entries.clear();
 #ifdef DUMP_MAGPIE
     // Its namespaces live in the storage that is released below.
-    g_nsDeduplicator.clear();
+    namespaces().clear();
 #endif
     m_storage.reset();
   }
 
-  void Magpie::dump() noexcept {
+  void Magpie::dump() const {
 #ifdef DUMP_MAGPIE
-    std::shared_lock lock(sh_mtx);
-    if (entries.empty())
-      return;
-
-    // 1. Create a lightweight index of pointers to the map entries
-    // Total memory: ~60,000 * 8 bytes = ~480KB. Very cache-friendly.
-    std::vector<const std::pair<MagpieKey, std::string_view> *> sortedEntries;
-    sortedEntries.reserve(entries.size());
-    for (const auto &pair: entries) {
-      sortedEntries.push_back(&pair);
+    std::vector<DumpEntry> sorted;
+    {
+      std::shared_lock lock(m_mutex);
+      sorted = sortedEntries(m_entries);
     }
 
-    // 2. High-speed Sort
-    std::sort(sortedEntries.begin(), sortedEntries.end(), [](auto *a, auto *b) {
-      // Namespace comparison (string_view operator<)
-      if (a->first.ns_str != b->first.ns_str) {
-        return a->first.ns_str < b->first.ns_str;
+    std::optional<std::string_view> currentNs;
+    for (const DumpEntry &entry: sorted) {
+      if (entry.ns != currentNs) {
+        currentNs = entry.ns;
+        MagpieLog::info("--- Namespace: {} ---", entry.ns);
       }
-      // Key comparison within the same namespace
-      return a->first.key_str < b->first.key_str;
-    });
-
-    // 3. Fast-Buffered Output
-    // printf is slow because it parses format strings. For 60k lines,
-    // we use a large buffer or raw fwrite for speed.
-    std::string_view currentNS = "\1"; // Impossible starting NS
-
-    for (const auto *entry: sortedEntries) {
-      const auto &[key, value] = *entry;
-
-      if (key.ns_str != currentNS) {
-        currentNS = key.ns_str;
-        printf("\n--- Namespace: %.*s ---\n", (int) currentNS.size(), currentNS.data());
-      }
-
-      // Fast write
-      printf("  %.*s: %.*s\n", (int) key.key_str.size(), key.key_str.data(), (int) value.size(), value.data());
+      MagpieLog::info("  {}: {}", entry.key, entry.value);
     }
 #endif
   }
 
-#ifdef DUMP_MAGPIE
-  static void writeEscaped(FILE *f, std::string_view s) {
-    for (char c: s) {
-      switch (c) {
-        case '\"':
-          fprintf(f, "\\\"");
-          break;
-        case '\\':
-          fprintf(f, "\\\\");
-          break;
-        case '\b':
-          fprintf(f, "\\b");
-          break;
-        case '\f':
-          fprintf(f, "\\f");
-          break;
-        case '\n':
-          fprintf(f, "\\n");
-          break;
-        case '\r':
-          fprintf(f, "\\r");
-          break;
-        case '\t':
-          fprintf(f, "\\t");
-          break;
-        default:
-          if ((unsigned char) c < 32) {
-            fprintf(f, "\\u%04x", c);
-          } else {
-            fputc(c, f);
-          }
-      }
-    }
-  }
-#endif
-  // NOLINTNEXTLINE ignoring make static when DUMP_MAGPIE is not set
-  void Magpie::dumpToFile(std::string_view file) noexcept {
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static): uses members with dump_magpie
+  void Magpie::dumpToFile(std::string_view file) const {
 #ifndef DUMP_MAGPIE
     (void) file;
 #else
-    std::shared_lock lock(sh_mtx);
-    if (entries.empty())
+    std::vector<DumpEntry> sorted;
+    {
+      std::shared_lock lock(m_mutex);
+      sorted = sortedEntries(m_entries);
+    }
+    if (sorted.empty()) {
       return;
+    }
 
-    std::filesystem::path tmpPath(file);
-    std::error_code ec;
-    // Create directories only if there is a parent path to create
-    if (tmpPath.has_parent_path()) {
-      std::filesystem::create_directories(tmpPath.parent_path(), ec);
+    const std::filesystem::path path(file);
+    if (path.has_parent_path()) {
+      std::error_code ec;
+      std::filesystem::create_directories(path.parent_path(), ec);
       if (ec) {
-        printf("[SAA] [MAGPIE]: Directory error: %s\n", ec.message().c_str());
+        MagpieLog::err("Cannot create the directory of {}: {}", path.string(), ec.message());
         return;
       }
     }
 
-    // 1. Sort entries
-    std::vector<const std::pair<MagpieKey, std::string_view> *> sorted;
-    sorted.reserve(entries.size());
-    for (const auto &pair: entries)
-      sorted.push_back(&pair);
-
-    std::sort(sorted.begin(), sorted.end(), [](auto *a, auto *b) {
-      if (a->first.ns_str != b->first.ns_str)
-        return a->first.ns_str < b->first.ns_str;
-      return a->first.key_str < b->first.key_str;
-    });
-
-    // 2. Open file (using .string().c_str() for platform compatibility)
-    FILE *f = fopen(tmpPath.string().c_str(), "wb");
-    if (!f)
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+      MagpieLog::err("Cannot open {} for writing", path.string());
       return;
-
-    // 3. Start JSON structure
-    fputs("{\n", f);
-
-    std::string_view currentNS = "\1";
-    bool firstNS = true;
-
-    for (size_t i = 0; i < sorted.size(); ++i) {
-      const auto &[key, value] = *sorted[i];
-
-      // Grouping by Namespace
-      if (key.ns_str != currentNS) {
-        if (!firstNS)
-          fputs("\n    },\n", f);
-
-        currentNS = key.ns_str;
-        fputs("  \"", f);
-        writeEscaped(f, currentNS);
-        fputs("\": {", f);
-
-        firstNS = false;
-      } else {
-        fputs(",", f);
-      }
-
-      fputs("\n    \"", f);
-      writeEscaped(f, key.key_str);
-      fputs("\": \"", f);
-      writeEscaped(f, value);
-      fprintf(f, "\", \"h\": \"0x%llX\"", (unsigned long long) key.key);
     }
 
-    if (!firstNS)
-      fputs("\n    }\n", f);
-    fputs("}\n", f);
+    out << "{\n";
+    std::optional<std::string_view> currentNs;
+    for (const DumpEntry &entry: sorted) {
+      if (entry.ns != currentNs) {
+        if (currentNs) {
+          out << "\n    },\n";
+        }
+        currentNs = entry.ns;
+        out << "  \"";
+        writeEscaped(out, entry.ns);
+        out << "\": {";
+      } else {
+        out << ',';
+      }
 
-    fclose(f);
-    printf("[SAA] [MAGPIE]: Dumped %zu strings to %s\n", entries.size(), tmpPath.string().c_str());
+      out << "\n    \"";
+      writeEscaped(out, entry.key);
+      out << "\": \"";
+      writeEscaped(out, entry.value);
+      out << std::format(R"(", "h": "0x{:X}")", entry.hash);
+    }
+    out << "\n    }\n}\n";
+
+    out.close();
+    if (!out) {
+      MagpieLog::err("Writing {} failed", path.string());
+      return;
+    }
+    MagpieLog::info("Dumped {} strings to {}", sorted.size(), path.string());
 #endif
   }
 
   std::string_view Magpie::storeStr(std::string_view str) {
     auto s = m_storage.allocateSpan<char>(str.size() + 1);
-    memcpy(s.data(), str.data(), str.size());
+    std::memcpy(s.data(), str.data(), str.size());
     s[str.size()] = '\0';
     return {s.data(), str.size()};
   }
 
   std::string_view Magpie::storeStrUTF16(const char16_t *start, size_t length) {
-    size_t requiredSize = simdutf::utf8_length_from_utf16(start, length);
+    const size_t requiredSize = simdutf::utf8_length_from_utf16(start, length);
     char *target = m_storage.allocateSpan<char>(requiredSize + 1).data();
-    auto size = simdutf::convert_utf16_to_utf8(start, length, target);
+    const size_t size = simdutf::convert_utf16_to_utf8(start, length, target);
     // simdutf writes nothing and returns 0 for invalid input, e.g. a lone
     // surrogate.
     if (size != requiredSize) [[unlikely]] {
@@ -229,64 +227,53 @@ namespace sc {
     return {target, requiredSize};
   }
 
-  thread_local magpieMAP Magpie::tl_map{};
-
-  void Magpie::insert(MagpieKey &key, std::string_view valueStr, std::string_view ns, std::string_view keyStr) {
-    {
-      std::shared_lock lock{sh_mtx};
-      auto it = entries.find(key);
-      if (it != entries.end()) {
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static): uses members with dump_magpie
+  MagpieKey Magpie::withDebugStrings(MagpieKey key, [[maybe_unused]] std::string_view ns,
+                                     [[maybe_unused]] std::string_view keyStr) {
 #ifdef DUMP_MAGPIE
-        key.ns_str = g_nsDeduplicator.get(ns, *this);
-        key.key_str = storeStr(keyStr);
-#else
-        (void) keyStr;
-        (void) ns;
+    key.ns_str = namespaces().get(ns, *this);
+    key.key_str = storeStr(keyStr);
 #endif
+    return key;
+  }
+
+  void Magpie::insert(MagpieKey key, std::string_view valueStr, std::string_view ns, std::string_view keyStr) {
+    {
+      std::shared_lock lock(m_mutex);
+      if (m_entries.contains(key)) {
         return;
       }
     }
-#ifdef DUMP_MAGPIE
-    key.ns_str = g_nsDeduplicator.get(ns, *this);
-    key.key_str = storeStr(keyStr);
-#else
-    (void) keyStr;
-    (void) ns;
-#endif
-    auto s = storeStr(valueStr);
-    std::unique_lock lock(sh_mtx);
-    if (!entries.contains(key)) {
-      entries.emplace(key, s);
-    }
+    // Stored before the exclusive lock is taken. If another thread inserts the
+    // same key in the meantime, this copy stays unused until clear().
+    key = withDebugStrings(key, ns, keyStr);
+    const std::string_view stored = storeStr(valueStr);
+    std::unique_lock lock(m_mutex);
+    m_entries.try_emplace(key, stored);
   }
 
-  void Magpie::mt_InsertStored(MagpieKey key, std::string_view storedValue, std::string_view ns,
-                               std::string_view keyStr) {
-#ifdef DUMP_MAGPIE
-    key.ns_str = g_nsDeduplicator.get(ns, *this);
-    key.key_str = storeStr(keyStr);
-#else
-    (void) ns;
-    (void) keyStr;
-#endif
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static): one API for all of the local map
+  void Magpie::reserveLocal(size_t size) { s_localMap.reserve(size); }
 
-    tl_map.emplace(key, storedValue);
-    MagpieMEM::record(storedValue.size());
+  void Magpie::insertStoredLocal(MagpieKey key, std::string_view storedValue, std::string_view ns,
+                                 std::string_view keyStr) {
+    s_localMap.emplace(withDebugStrings(key, ns, keyStr), storedValue);
+    MagpieMemory::record(storedValue.size());
   }
 
-  void Magpie::mt_Merge(bool override) {
-    if (override) {
-      std::unique_lock lock(sh_mtx);
-      entries.reserve(entries.size() + tl_map.size());
-      for (auto [key, value]: tl_map) {
-        entries.insert_or_assign(key, value);
+  void Magpie::mergeLocal(MergeMode mode) {
+    {
+      std::unique_lock lock(m_mutex);
+      m_entries.reserve(m_entries.size() + s_localMap.size());
+      if (mode == MergeMode::Override) {
+        for (const auto &[key, value]: s_localMap) {
+          m_entries.insert_or_assign(key, value);
+        }
+      } else {
+        m_entries.insert(s_localMap.begin(), s_localMap.end());
       }
-    } else {
-      std::unique_lock lock(sh_mtx);
-      entries.reserve(entries.size() + tl_map.size());
-      entries.insert(tl_map.begin(), tl_map.end());
     }
-    MagpieInsert::record(tl_map.size());
-    tl_map.clear();
+    MagpieInsert::record(s_localMap.size());
+    s_localMap.clear();
   }
 } // namespace sc

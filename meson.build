@@ -13,8 +13,15 @@ sc_sanitizers = get_option('b_sanitize')
 sc_asan = 'address' in sc_sanitizers
 sc_tsan = 'thread' in sc_sanitizers
 
+# Sources are UTF-8 ("µs" in the stats). MSVC and clang-cl assume the local
+# code page otherwise.
+if meson.get_compiler('cpp').get_argument_syntax() == 'msvc'
+  add_project_arguments('/utf-8', language: 'cpp')
+endif
+
 subdir('external')
-#Config
+
+# Config
 conf_data = configuration_data()
 conf_data.set_quoted('PROJECT_VERSION', meson.project_version())
 if get_option('enable_chaos_stats')
@@ -37,14 +44,5 @@ chaos_config_dep = declare_dependency(
 )
 
 subdir('src')
-
-if host_machine.system() != 'windows'
-  run_command(
-    'ln',
-    '-sf', meson.project_build_root() / 'compile_commands.json',
-    meson.project_source_root() / 'compile_commands.json',
-    check: false,
-  )
-endif
 
 subdir('tests')

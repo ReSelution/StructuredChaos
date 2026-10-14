@@ -4,7 +4,7 @@
 #include <thread>
 #include <vector>
 
-#include "sc/threading/atomic_queue.hpp"
+#include "sc/threading/ring_queue.hpp"
 
 namespace {
 
@@ -34,11 +34,11 @@ namespace {
 
 } // namespace
 
-TEST_CASE("AtomicQueue Basic Operations", "[threading][atomic_queue]") {
+TEST_CASE("RingQueue Basic Operations", "[threading][ring_queue]") {
   using namespace sc::threading;
 
   SECTION("Push and Pop Single Element") {
-    AtomicQueue<int, 64> queue;
+    RingQueue<int, 64> queue;
     REQUIRE(queue.empty());
     REQUIRE(queue.empty());
 
@@ -47,14 +47,14 @@ TEST_CASE("AtomicQueue Basic Operations", "[threading][atomic_queue]") {
     REQUIRE(queue.size() == 1);
 
     int result = 0;
-    bool success = queue.try_pop(result, 0);
+    bool success = queue.tryPop(result, 0);
     REQUIRE(success);
     REQUIRE(result == 42);
     REQUIRE(queue.empty());
   }
 
   SECTION("Move-Only Types") {
-    AtomicQueue<MoveOnlyType, 64> queue;
+    RingQueue<MoveOnlyType, 64> queue;
 
     queue.emplace(100);
     queue.push(MoveOnlyType(200));
@@ -62,15 +62,15 @@ TEST_CASE("AtomicQueue Basic Operations", "[threading][atomic_queue]") {
     MoveOnlyType out1(0);
     MoveOnlyType out2(0);
 
-    REQUIRE(queue.try_pop(out1, 0));
+    REQUIRE(queue.tryPop(out1, 0));
     REQUIRE(out1.value == 100);
 
-    REQUIRE(queue.try_pop(out2, 0));
+    REQUIRE(queue.tryPop(out2, 0));
     REQUIRE(out2.value == 200);
   }
 
   SECTION("FIFO Ordering") {
-    AtomicQueue<int, 64> queue;
+    RingQueue<int, 64> queue;
     constexpr int count = 10;
 
     for (int i = 0; i < count; ++i) {
@@ -79,23 +79,23 @@ TEST_CASE("AtomicQueue Basic Operations", "[threading][atomic_queue]") {
 
     for (int i = 0; i < count; ++i) {
       int val = -1;
-      REQUIRE(queue.try_pop(val, 0));
+      REQUIRE(queue.tryPop(val, 0));
       REQUIRE(val == i);
     }
 
     int val = 0;
-    REQUIRE_FALSE(queue.try_pop(val, 0));
+    REQUIRE_FALSE(queue.tryPop(val, 0));
   }
 }
 
-TEST_CASE("AtomicQueue Lifetime Management", "[threading][atomic_queue]") {
+TEST_CASE("RingQueue Lifetime Management", "[threading][ring_queue]") {
   using namespace sc::threading;
 
   SECTION("Destructor Cleans Up Remaining Items") {
     LifetimeTracker::instances.store(0);
 
     {
-      AtomicQueue<LifetimeTracker, 64> queue;
+      RingQueue<LifetimeTracker, 64> queue;
       queue.emplace(1);
       queue.emplace(2);
       queue.emplace(3);
@@ -103,7 +103,7 @@ TEST_CASE("AtomicQueue Lifetime Management", "[threading][atomic_queue]") {
       REQUIRE(LifetimeTracker::instances.load() == 3);
 
       LifetimeTracker dummy(0);
-      queue.try_pop(dummy, 0); // Destroys one element early
+      queue.tryPop(dummy, 0); // Destroys one element early
     }
 
     // On leaving the scope the queue destructor has to clean up the
@@ -112,18 +112,18 @@ TEST_CASE("AtomicQueue Lifetime Management", "[threading][atomic_queue]") {
   }
 }
 
-TEST_CASE("AtomicQueue Stress and Wrap-Around", "[threading][atomic_queue]") {
+TEST_CASE("RingQueue Stress and Wrap-Around", "[threading][ring_queue]") {
   using namespace sc::threading;
 
   SECTION("Ring Buffer Wrap-Around Test") {
     constexpr size_t capacity = 16;
-    AtomicQueue<int, capacity> queue;
+    RingQueue<int, capacity> queue;
 
     constexpr int total_iterations = 1000;
     for (int i = 0; i < total_iterations; ++i) {
       queue.push(std::move(i)); // NOLINT(performance-move-const-arg): push only takes rvalues
       int out = -1;
-      REQUIRE(queue.try_pop(out, 0));
+      REQUIRE(queue.tryPop(out, 0));
       REQUIRE(out == i);
     }
     REQUIRE(queue.empty());
@@ -131,7 +131,7 @@ TEST_CASE("AtomicQueue Stress and Wrap-Around", "[threading][atomic_queue]") {
 
   SECTION("Multi-Threaded Producer/Consumer Stress Test") {
     constexpr size_t capacity = 1024;
-    AtomicQueue<int, capacity> queue;
+    RingQueue<int, capacity> queue;
 
     constexpr int num_producers = 4;
     constexpr int num_consumers = 4;
@@ -157,7 +157,7 @@ TEST_CASE("AtomicQueue Stress and Wrap-Around", "[threading][atomic_queue]") {
       threads.emplace_back([&queue, &consumed_count, &sum_consumed, c]() {
         int item = 0;
         while (consumed_count.load(std::memory_order_relaxed) < total_items) {
-          if (queue.try_pop(item, c)) {
+          if (queue.tryPop(item, c)) {
             sum_consumed.fetch_add(item, std::memory_order_relaxed);
             consumed_count.fetch_add(1, std::memory_order_relaxed);
           } else {
@@ -182,7 +182,7 @@ TEST_CASE("AtomicQueue Stress and Wrap-Around", "[threading][atomic_queue]") {
   }
 }
 
-TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
+TEST_CASE("RingQueue Memory Reclamation", "[threading][ring_queue]") {
   using namespace sc::threading;
 
   struct LargeTask {
@@ -190,13 +190,13 @@ TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
   };
 
   constexpr size_t capacity = 65536;
-  using QueueType = AtomicQueue<LargeTask, capacity>;
+  using QueueType = RingQueue<LargeTask, capacity>;
 
   SECTION("Block Cycle Wrap-Around") {
     // Verifies that the release counter mechanism stays exactly in sync
     // with the pushes/pops across several cycles
     QueueType queue;
-    constexpr size_t items = QueueType::slots_per_block() * 2;
+    constexpr size_t items = QueueType::slotsPerBlock() * 2;
 
     for (int cycle = 0; cycle < 3; ++cycle) {
       for (size_t i = 0; i < items; ++i) {
@@ -205,7 +205,7 @@ TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
 
       LargeTask task;
       for (size_t i = 0; i < items; ++i) {
-        REQUIRE(queue.try_pop(task, 0));
+        REQUIRE(queue.tryPop(task, 0));
       }
 
       REQUIRE(queue.empty());
@@ -215,8 +215,8 @@ TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
   SECTION("Multi-Threaded Stress Test Across Reclaimed Blocks") {
     // Small enough to wrap around many times, large enough to span several
     // blocks, so that blocks are reclaimed while producers and consumers run.
-    using SmallQueue = AtomicQueue<int64_t, 4096>;
-    STATIC_REQUIRE(SmallQueue::num_blocks() > 1);
+    using SmallQueue = RingQueue<int64_t, 4096>;
+    STATIC_REQUIRE(SmallQueue::numBlocks() > 1);
     SmallQueue queue;
 
     constexpr int num_producers = 4;
@@ -244,7 +244,7 @@ TEST_CASE("AtomicQueue Memory Reclamation", "[threading][atomic_queue]") {
         std::vector<int64_t> last_seen(num_producers, -1);
         int64_t item = 0;
         while (consumed_count.load(std::memory_order_relaxed) < total_items) {
-          if (queue.try_pop(item, c)) {
+          if (queue.tryPop(item, c)) {
             const auto producer = static_cast<size_t>(item / items_per_producer);
             if (item <= last_seen[producer]) {
               order_ok.store(false, std::memory_order_relaxed);

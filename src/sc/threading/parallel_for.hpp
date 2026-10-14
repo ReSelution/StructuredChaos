@@ -10,7 +10,7 @@
 #include "backend.hpp"
 #include "types.hpp"
 
-namespace sc::threading::impl {
+namespace sc::threading::internal {
 
   // onTicket is null or called with the ticket of the loop before the
   // calling thread starts on it, see sc::threading::parallelFor.
@@ -93,4 +93,4 @@ namespace sc::threading::impl {
     }
   }
 
-} // namespace sc::threading::impl
+} // namespace sc::threading::internal

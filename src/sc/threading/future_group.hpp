@@ -11,29 +11,26 @@
 
 namespace sc::threading {
 
-  /// @brief Aggregates multiple std::future instances into a single
-  /// synchronizable unit.
-  /// @tparam T The return type of the underlying asynchronous tasks.
+  // Several futures of the same type, waited for and collected together.
   template<typename T>
   class [[nodiscard]] FutureGroup {
   public:
     FutureGroup() = default;
 
-    /// @brief Constructs a FutureGroup from an existing vector of futures.
-    explicit FutureGroup(std::vector<std::future<T>> futures) : futures_(std::move(futures)) {}
+    explicit FutureGroup(std::vector<std::future<T>> futures) : m_futures(std::move(futures)) {}
 
-    // Move-only interface (std::future cannot be copied)
+    // Move-only, like std::future.
     FutureGroup(FutureGroup &&) noexcept = default;
     FutureGroup &operator=(FutureGroup &&) noexcept = default;
     FutureGroup(const FutureGroup &) = delete;
     FutureGroup &operator=(const FutureGroup &) = delete;
 
-    void push(std::future<T> f) { futures_.push_back(std::move(f)); }
+    void push(std::future<T> f) { m_futures.push_back(std::move(f)); }
 
-    void reserve(size_t capacity) { futures_.reserve(capacity); }
+    void reserve(size_t capacity) { m_futures.reserve(capacity); }
 
     void wait() const {
-      for (const auto &f: futures_) {
+      for (const auto &f: m_futures) {
         if (f.valid()) {
           f.wait();
         }
@@ -41,74 +38,74 @@ namespace sc::threading {
     }
 
     [[nodiscard]] bool ready() const {
-      return std::ranges::all_of(futures_, [](const auto &f) {
+      return std::ranges::all_of(m_futures, [](const auto &f) {
         return !f.valid() || f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
       });
     }
 
-    [[nodiscard]] size_t completed_count() const {
-      return std::ranges::count_if(futures_, [](const auto &f) {
+    [[nodiscard]] size_t completedCount() const {
+      return std::ranges::count_if(m_futures, [](const auto &f) {
         return !f.valid() || f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
       });
     }
 
-    [[nodiscard]] float progress() const noexcept {
-      if (futures_.empty()) {
+    [[nodiscard]] float progress() const {
+      if (m_futures.empty()) {
         return 1.0f;
       }
-      return static_cast<float>(completed_count()) / static_cast<float>(futures_.size());
+      return static_cast<float>(completedCount()) / static_cast<float>(m_futures.size());
     }
 
-    /// @brief Collects every result. All futures are consumed even if a task
-    /// threw; the first exception in push order is rethrown afterwards.
+    // Collects every result. All futures are consumed even if a task threw;
+    // the first exception in push order is rethrown afterwards.
     auto get() {
-      std::exception_ptr first_error;
-      auto consume = [&first_error](auto &&take) {
+      std::exception_ptr firstError;
+      auto consume = [&firstError](auto &&take) {
         try {
           take();
         } catch (...) {
-          if (!first_error) {
-            first_error = std::current_exception();
+          if (!firstError) {
+            firstError = std::current_exception();
           }
         }
       };
 
       if constexpr (std::is_void_v<T>) {
-        for (auto &f: futures_) {
+        for (auto &f: m_futures) {
           if (f.valid()) {
             consume([&f] { f.get(); });
           }
         }
-        if (first_error) {
-          std::rethrow_exception(first_error);
+        if (firstError) {
+          std::rethrow_exception(firstError);
         }
       } else {
         std::vector<T> results;
-        results.reserve(futures_.size());
-        for (auto &f: futures_) {
+        results.reserve(m_futures.size());
+        for (auto &f: m_futures) {
           if (f.valid()) {
             consume([&f, &results] { results.push_back(f.get()); });
           }
         }
-        if (first_error) {
-          std::rethrow_exception(first_error);
+        if (firstError) {
+          std::rethrow_exception(firstError);
         }
         return results;
       }
     }
 
-    [[nodiscard]] size_t size() const noexcept { return futures_.size(); }
+    [[nodiscard]] size_t size() const noexcept { return m_futures.size(); }
 
-    [[nodiscard]] size_t valid_count() const {
-      return std::ranges::count_if(futures_, [](const auto &f) { return f.valid(); });
+    [[nodiscard]] size_t validCount() const {
+      return std::ranges::count_if(m_futures, [](const auto &f) { return f.valid(); });
     }
 
-    [[nodiscard]] bool empty() const noexcept { return futures_.empty(); }
+    [[nodiscard]] bool empty() const noexcept { return m_futures.empty(); }
 
-    void clear() noexcept { futures_.clear(); }
+    void clear() noexcept { m_futures.clear(); }
 
   private:
-    std::vector<std::future<T>> futures_;
+    std::vector<std::future<T>> m_futures;
   };
 
 } // namespace sc::threading

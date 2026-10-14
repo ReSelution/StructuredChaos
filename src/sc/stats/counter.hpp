@@ -1,11 +1,8 @@
-//
-// Created by oleub on 04.03.26.
-//
-
 #pragma once
 #include <atomic>
-#include <format>
+#include <cstdint>
 #include <string>
+#include <string_view>
 
 #include "units.hpp"
 
@@ -27,8 +24,8 @@ namespace sc::stats {
     static void reset(Storage &s) noexcept { s.value.store(0, std::memory_order_relaxed); }
 
     [[nodiscard]] static std::string format(const Storage &s) {
-      uint64_t raw_val = s.value.load(std::memory_order_relaxed);
-      return std::format("{}", ChaosFormatter<UnitSystem>::format(static_cast<double>(raw_val)));
+      const uint64_t value = s.value.load(std::memory_order_relaxed);
+      return ChaosFormatter<UnitSystem>::format(static_cast<double>(value));
     }
   };
 } // namespace sc::stats

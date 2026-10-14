@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -11,13 +12,7 @@
 #include "rapidhash-constexpr.h"
 #include "rapidhash.h"
 
-#ifdef _MSC_VER
-#define SC_FORCE_INLINE __forceinline
-#elif defined(__GNUC__) || defined(__clang__)
-#define SC_FORCE_INLINE inline __attribute__((always_inline))
-#else
-#define SC_FORCE_INLINE inline
-#endif
+#include "sc/util/macros.hpp"
 
 // sc::hash hashes one of:
 //   - an integer
@@ -34,9 +29,6 @@ namespace sc {
 
   template<typename T>
   concept SizedBuffer = requires(T a) {
-    a.data();
-    a.size();
-    { a.data() } -> std::same_as<decltype(a.data())>;
     requires std::is_pointer_v<decltype(a.data())>;
     { a.size() } -> std::convertible_to<std::size_t>;
   };
@@ -89,8 +81,11 @@ namespace sc {
     return internal::hashBytes(bytes, sizeof(bytes));
   }
 
-  template<internal::Byte T>
-  SC_FORCE_INLINE constexpr h64 hash(const T *data, std::integral auto length) noexcept {
+  template<internal::Byte T, std::integral L>
+  SC_FORCE_INLINE constexpr h64 hash(const T *data, L length) noexcept {
+    if constexpr (std::is_signed_v<L>) {
+      assert(length >= 0 && "sc::hash: negative length");
+    }
     return internal::hashBytes(data, static_cast<size_t>(length));
   }
 
@@ -133,9 +128,10 @@ namespace sc {
     }
   }
 
-  // Transparent hasher for maps whose keys are hashes already, or strings that
-  // are looked up by std::string_view.
-  struct IdentityHash {
+  // Transparent hasher for maps whose keys are hashes already, which it passes
+  // through, or strings that are looked up by std::string_view, which it
+  // hashes.
+  struct TransparentHash {
     using is_transparent = void;
 
     using is_avalanching = void;
@@ -148,8 +144,8 @@ namespace sc {
 
 } // namespace sc
 
-// User-defined literals have to live in the global or an inline namespace to
-// be found without a using directive.
-inline namespace literals {
-  constexpr sc::h64 operator""_h(const char *s, size_t len) { return sc::hash(s, len); }
-} // namespace literals
+// Brought in with `using namespace sc::literals;` (or `using namespace sc;`),
+// like the literals of the standard library.
+namespace sc::inline literals {
+  constexpr h64 operator""_h(const char *s, size_t len) { return hash(s, len); }
+} // namespace sc::inline literals

@@ -515,7 +515,7 @@ TEST_CASE("Registry Multi-Threaded Stress Test", "[ecs][registry][threading]") {
       },
       nullptr);
 
-  sc::threading::wait_until_finished();
+  sc::threading::waitUntilFinished();
 
   auto view = registry.view<PhysicsComponent>();
   REQUIRE(view.size() == total_entities);

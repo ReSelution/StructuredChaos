@@ -2,225 +2,152 @@
 
 #include <concepts>
 #include <cstddef>
+#include <exception>
 #include <future>
 #include <memory>
 #include <ranges>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "backend.hpp"
 #include "future_group.hpp"
 #include "internal.hpp"
 #include "types.hpp"
 
-namespace sc::threading::impl {
+namespace sc::threading::internal {
 
   template<Priority P, typename F, typename... Args>
     requires std::invocable<F, Args...>
   auto enqueue(F &&f, Args &&...args) -> std::future<std::invoke_result_t<F, Args...>> {
-    using return_type = std::invoke_result_t<F, Args...>;
-    std::promise<return_type> promise;
-    auto res = promise.get_future();
+    using ReturnType = std::invoke_result_t<F, Args...>;
+    std::promise<ReturnType> promise;
+    auto result = promise.get_future();
 
-    constexpr size_t SizeF = sizeof(std::decay_t<F>);
-    constexpr size_t SizeArgs = (sizeof(std::decay_t<Args>) + ... + 0);
-    constexpr size_t MIN_OVERHEAD = sizeof(std::promise<return_type>);
+    constexpr size_t CAPTURE_SIZE =
+        sizeof(std::decay_t<F>) + (sizeof(std::decay_t<Args>) + ... + 0) + sizeof(std::promise<ReturnType>);
 
-    on_task_enqueued();
-    if constexpr (SizeF + SizeArgs + MIN_OVERHEAD <= SFO_LIMIT) {
-      queues.emplace<P>(
-          [f = std::forward<F>(f), ... args = std::forward<Args>(args), p = std::move(promise)]() mutable {
-            try {
-
-              if constexpr (std::is_void_v<return_type>) {
-                f(std::forward<Args>(args)...);
-                p.set_value();
-              } else {
-                p.set_value(f(std::forward<Args>(args)...));
-              }
-            } catch (...) {
-              p.set_exception(std::current_exception());
-            }
-          });
+    if constexpr (CAPTURE_SIZE <= INLINE_CAPTURE_LIMIT) {
+      queues.submit<P>([f = std::forward<F>(f), ... args = std::forward<Args>(args), p = std::move(promise)]() mutable {
+        try {
+          if constexpr (std::is_void_v<ReturnType>) {
+            f(std::forward<Args>(args)...);
+            p.set_value();
+          } else {
+            p.set_value(f(std::forward<Args>(args)...));
+          }
+        } catch (...) {
+          p.set_exception(std::current_exception());
+        }
+      });
     } else {
       auto ctx = std::make_unique<std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>>>(
           std::forward<F>(f), std::make_tuple(std::forward<Args>(args)...));
-      queues.emplace<P>([ctx = std::move(ctx), p = std::move(promise)]() mutable {
+      queues.submit<P>([ctx = std::move(ctx), p = std::move(promise)]() mutable {
         try {
           auto &func = std::get<0>(*ctx);
-          auto &base_args = std::get<1>(*ctx);
+          auto &savedArgs = std::get<1>(*ctx);
           std::apply(
               [&](auto &&...unpacked) {
-                if constexpr (std::is_void_v<return_type>) {
+                if constexpr (std::is_void_v<ReturnType>) {
                   func(std::forward<decltype(unpacked)>(unpacked)...);
                   p.set_value();
                 } else {
                   p.set_value(func(std::forward<decltype(unpacked)>(unpacked)...));
                 }
               },
-              base_args);
+              savedArgs);
         } catch (...) {
           p.set_exception(std::current_exception());
         }
       });
     }
     signalWork(1);
-    return res;
+    return result;
   }
 
-  // --- VOID PATHS ---
-  template<typename F, typename Arg, typename... Args>
-  auto make_void_individual(F &&f, Arg &&item, const std::tuple<Args...> &args, std::shared_ptr<BatchState> &state) {
-    return [f, args, item = std::forward<Arg>(item), state]() mutable {
-      auto completion_guard = [&]() {
-        if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-          // The LAST thread sets the success, IF no exception was thrown
-          if (!state->exception_set.test_and_set(std::memory_order_relaxed)) {
-            state->batch_promise.set_value();
-          }
-        }
-      };
-      try {
-        std::apply([&](auto &&...extra) { f(std::move(item), extra...); }, args);
-        completion_guard();
-      } catch (...) {
-        if (!state->exception_set.test_and_set(std::memory_order_relaxed)) {
-          state->batch_promise.set_exception(std::current_exception());
-        }
-        completion_guard();
-      }
-    };
-  }
+  // The batch paths: the function, the extra arguments and one element are
+  // either copied into every task (inline) or kept once in a shared state that
+  // all tasks of the batch index into (merged). Elements are moved out of the
+  // range only if it was passed as an rvalue.
 
-  template<typename F, typename Arg, typename... Args>
-  auto make_void_individualWithCallback(F &&f, Arg &&item, const std::tuple<Args...> &args,
-                                        std::shared_ptr<DetachBatchState> &state) {
-    return [f, args, item = std::forward<Arg>(item), state]() mutable {
-      try {
-        std::apply([&](auto &&...extra) { f(std::move(item), extra...); }, args);
-
-        if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-          if (state->on_finished) {
-            state->on_finished();
-          }
-        }
-      } catch (...) {
-        if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-          if (state->on_finished) {
-            state->on_finished();
-          }
-        }
-      }
-    };
-  }
-
-  template<typename F, typename Shared>
-  auto make_void_merged(F &&f, Shared shared, size_t i) {
-    return [f, shared, i]() {
-      try {
-        std::apply([&](auto &&...extra) { f(std::move(shared->payload[i]), extra...); }, shared->saved_args);
-        if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-          shared->batch_promise.set_value();
-        }
-      } catch (...) {
-        shared->batch_promise.set_exception(std::current_exception());
-      }
-    };
-  }
-
-  // --- NON-VOID PATHS ---
-  template<typename F, typename Arg, typename... Args, typename Promise>
-  auto make_nonvoid_individual(F &&f, Arg &&item, const std::tuple<Args...> &args, Promise p) {
-    return [f, args, item = std::forward<Arg>(item), p = std::move(p)]() mutable {
-      try {
-        std::apply([&](auto &&...extra) { p.set_value(f(std::move(item), extra...)); }, args);
-      } catch (...) {
-        p.set_exception(std::current_exception());
-      }
-    };
-  }
-
-  // =========================================================================
-  // CASE 1: SFO (Fast-Path)
-  // =========================================================================
-
-  // Case 1a: SFO + Void Return Type -> Liefert std::future<void>
-  template<Priority P, typename R, typename F, typename TupleArgs>
-  auto enqueueBatchSfoVoid(R &&r, F &&f, TupleArgs &&arg_tuple) {
-    const size_t size = std::ranges::size(r);
-
+  // Without results: one future for the whole batch, see BatchState.
+  template<Priority P, typename R, typename F, typename... Args>
+  std::future<void> enqueueBatchInlineVoid(R &&r, size_t size, F &&f, Args &&...args) {
     auto state = std::make_shared<BatchState>(size);
-
-    for (auto &&item: r) {
-
-      queues.emplace<P>(make_void_individual(f, std::forward<decltype(item)>(item), arg_tuple, state));
+    auto future = state->batchPromise.get_future();
+    if (size == 0) {
+      // No task would ever complete it.
+      state->batchPromise.set_value();
     }
 
-    return state->batch_promise.get_future();
+    for (auto &&item: r) {
+      queues.submit<P>([f, args..., arg = std::forward_like<R>(item), state]() mutable {
+        std::exception_ptr error;
+        try {
+          f(std::move(arg), args...);
+        } catch (...) {
+          error = std::current_exception();
+        }
+        state->finishTask(std::move(error));
+      });
+    }
+    return future;
   }
 
-  // Case 1b: SFO + Non-Void Return Type -> Liefert
-  // std::vector<std::future<RetType>>
-  template<Priority P, typename RetType, typename R, typename F, typename TupleArgs>
-  auto enqueueBatchSfoNonVoid(R &&r, size_t size, F &&f, TupleArgs &&arg_tuple) {
-
+  // With results: one future per element.
+  template<Priority P, typename RetType, typename R, typename F, typename... Args>
+  FutureGroup<RetType> enqueueBatchInline(R &&r, size_t size, F &&f, Args &&...args) {
     FutureGroup<RetType> futures;
     futures.reserve(size);
 
     for (auto &&item: r) {
-      std::promise<RetType> p;
-      futures.push(p.get_future());
-      queues.emplace<P>(make_nonvoid_individual(f, std::forward<decltype(item)>(item), arg_tuple, std::move(p)));
-    }
-
-    return futures;
-  }
-
-  // =========================================================================
-  // CASE 2: MERGED (Memory-Efficient / Heap-Path)
-  // =========================================================================
-
-  // Case 2a: Merged + Void Return Type -> Liefert std::future<void>
-  template<Priority P, typename R, typename F, typename... Args>
-  auto enqueueBatchMergedVoid(R &&r, F &&f, Args &&...args) {
-    const size_t size = std::ranges::size(r);
-    auto shared = std::make_shared<MergedState<R, Args...>>(size, std::forward<R>(r), std::forward<Args>(args)...);
-
-    for (size_t i = 0; i < size; ++i) {
-      queues.emplace<P>([f, shared, i]() {
-        auto completion_guard = [&]() {
-          if (shared->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            if (!shared->exception_set.test_and_set(std::memory_order_relaxed)) {
-              shared->batch_promise.set_value();
-            }
-          }
-        };
+      std::promise<RetType> promise;
+      futures.push(promise.get_future());
+      queues.submit<P>([f, args..., arg = std::forward_like<R>(item), p = std::move(promise)]() mutable {
         try {
-          std::apply([&](auto &&...unpacked) { f(std::move(shared->payload[i]), unpacked...); }, shared->saved_args);
-          completion_guard();
+          p.set_value(f(std::move(arg), args...));
         } catch (...) {
-          if (!shared->exception_set.test_and_set(std::memory_order_relaxed)) {
-            shared->batch_promise.set_exception(std::current_exception());
-          }
-          completion_guard();
+          p.set_exception(std::current_exception());
         }
       });
     }
-
-    return shared->batch_promise.get_future();
+    return futures;
   }
 
-  // Case 2b: Merged + Non-Void Return Type -> Liefert
-  // std::vector<std::future<RetType>>
+  template<Priority P, typename R, typename F, typename... Args>
+  std::future<void> enqueueBatchMergedVoid(R &&r, size_t size, F &&f, Args &&...args) {
+    auto shared = std::make_shared<MergedState<R, Args...>>(size, std::forward<R>(r), std::forward<Args>(args)...);
+    auto future = shared->batchPromise.get_future();
+    if (size == 0) {
+      shared->batchPromise.set_value();
+    }
+
+    for (size_t i = 0; i < size; ++i) {
+      queues.submit<P>([f, shared, i]() mutable {
+        std::exception_ptr error;
+        try {
+          std::apply([&](auto &&...unpacked) { f(std::move(shared->payload[i]), unpacked...); }, shared->savedArgs);
+        } catch (...) {
+          error = std::current_exception();
+        }
+        shared->finishTask(std::move(error));
+      });
+    }
+    return future;
+  }
+
   template<Priority P, typename RetType, typename R, typename F, typename... Args>
-  auto enqueueBatchMergedNonVoid(R &&r, F &&f, Args &&...args) {
-    struct MergedNonVoidState : MergedState<R, Args...> {
+  FutureGroup<RetType> enqueueBatchMerged(R &&r, size_t size, F &&f, Args &&...args) {
+    struct State : MergedState<R, Args...> {
       std::vector<std::promise<RetType>> promises;
 
-      MergedNonVoidState(size_t n, R &&r, Args &&...a) :
+      State(size_t n, R &&r, Args &&...a) :
           MergedState<R, Args...>(n, std::forward<R>(r), std::forward<Args>(a)...), promises(n) {}
     };
-    const size_t size = std::ranges::size(r);
 
-    auto shared = std::make_shared<MergedNonVoidState>(size, std::forward<R>(r), std::forward<Args>(args)...);
+    auto shared = std::make_shared<State>(size, std::forward<R>(r), std::forward<Args>(args)...);
     FutureGroup<RetType> futures;
     futures.reserve(size);
     for (auto &p: shared->promises) {
@@ -228,61 +155,52 @@ namespace sc::threading::impl {
     }
 
     for (size_t i = 0; i < size; ++i) {
-      queues.emplace<P>([f, shared, i]() {
+      queues.submit<P>([f, shared, i]() mutable {
         try {
-          if constexpr (std::is_move_constructible_v<RetType>) {
-            RetType res = std::apply([&](auto &&...unpacked) { return f(std::move(shared->payload[i]), unpacked...); },
-                                     shared->saved_args);
-            shared->promises[i].set_value(std::move(res));
-          } else {
-            shared->promises[i].set_value(std::apply(
-                [&](auto &&...unpacked) { return f(std::move(shared->payload[i]), unpacked...); }, shared->saved_args));
-          }
+          shared->promises[i].set_value(std::apply(
+              [&](auto &&...unpacked) { return f(std::move(shared->payload[i]), unpacked...); }, shared->savedArgs));
         } catch (...) {
           shared->promises[i].set_exception(std::current_exception());
         }
       });
     }
-
     return futures;
   }
 
   template<Priority P, std::ranges::sized_range R, typename F, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...>
   auto enqueueBatch(R &&r, F &&f, Args &&...args) {
-    const size_t count = std::ranges::size(r);
+    const auto count = static_cast<size_t>(std::ranges::size(r));
     using ArgType = std::ranges::range_value_t<R>;
     using RetType = std::invoke_result_t<F, ArgType, Args...>;
-    constexpr bool is_void = std::is_void_v<RetType>;
+    constexpr bool isVoid = std::is_void_v<RetType>;
 
-    constexpr size_t CAPTURE_BASE = sizeof(std::decay_t<F>) + (0 + ... + sizeof(std::decay_t<Args>)) + sizeof(ArgType);
-    constexpr size_t OVERHEAD = is_void ? sizeof(std::shared_ptr<void>) : sizeof(std::promise<RetType>);
-
-    constexpr bool fits_sfo = CAPTURE_BASE + OVERHEAD <= SFO_LIMIT;
+    constexpr size_t CAPTURE_SIZE = sizeof(std::decay_t<F>) + (0 + ... + sizeof(std::decay_t<Args>)) + sizeof(ArgType);
+    constexpr size_t STATE_SIZE = isVoid ? sizeof(std::shared_ptr<void>) : sizeof(std::promise<RetType>);
+    // The merged state keeps a copy of the range and indexes into it.
+    constexpr bool inlineCaptures =
+        CAPTURE_SIZE + STATE_SIZE <= INLINE_CAPTURE_LIMIT || !std::ranges::random_access_range<std::decay_t<R>>;
 
     auto dispatch = [&]() {
-      if constexpr (fits_sfo) {
-        auto arg_tuple = std::make_tuple(std::forward<Args>(args)...);
-
-        if constexpr (is_void) {
-          return enqueueBatchSfoVoid<P>(std::forward<R>(r), std::forward<F>(f), std::move(arg_tuple));
+      if constexpr (inlineCaptures) {
+        if constexpr (isVoid) {
+          return enqueueBatchInlineVoid<P>(std::forward<R>(r), count, std::forward<F>(f), std::forward<Args>(args)...);
         } else {
-          return enqueueBatchSfoNonVoid<P, RetType>(std::forward<R>(r), count, std::forward<F>(f),
-                                                    std::move(arg_tuple));
+          return enqueueBatchInline<P, RetType>(std::forward<R>(r), count, std::forward<F>(f),
+                                                std::forward<Args>(args)...);
         }
       } else {
-        if constexpr (is_void) {
-          return enqueueBatchMergedVoid<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
+        if constexpr (isVoid) {
+          return enqueueBatchMergedVoid<P>(std::forward<R>(r), count, std::forward<F>(f), std::forward<Args>(args)...);
         } else {
-          return enqueueBatchMergedNonVoid<P, RetType>(std::forward<R>(r), std::forward<F>(f),
-                                                       std::forward<Args>(args)...);
+          return enqueueBatchMerged<P, RetType>(std::forward<R>(r), count, std::forward<F>(f),
+                                                std::forward<Args>(args)...);
         }
       }
     };
 
-    on_task_enqueued(count);
     auto futures = dispatch();
     signalWork(count);
     return futures;
   }
-} // namespace sc::threading::impl
+} // namespace sc::threading::internal

@@ -4,18 +4,29 @@
 #include <cstdint>
 #include <future>
 #include <memory>
-#include <thread>
+#include <ranges>
 #include <type_traits>
 
 #include "detach.hpp"
 #include "enqueue.hpp"
 #include "parallel_for.hpp"
 #include "types.hpp"
+
 namespace sc::threading {
 
-  void init(uint32_t threads = std::thread::hardware_concurrency() - 1);
+  // One worker less than the hardware has threads, at least one.
+  [[nodiscard]] uint32_t defaultWorkerCount() noexcept;
 
-  void wait_until_finished();
+  // Starts the pool with the given number of workers, at most one less than
+  // the hardware has threads. Does nothing if it is running already.
+  void init(uint32_t threads = defaultWorkerCount());
+
+  // Stops and joins the workers. Tasks that have not started are dropped: a
+  // future of enqueue then throws std::future_error. Runs on its own at exit.
+  void shutdown();
+
+  // Returns once every task that was enqueued or detached has finished.
+  void waitUntilFinished();
 
   // Joins a parallelFor loop of another thread that has room for helpers, if
   // there is one, works on it until nothing of it is left to take and returns
@@ -37,8 +48,8 @@ namespace sc::threading {
   template<typename Stop>
     requires std::predicate<Stop &>
   bool helpThread(Stop &&stop) {
-    return impl::helpParallel(impl::stopCheckOf<std::remove_reference_t<Stop>>,
-                              const_cast<void *>(static_cast<const void *>(std::addressof(stop))));
+    return internal::helpParallel(internal::stopCheckOf<std::remove_reference_t<Stop>>,
+                                  const_cast<void *>(static_cast<const void *>(std::addressof(stop))));
   }
 
   // Joins exactly the loop of the ticket, which parallelFor with onTicket
@@ -53,17 +64,17 @@ namespace sc::threading {
   template<typename Stop>
     requires std::predicate<Stop &>
   bool helpThread(LoopTicket ticket, Stop &&stop) {
-    return impl::joinParallel(ticket.value, impl::stopCheckOf<std::remove_reference_t<Stop>>,
-                              const_cast<void *>(static_cast<const void *>(std::addressof(stop))));
+    return internal::joinParallel(ticket.value, internal::stopCheckOf<std::remove_reference_t<Stop>>,
+                                  const_cast<void *>(static_cast<const void *>(std::addressof(stop))));
   }
 
-  /// @brief Id of the calling thread: 0 for the thread that called init and
-  /// for threads outside the pool, a positive number for pool workers.
-  [[nodiscard]] inline int32_t thread_id() noexcept { return impl::threadId; }
+  // Id of the calling thread: 0 for the thread that called init and for
+  // threads outside the pool, a positive number for pool workers.
+  [[nodiscard]] inline int32_t threadId() noexcept { return internal::currentThreadId; }
 
-  /// @brief One more than the highest thread_id there is: the size of an
-  /// array that has an entry for every thread. Changes with init.
-  [[nodiscard]] size_t thread_slots() noexcept;
+  // One more than the highest threadId there is: the size of an array that
+  // has an entry for every thread. Changes with init.
+  [[nodiscard]] size_t threadSlots() noexcept;
 
   // Calls function(first, last) for the items 0 to count - 1 in chunks of at
   // most grain items, on the calling thread and on every pool thread that has
@@ -82,7 +93,7 @@ namespace sc::threading {
   template<typename F>
     requires std::invocable<F &, size_t, size_t>
   void parallelFor(size_t count, size_t grain, F &&function) {
-    impl::parallelFor(count, grain, SIZE_MAX, function);
+    internal::parallelFor(count, grain, SIZE_MAX, function);
   }
 
   // The same with at most the given number of pool threads helping, for a
@@ -92,7 +103,7 @@ namespace sc::threading {
   template<typename F>
     requires std::invocable<F &, size_t, size_t>
   void parallelFor(size_t count, size_t grain, size_t helpers, F &&function) {
-    impl::parallelFor(count, grain, helpers, function);
+    internal::parallelFor(count, grain, helpers, function);
   }
 
   // The same, and before the calling thread starts on the loop, onTicket is
@@ -104,14 +115,15 @@ namespace sc::threading {
   template<typename F, typename OnTicket>
     requires std::invocable<F &, size_t, size_t> && std::invocable<OnTicket &, LoopTicket>
   void parallelFor(size_t count, size_t grain, size_t helpers, F &&function, OnTicket &&onTicket) {
-    impl::parallelFor(count, grain, helpers, function, onTicket);
+    internal::parallelFor(count, grain, helpers, function, onTicket);
   }
 
-  // detach
+  // Runs the function on the pool. Nobody waits for it; an exception it
+  // throws is logged and dropped.
   template<Priority P, typename F, typename... Args>
     requires std::invocable<F, Args...> && std::is_void_v<std::invoke_result_t<F, Args...>>
   void detach(F &&f, Args &&...args) {
-    impl::detach<P>(std::forward<F>(f), std::forward<Args>(args)...);
+    internal::detach<P>(std::forward<F>(f), std::forward<Args>(args)...);
   }
 
   template<typename F, typename... Args>
@@ -120,15 +132,17 @@ namespace sc::threading {
     detach<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args)...);
   }
 
-  template<Priority P, std::ranges::input_range R, typename F, typename Finished, typename... Args>
+  // One task per element of the range; finished (or nullptr) is called once
+  // the last of them is done.
+  template<Priority P, std::ranges::sized_range R, typename F, typename Finished, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...> &&
              std::is_void_v<std::invoke_result_t<F, std::ranges::range_value_t<R>, Args...>>
   void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
-    impl::detachBatch<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
-                         std::forward<Args>(args)...);
+    internal::detachBatch<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
+                             std::forward<Args>(args)...);
   }
 
-  template<std::ranges::input_range R, typename F, typename Finished, typename... Args>
+  template<std::ranges::sized_range R, typename F, typename Finished, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...> &&
              std::is_void_v<std::invoke_result_t<F, std::ranges::range_value_t<R>, Args...>>
   void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
@@ -136,11 +150,11 @@ namespace sc::threading {
                                   std::forward<Args>(args)...);
   }
 
-  // enqueue
+  // Runs the function on the pool; the future gets its result or exception.
   template<Priority P, typename F, typename... Args>
     requires std::invocable<F, Args...>
   auto enqueue(F &&f, Args &&...args) -> std::future<std::invoke_result_t<F, Args...>> {
-    return impl::enqueue<P>(std::forward<F>(f), std::forward<Args>(args)...);
+    return internal::enqueue<P>(std::forward<F>(f), std::forward<Args>(args)...);
   }
 
   template<typename F, typename... Args>
@@ -149,13 +163,17 @@ namespace sc::threading {
     return enqueue<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args)...);
   }
 
-  template<Priority P, std::ranges::input_range R, typename F, typename... Args>
+  // One task per element of the range. Returns a std::future<void> for a
+  // function without result, otherwise a FutureGroup with one future per
+  // element, in the order of the range.
+  template<Priority P, std::ranges::sized_range R, typename F, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...>
   auto enqueueBatch(R &&r, F &&f, Args &&...args) {
-    return impl::enqueueBatch<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
+    return internal::enqueueBatch<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
   }
 
-  template<std::ranges::input_range R, typename F, typename... Args>
+  template<std::ranges::sized_range R, typename F, typename... Args>
+    requires std::invocable<F, std::ranges::range_value_t<R>, Args...>
   auto enqueueBatch(R &&r, F &&f, Args &&...args) {
     return enqueueBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
   }

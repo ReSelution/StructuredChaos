@@ -1,115 +1,240 @@
 #include "backend.hpp"
 
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdlib>
+#include <exception>
+#include <mutex>
+#include <semaphore>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
 
-#include "threading/types.hpp"
+#include <atomic_queue/atomic_queue.h>
 
-namespace sc::threading::impl {
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <cwchar>
 
-  // Whether this thread was woken up for work it has not found yet.
-  static thread_local bool wokenForWork = false;
+#include <windows.h>
+#elifdef __linux__
+#include <pthread.h>
+#endif
 
-  // Every piece of work comes with one wake-up. A thread that was woken up
-  // for it has used that up already; one that found the work while it was
-  // awake anyway takes the wake-up back, so that nobody gets up for nothing.
-  static inline void take_wake_up() {
-    if (wokenForWork) {
-      wokenForWork = false;
-    } else {
-      // Nothing to take back if the woken thread was faster.
-      (void) pool_sema.try_acquire();
-    }
-  }
+namespace sc::threading::internal {
 
-  static inline void on_task_started() {
-    take_wake_up();
-    ActiveTask::record(1);
-    QueueSize::record(-1);
-  }
-
-  // The counter and the waiter count are read and written with the default
-  // sequentially consistent ordering on purpose: either the waiter sees the
-  // counter at zero, or the finishing thread sees the waiter and wakes it.
-  static inline void on_task_finished() {
-    ActiveTask::record(-1);
-    if (outstanding_tasks.fetch_sub(1) == 1 && idle_waiters.load() != 0) {
-      // Taking the mutex keeps the notification from slipping in between the
-      // waiter's check of the counter and its going to sleep.
-      {
-        std::scoped_lock lock(queueMutex);
-      }
-      wait_cv.notify_all();
-    }
-  }
-
-  void wait_until_finished() {
-    idle_waiters.fetch_add(1);
-    {
-      std::unique_lock lock(queueMutex);
-      wait_cv.wait(lock, [] { return outstanding_tasks.load() == 0; });
-    }
-    idle_waiters.fetch_sub(1);
-  }
-
-  void init_impl(uint32_t numThreads) {
-    if (!threads.empty()) {
-      [[unlikely]] return;
-    }
-
-    const size_t longCount = longRunningThreads.size();
-    const size_t maxHardware = std::thread::hardware_concurrency();
-    const size_t threadCount = std::min<size_t>(numThreads, maxHardware - 1 - longCount);
-    std::atexit(shutdown);
-    for (uint32_t i = 0; i < threadCount; ++i) {
-      threads.emplace_back(workerThread, i + 1 + longRunningThreads.size());
-    }
-    threadId = 0;
-  }
-  void signalWork(size_t count) { pool_sema.release(static_cast<std::ptrdiff_t>(count)); }
-
-  void shutdown() {
-    {
-      std::scoped_lock lock(threadMutex);
-      for (auto &t: threads) {
-        t.request_stop();
-      }
-      for (auto &t: longRunningThreads) {
-        t.request_stop();
-      }
-    }
-    signalWork(threads.size());
-    threads.clear();
-    longRunningThreads.clear();
-  }
-
-  void workerThread(const std::stop_token &st, int id) {
-    threadId = id;
-    while (!st.stop_requested()) {
-      // First: a thread is waiting for these to be done.
-      if (helpParallel()) {
-        continue;
-      }
-      MoveOnlyFunction task;
-      if (queues.try_pop_any(task, threadId)) {
-        on_task_started();
-        task();
-        on_task_finished();
-        continue;
-      }
-
-      wokenForWork = pool_sema.try_acquire_for(std::chrono::milliseconds(10));
-    }
-  }
+  Queues queues;
+  constinit thread_local int32_t currentThreadId = 0;
 
   namespace {
+    // Guards the worker list in init and shutdown.
+    std::mutex threadMutex;
+    std::vector<std::jthread> threads;
+    // threads.size(), for readers that must not take the mutex.
+    std::atomic<size_t> workerCount{0};
+
+    inline constexpr size_t MAX_TASKS = QUEUE_CAP * PRIORITY_COUNT;
+    std::counting_semaphore<MAX_TASKS> poolSemaphore{0};
+
+    // Tasks that were enqueued and have not finished yet, and the threads that
+    // wait for them in waitUntilFinished.
+    std::mutex waitMutex;
+    std::condition_variable waitCondition;
+    std::atomic<size_t> outstandingTasks{0};
+    std::atomic<size_t> idleWaiters{0};
+
+    inline constexpr size_t PARALLEL_SLOTS = 1024;
+    std::array<ParallelSlot, PARALLEL_SLOTS> parallelSlots;
+
+    // The tickets: generation and slot, see ticketOf(). Fixed in size and never
+    // freed, which is fine for a few numbers. A loop that finds it full gets
+    // fewer helpers.
+    atomic_queue::AtomicQueue<uint64_t, PARALLEL_SLOTS> parallelTickets;
+
+    // Whether this thread was woken up for work it has not found yet.
+    thread_local bool wokenForWork = false;
+
+    // Every piece of work comes with one wake-up. A thread that was woken up
+    // for it has used that up already; one that found the work while it was
+    // awake anyway takes the wake-up back, so that nobody gets up for nothing.
+    void takeWakeUp() {
+      if (wokenForWork) {
+        wokenForWork = false;
+      } else {
+        // Nothing to take back if the woken thread was faster.
+        (void) poolSemaphore.try_acquire();
+      }
+    }
+
+    void onTaskStarted() {
+      takeWakeUp();
+      ActiveTask::record(1);
+      QueueSize::record(static_cast<uint64_t>(-1));
+    }
+
+    // The counter and the waiter count are read and written with the default
+    // sequentially consistent ordering on purpose: either the waiter sees the
+    // counter at zero, or the finishing thread sees the waiter and wakes it.
+    void onTasksFinished(size_t count = 1) {
+      if (outstandingTasks.fetch_sub(count) == count && idleWaiters.load() != 0) {
+        // Taking the mutex keeps the notification from slipping in between the
+        // waiter's check of the counter and its going to sleep.
+        {
+          std::scoped_lock lock(waitMutex);
+        }
+        waitCondition.notify_all();
+      }
+    }
+
+    // Shown in debuggers and profilers.
+    void setThreadName(std::string_view name) {
+#ifdef _WIN32
+      // A string_view is not necessarily terminated, so its length is passed on.
+      std::array<wchar_t, 64> wideName{};
+      std::swprintf(wideName.data(), wideName.size(), L"%.*hs", static_cast<int>(name.size()), name.data());
+      SetThreadDescription(GetCurrentThread(), wideName.data());
+#elifdef __linux__
+      // Linux allows 15 characters plus the terminator.
+      std::array<char, 16> shortName{};
+      name.copy(shortName.data(), shortName.size() - 1);
+      pthread_setname_np(pthread_self(), shortName.data());
+#else
+      (void) name;
+#endif
+    }
+
+    void runTask(MoveOnlyFunction &task) {
+      onTaskStarted();
+      // The task wrappers of enqueue and detach catch everything themselves.
+      // This is the last line of defense: an exception that escaped would end
+      // the program through the worker thread.
+      try {
+        task();
+      } catch (const std::exception &e) {
+        ThreadLog::err("A task threw: {}", e.what());
+      } catch (...) {
+        ThreadLog::err("A task threw an exception that is not a std::exception");
+      }
+      // Destroyed before the task counts as finished: whoever waits for it may
+      // rely on everything it captured being gone.
+      task = nullptr;
+      ActiveTask::record(static_cast<uint64_t>(-1));
+      onTasksFinished();
+    }
+
+    void workerThread(const std::stop_token &st, int32_t id) {
+      currentThreadId = id;
+      setThreadName("sc-worker-" + std::to_string(id));
+      while (!st.stop_requested()) {
+        // First: a thread is waiting for these to be done.
+        if (helpParallel()) {
+          continue;
+        }
+        MoveOnlyFunction task;
+        if (queues.tryPopAny(task, currentThreadId)) {
+          runTask(task);
+          continue;
+        }
+
+        wokenForWork = poolSemaphore.try_acquire_for(std::chrono::milliseconds(10));
+      }
+    }
+
     // Never 0: that is what the queue keeps in an empty place.
     constexpr uint64_t ticketOf(uint64_t generation, size_t slot) {
       return (generation << ParallelSlot::HELPER_BITS) | (slot + 1);
     }
   } // namespace
 
+  void onTaskEnqueued() noexcept {
+    outstandingTasks.fetch_add(1, std::memory_order_relaxed);
+    QueueSize::record(1);
+  }
+
+  void logDetachedException() noexcept {
+    try {
+      try {
+        throw;
+      } catch (const std::exception &e) {
+        ThreadLog::err("A detached task threw: {}", e.what());
+      } catch (...) {
+        ThreadLog::err("A detached task threw an exception that is not a std::exception");
+      }
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+      // Logging failed as well; there is nobody left to tell.
+    }
+  }
+
+  void signalWork(size_t count) { poolSemaphore.release(static_cast<std::ptrdiff_t>(count)); }
+
+  void waitUntilFinished() {
+    idleWaiters.fetch_add(1);
+    {
+      std::unique_lock lock(waitMutex);
+      waitCondition.wait(lock, [] { return outstandingTasks.load() == 0; });
+    }
+    idleWaiters.fetch_sub(1);
+  }
+
+  void initPool(uint32_t requested) {
+    std::scoped_lock lock(threadMutex);
+    if (!threads.empty()) [[unlikely]] {
+      return;
+    }
+
+    // hardware_concurrency() may report 0 if it does not know.
+    const size_t hardware = std::max<size_t>(std::thread::hardware_concurrency(), 2);
+    const size_t threadCount = std::min<size_t>(requested, hardware - 1);
+
+    static std::once_flag atexitRegistered;
+    std::call_once(atexitRegistered, [] { std::atexit(shutdownPool); });
+
+    threads.reserve(threadCount);
+    for (size_t i = 0; i < threadCount; ++i) {
+      threads.emplace_back(workerThread, static_cast<int32_t>(i + 1));
+    }
+    workerCount.store(threads.size(), std::memory_order_release);
+    currentThreadId = 0;
+  }
+
+  void shutdownPool() {
+    std::vector<std::jthread> stopping;
+    {
+      std::scoped_lock lock(threadMutex);
+      for (auto &t: threads) {
+        t.request_stop();
+      }
+      stopping.swap(threads);
+      workerCount.store(0, std::memory_order_release);
+    }
+    signalWork(stopping.size());
+    // Joins every worker.
+    stopping.clear();
+
+    // What nobody runs any more is dropped. A task of enqueue then breaks its
+    // promise, so a waiting future throws std::future_error instead of
+    // blocking, and waitUntilFinished returns.
+    MoveOnlyFunction task;
+    size_t dropped = 0;
+    while (queues.tryPopAny(task, 0)) {
+      task = nullptr;
+      ++dropped;
+    }
+    if (dropped != 0) {
+      QueueSize::record(static_cast<uint64_t>(0) - dropped);
+      onTasksFinished(dropped);
+    }
+  }
+
+  size_t threadSlots() noexcept { return 1 + workerCount.load(std::memory_order_acquire); }
+
   ParallelSlot *shareParallel(ParallelJob &job, size_t helpers, uint64_t *ticketOut) {
-    helpers = std::min(helpers, threads.size());
+    helpers = std::min(helpers, workerCount.load(std::memory_order_acquire));
     if (helpers == 0 && ticketOut == nullptr) {
       return nullptr;
     }
@@ -117,7 +242,7 @@ namespace sc::threading::impl {
     // Every thread starts at a place of its own, so that loops of different
     // threads do not meet in the same slots.
     ParallelSlot *slot = nullptr;
-    size_t index = static_cast<size_t>(threadId) % PARALLEL_SLOTS;
+    size_t index = static_cast<size_t>(currentThreadId) % PARALLEL_SLOTS;
     for (size_t tried = 0; tried < PARALLEL_SLOTS; ++tried, index = (index + 1) % PARALLEL_SLOTS) {
       if (!parallelSlots[index].used.exchange(true, std::memory_order_acquire)) {
         slot = &parallelSlots[index];
@@ -156,7 +281,7 @@ namespace sc::threading::impl {
     if (!parallelTickets.try_pop(ticket)) {
       return false;
     }
-    take_wake_up();
+    takeWakeUp();
     joinParallel(ticket, stop, context);
     return true;
   }
@@ -200,18 +325,4 @@ namespace sc::threading::impl {
     slot.job.store(nullptr, std::memory_order_relaxed);
     slot.used.store(false, std::memory_order_release);
   }
-
-  void set_thread_name([[maybe_unused]] std::string_view name) {
-#ifdef _WIN32
-    // A string_view is not necessarily terminated, so its length is passed on.
-    wchar_t wName[64];
-    swprintf(wName, 64, L"%.*hs", static_cast<int>(name.size()), name.data());
-    SetThreadDescription(GetCurrentThread(), wName);
-#elif __linux__
-    // Linux allows 15 characters plus the terminator.
-    char shortName[16]{};
-    name.copy(shortName, sizeof(shortName) - 1);
-    pthread_setname_np(pthread_self(), shortName);
-#endif
-  }
-} // namespace sc::threading::impl
+} // namespace sc::threading::internal

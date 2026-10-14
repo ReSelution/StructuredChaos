@@ -135,21 +135,21 @@ static_assert(!PmrMakeable<std::string>);
 static_assert(!PmrMakeable<int>);
 
 // Which containers the heap may drop without their destructor.
-static_assert(sc::detail::PmrContainer<std::pmr::vector<int>>);
-static_assert(sc::detail::PmrContainer<std::pmr::string>);
-static_assert(sc::detail::PmrContainer<std::pmr::map<int, int>>);
-static_assert(!sc::detail::PmrContainer<std::vector<int>>);
-static_assert(!sc::detail::PmrContainer<std::string>);
-static_assert(!sc::detail::PmrContainer<int>);
-static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::vector<int>>);
-static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::string>);
-static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::vector<std::pmr::string>>);
-static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::map<int, std::pmr::string>>);
-static_assert(sc::detail::ownsOnlyResourceMemory<std::pmr::unordered_map<std::pmr::string, std::pmr::vector<int>>>);
-static_assert(!sc::detail::ownsOnlyResourceMemory<std::pmr::vector<Tracked>>);
-static_assert(!sc::detail::ownsOnlyResourceMemory<std::pmr::vector<std::string>>);
-static_assert(!sc::detail::ownsOnlyResourceMemory<std::pmr::map<int, std::vector<int>>>);
-static_assert(!sc::detail::ownsOnlyResourceMemory<std::pmr::vector<std::pmr::vector<Tracked>>>);
+static_assert(sc::internal::PmrContainer<std::pmr::vector<int>>);
+static_assert(sc::internal::PmrContainer<std::pmr::string>);
+static_assert(sc::internal::PmrContainer<std::pmr::map<int, int>>);
+static_assert(!sc::internal::PmrContainer<std::vector<int>>);
+static_assert(!sc::internal::PmrContainer<std::string>);
+static_assert(!sc::internal::PmrContainer<int>);
+static_assert(sc::internal::ownsOnlyResourceMemory<std::pmr::vector<int>>);
+static_assert(sc::internal::ownsOnlyResourceMemory<std::pmr::string>);
+static_assert(sc::internal::ownsOnlyResourceMemory<std::pmr::vector<std::pmr::string>>);
+static_assert(sc::internal::ownsOnlyResourceMemory<std::pmr::map<int, std::pmr::string>>);
+static_assert(sc::internal::ownsOnlyResourceMemory<std::pmr::unordered_map<std::pmr::string, std::pmr::vector<int>>>);
+static_assert(!sc::internal::ownsOnlyResourceMemory<std::pmr::vector<Tracked>>);
+static_assert(!sc::internal::ownsOnlyResourceMemory<std::pmr::vector<std::string>>);
+static_assert(!sc::internal::ownsOnlyResourceMemory<std::pmr::map<int, std::vector<int>>>);
+static_assert(!sc::internal::ownsOnlyResourceMemory<std::pmr::vector<std::pmr::vector<Tracked>>>);
 
 TEST_CASE("Heap: allocations are aligned and do not overlap", "[memory][heap]") {
   sc::Heap heap;

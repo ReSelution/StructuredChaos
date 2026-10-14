@@ -302,7 +302,7 @@ TEST_CASE("Registry Benchmarks: Parallel Reads", "[ecs][registry][threading][!be
           (void) sink;
         },
         nullptr);
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
   };
 
   BENCHMARK("sc: view, 2 components, 10 pool tasks") {
@@ -319,7 +319,7 @@ TEST_CASE("Registry Benchmarks: Parallel Reads", "[ecs][registry][threading][!be
           (void) sink;
         },
         nullptr);
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
   };
 }
 
@@ -359,7 +359,7 @@ TEST_CASE("Registry Benchmarks: Parallel Writes", "[ecs][registry][threading][!b
           }
         },
         nullptr);
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
   };
 
   BENCHMARK("sc: 4 components, 1 thread") {
@@ -388,7 +388,7 @@ TEST_CASE("Registry Benchmarks: Parallel Writes", "[ecs][registry][threading][!b
           }
         },
         nullptr);
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
   };
 
   BENCHMARK("sc: create only, 1 thread") {
@@ -422,7 +422,7 @@ TEST_CASE("Registry Benchmarks: Parallel Writes", "[ecs][registry][threading][!b
 
     std::vector<int> batches(BATCH_COUNT);
     sc::threading::detachBatch(std::move(batches), [&](int batch [[maybe_unused]]) { write_batch(registry); }, nullptr);
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
   };
 
   BENCHMARK("sc: batched, 1 thread") {
@@ -472,7 +472,7 @@ TEST_CASE("Registry Benchmarks: Parallel Writes", "[ecs][registry][threading][!b
     sc::threading::detach([&]() { round_trip(sc_world, BenchVelocity{}); });
     sc::threading::detach([&]() { round_trip(sc_world, BenchHealth{}); });
     sc::threading::detach([&]() { round_trip(sc_world, BenchTeam{}); });
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
   };
 
   BENCHMARK("sc: per component, 1 thread") {

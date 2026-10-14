@@ -1,2 +1,8 @@
 option('enable_chaos_stats', type: 'boolean', value: false, description: 'Enable Chaos Stats')
 option('dump_magpie', type: 'boolean', value: false, description: 'Enable Magpie Dumping')
+option(
+  'mimalloc_new_delete',
+  type: 'boolean',
+  value: true,
+  description: 'Route operator new/delete of every executable that uses sc_dep to mimalloc (Windows only)',
+)

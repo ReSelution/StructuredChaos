@@ -88,7 +88,7 @@ std::vector<int> result = squares.get(); // {1, 4, 9, 16}
 using sc::threading::Priority;
 sc::threading::detach<Priority::Low>([] { /* ... */ });
 
-sc::threading::wait_until_finished();
+sc::threading::waitUntilFinished();
 ```
 
 `detachBatch` does the same for a range and calls an optional callback once
@@ -149,7 +149,7 @@ using DrawCalls = sc::stats::Stat<"Draw Calls", sc::stats::Counter<>>;
 
 DrawCalls::record(3);
 
-sc::stats::report_all<NetLog>(); // logs every stat of the program
+sc::stats::reportAll<NetLog>(); // logs every stat of the program
 ```
 
 Stats are off by default and then cost nothing: every call is an empty
@@ -160,16 +160,17 @@ function. Configure with `-Denable_chaos_stats=true` to turn them on.
 ```cpp
 #include "sc/localizations/magpie_string.hpp"
 
-sc::MagpieKey key{"menu", "start"};
-sc::Magpie::get()->insert(key, "Starten", "menu", "start");
+using namespace sc::literals; // for _t
+
+sc::Magpie::get().insert(sc::MagpieKey{"menu", "start"}, "Starten", "menu", "start");
 
 std::string_view text = "menu:start"_t; // "Starten"
 ```
 
 The `_t` literal hashes namespace and key at compile time, so a lookup at run
 time is one probe into a hash map. For loading large tables from several
-threads, `mt_InsertStored()` fills a thread-local map that `mt_Merge()` then
-moves into the shared one.
+threads, `insertStoredLocal()` fills a thread-local map that `mergeLocal()`
+then moves into the shared one.
 
 ### Hash
 
@@ -177,6 +178,9 @@ moves into the shared one.
 #include "sc/hash/hash.hpp"
 
 constexpr sc::h64 id = sc::hash("player");
+
+using namespace sc::literals;
+static_assert("player"_h == id);
 
 bool same(std::string_view name) { return sc::hash(name) == id; }
 ```
@@ -214,6 +218,7 @@ meson test -C build --benchmark
 | --- | --- | --- |
 | `enable_chaos_stats` | `false` | Compiles the stats in instead of leaving them out |
 | `dump_magpie` | `false` | Keeps namespace and key of every text, for `Magpie::dump()` |
+| `mimalloc_new_delete` | `true` | On Windows, routes `new`/`delete` of every executable that uses `sc_dep` to mimalloc |
 
 ```bash
 meson setup build -Denable_chaos_stats=true

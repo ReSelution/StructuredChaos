@@ -14,6 +14,8 @@
 #include "sc/localizations/magpie_string.hpp"
 #include "sc/localizations/magpie_translator.hpp"
 
+using namespace sc::literals;
+
 // Magpie is one table for the whole process, so every test that touches it
 // starts by emptying it.
 //
@@ -33,13 +35,13 @@ namespace {
 #endif
 
   Magpie &emptyMagpie() {
-    Magpie::get()->clear();
-    return *Magpie::get();
+    Magpie::get().clear();
+    return Magpie::get();
   }
 
   void put(std::string_view ns, std::string_view key, std::string_view text) {
     MagpieKey k{ns, key};
-    Magpie::get()->insert(k, text, ns, key);
+    Magpie::get().insert(k, text, ns, key);
   }
 
   std::string readFile(const std::filesystem::path &path) {
@@ -100,10 +102,10 @@ TEST_CASE("Unknown Texts Are Reported As Missing", "[magpie]") {
   auto &magpie = emptyMagpie();
 
   REQUIRE(magpie.size() == 0);
-  REQUIRE(magpie.translate(MagpieKey("menu", "start")) == Magpie::MissingString);
+  REQUIRE(magpie.translate(MagpieKey("menu", "start")) == Magpie::MISSING_STRING);
   REQUIRE_FALSE(magpie.find(MagpieKey("menu", "start")).has_value());
-  REQUIRE("menu:start"_t.view() == Magpie::MissingString);
-  REQUIRE(MagpieString().view() == Magpie::MissingString);
+  REQUIRE("menu:start"_t.view() == Magpie::MISSING_STRING);
+  REQUIRE(MagpieString().view() == Magpie::MISSING_STRING);
 }
 
 TEST_CASE("Inserted Texts Are Found", "[magpie]") {
@@ -187,23 +189,23 @@ TEST_CASE("The Source Text Stands In For A Missing Translation", "[magpie][strin
   emptyMagpie();
 
   SECTION("Without a translation") {
-    const MagpieString text("menu", "start", "Start");
+    const auto text = MagpieString::withSource("menu", "start", "Start");
 
     REQUIRE(text.key() == MagpieKey("menu", "start"));
     REQUIRE(text.view() == "Start");
   }
 
   SECTION("The translation wins, whenever it arrives") {
-    const MagpieString text("menu", "start", "Start");
+    const auto text = MagpieString::withSource("menu", "start", "Start");
     put("menu", "start", "Starten");
 
     REQUIRE(text.view() == "Starten");
   }
 
   SECTION("Only for the string that knows the source text") {
-    const MagpieString text("menu", "start", "Start");
+    (void) MagpieString::withSource("menu", "start", "Start");
 
-    REQUIRE("menu:start"_t.view() == Magpie::MissingString);
+    REQUIRE("menu:start"_t.view() == Magpie::MISSING_STRING);
   }
 }
 
@@ -283,12 +285,12 @@ TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {
   const MagpieKey key("menu", "start");
 
   SECTION("Not before") {
-    Magpie::mt_InsertStored(key, magpie.storeStr("Starten"), "menu", "start");
+    magpie.insertStoredLocal(key, magpie.storeStr("Starten"), "menu", "start");
 
     REQUIRE(magpie.size() == 0);
     REQUIRE_FALSE(magpie.find(key).has_value());
 
-    magpie.mt_Merge(false);
+    magpie.mergeLocal(sc::MergeMode::KeepExisting);
 
     REQUIRE(magpie.size() == 1);
     REQUIRE(magpie.translate(key) == "Starten");
@@ -296,8 +298,8 @@ TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {
 
   SECTION("Without override the existing text stays") {
     put("menu", "start", "Starten");
-    Magpie::mt_InsertStored(key, magpie.storeStr("Anfangen"), "menu", "start");
-    magpie.mt_Merge(false);
+    magpie.insertStoredLocal(key, magpie.storeStr("Anfangen"), "menu", "start");
+    magpie.mergeLocal(sc::MergeMode::KeepExisting);
 
     REQUIRE(magpie.size() == 1);
     REQUIRE(magpie.translate(key) == "Starten");
@@ -305,8 +307,8 @@ TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {
 
   SECTION("With override the new text replaces it") {
     put("menu", "start", "Starten");
-    Magpie::mt_InsertStored(key, magpie.storeStr("Anfangen"), "menu", "start");
-    magpie.mt_Merge(true);
+    magpie.insertStoredLocal(key, magpie.storeStr("Anfangen"), "menu", "start");
+    magpie.mergeLocal(sc::MergeMode::Override);
 
     REQUIRE(magpie.size() == 1);
     REQUIRE(magpie.translate(key) == "Anfangen");
@@ -314,27 +316,27 @@ TEST_CASE("Thread Local Inserts Appear With The Merge", "[magpie][merge]") {
 
   SECTION("The text is taken as it is, not copied") {
     const auto stored = magpie.storeStrUTF16(u"Gr\u00FC\u00DFe", 5);
-    Magpie::mt_InsertStored(key, stored, "menu", "start");
-    magpie.mt_Merge(false);
+    magpie.insertStoredLocal(key, stored, "menu", "start");
+    magpie.mergeLocal(sc::MergeMode::KeepExisting);
 
     REQUIRE(magpie.translate(key).data() == stored.data());
   }
 
   SECTION("A merge empties the thread's list") {
-    Magpie::mt_InsertStored(key, magpie.storeStr("Starten"), "menu", "start");
-    magpie.mt_Merge(false);
+    magpie.insertStoredLocal(key, magpie.storeStr("Starten"), "menu", "start");
+    magpie.mergeLocal(sc::MergeMode::KeepExisting);
     magpie.clear();
-    magpie.mt_Merge(true);
+    magpie.mergeLocal(sc::MergeMode::Override);
 
     REQUIRE(magpie.size() == 0);
   }
 
   SECTION("Another thread's list is not merged") {
     std::thread([&] {
-      Magpie::mt_reserve(1);
-      Magpie::mt_InsertStored(key, magpie.storeStr("Starten"), "menu", "start");
+      magpie.reserveLocal(1);
+      magpie.insertStoredLocal(key, magpie.storeStr("Starten"), "menu", "start");
     }).join();
-    magpie.mt_Merge(false);
+    magpie.mergeLocal(sc::MergeMode::KeepExisting);
 
     REQUIRE(magpie.size() == 0);
   }
@@ -351,12 +353,12 @@ TEST_CASE("Many Threads Fill The Table", "[magpie][threads]") {
     std::vector<std::thread> workers;
     for (size_t t = 0; t < Threads; ++t) {
       workers.emplace_back([&, t] {
-        Magpie::mt_reserve(PerThread);
+        magpie.reserveLocal(PerThread);
         for (size_t i = 0; i < PerThread; ++i) {
           const std::string text = name(t, i);
-          Magpie::mt_InsertStored(MagpieKey("load", text), magpie.storeStr(text), "load", text);
+          magpie.insertStoredLocal(MagpieKey("load", text), magpie.storeStr(text), "load", text);
         }
-        magpie.mt_Merge(false);
+        magpie.mergeLocal(sc::MergeMode::KeepExisting);
       });
     }
     for (auto &worker: workers) {
@@ -382,7 +384,7 @@ TEST_CASE("Many Threads Fill The Table", "[magpie][threads]") {
           magpie.insert(key, text, "load", text);
           // Either missing or complete, never half written.
           const auto found = magpie.translate(MagpieKey("load", name(0, i / 2)));
-          if (found != Magpie::MissingString && found != name(0, i / 2)) {
+          if (found != Magpie::MISSING_STRING && found != name(0, i / 2)) {
             FAIL_CHECK("read a damaged text");
           }
         }
@@ -409,7 +411,7 @@ TEST_CASE("Clear Forgets Everything", "[magpie]") {
   magpie.clear();
 
   REQUIRE(magpie.size() == 0);
-  REQUIRE("menu:start"_t.view() == Magpie::MissingString);
+  REQUIRE("menu:start"_t.view() == Magpie::MISSING_STRING);
 
   SECTION("And can be filled again") {
     put("menu", "start", "Anfangen");

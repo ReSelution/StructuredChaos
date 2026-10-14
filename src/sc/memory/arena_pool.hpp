@@ -1,10 +1,6 @@
-//
-// Created by oleub on 05.03.26.
-//
-
 #pragma once
+#include <cstddef>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 #include "sc/memory/monotonic_resource.hpp"
@@ -12,22 +8,37 @@
 
 namespace sc {
 
+  // Keeps arenas that were released for the next acquire, so that their
+  // blocks need not be taken from the system again.
+  //
+  // acquire() and release() may be called from several threads at the same
+  // time.
   class ArenaPool {
-    static constexpr size_t DEFAULT_SIZE = size_t{16} * 1024;
-    static constexpr size_t MAX_LOADED_ARENAS = 1024;
-
   public:
-    static void init(size_t poolSize, size_t arenaSize = DEFAULT_SIZE);
+    static constexpr size_t DEFAULT_ARENA_SIZE = size_t{16} * 1024;
+    // Arenas released beyond this are freed instead of kept.
+    static constexpr size_t MAX_KEPT_ARENAS = 1024;
 
-    static std::unique_ptr<MonotonicResource> acquire();
+    // Starts with poolSize arenas of arenaSize bytes each.
+    explicit ArenaPool(size_t poolSize = 0, size_t arenaSize = DEFAULT_ARENA_SIZE);
 
-    static void release(std::unique_ptr<MonotonicResource> &resource);
-    static size_t getBufferSize();
+    ArenaPool(const ArenaPool &) = delete;
+    ArenaPool &operator=(const ArenaPool &) = delete;
+
+    // A kept arena, or a new one if there is none.
+    [[nodiscard]] std::unique_ptr<MonotonicResource> acquire();
+
+    // Resets the arena, which destroys what it holds, and keeps it for the
+    // next acquire().
+    void release(std::unique_ptr<MonotonicResource> arena);
+
+    [[nodiscard]] size_t arenaSize() const noexcept { return m_arenaSize; }
 
   private:
-    static inline std::vector<std::unique_ptr<MonotonicResource>> m_storage;
-    static inline SpinLock m_lock;
-    static inline size_t m_defaultSize = DEFAULT_SIZE;
-    static inline std::mutex m_initLock;
+    const size_t m_arenaSize;
+    SpinLock m_lock;
+    // Reserved for MAX_KEPT_ARENAS up front, so that nothing is allocated
+    // while the spin lock is held.
+    std::vector<std::unique_ptr<MonotonicResource>> m_arenas;
   };
 } // namespace sc

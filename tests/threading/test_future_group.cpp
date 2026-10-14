@@ -54,8 +54,8 @@ TEST_CASE("FutureGroup Empty Group", "[threading][future_group]") {
 
   REQUIRE(group.empty());
   REQUIRE(group.empty());
-  REQUIRE(group.valid_count() == 0);
-  REQUIRE(group.completed_count() == 0);
+  REQUIRE(group.validCount() == 0);
+  REQUIRE(group.completedCount() == 0);
   REQUIRE(group.ready());
   REQUIRE(group.progress() == 1.0f);
 
@@ -70,23 +70,23 @@ TEST_CASE("FutureGroup Tracks Completion", "[threading][future_group]") {
 
     REQUIRE(group.size() == 4);
     REQUIRE_FALSE(group.empty());
-    REQUIRE(group.valid_count() == 4);
-    REQUIRE(group.completed_count() == 0);
+    REQUIRE(group.validCount() == 4);
+    REQUIRE(group.completedCount() == 0);
     REQUIRE_FALSE(group.ready());
     REQUIRE(group.progress() == 0.0f);
 
     pending.promises[2].set_value(2);
-    REQUIRE(group.completed_count() == 1);
+    REQUIRE(group.completedCount() == 1);
     REQUIRE(group.progress() == 0.25f);
     REQUIRE_FALSE(group.ready());
 
     pending.promises[0].set_value(0);
-    REQUIRE(group.completed_count() == 2);
+    REQUIRE(group.completedCount() == 2);
     REQUIRE(group.progress() == 0.5f);
 
     pending.promises[1].set_value(1);
     pending.promises[3].set_value(3);
-    REQUIRE(group.completed_count() == 4);
+    REQUIRE(group.completedCount() == 4);
     REQUIRE(group.progress() == 1.0f);
     REQUIRE(group.ready());
   }
@@ -96,7 +96,7 @@ TEST_CASE("FutureGroup Tracks Completion", "[threading][future_group]") {
 
     pending.promises[0].set_exception(std::make_exception_ptr(std::runtime_error("failed")));
 
-    REQUIRE(pending.group.completed_count() == 1);
+    REQUIRE(pending.group.completedCount() == 1);
     REQUIRE_FALSE(pending.group.ready());
   }
 
@@ -118,8 +118,8 @@ TEST_CASE("FutureGroup Tracks Completion", "[threading][future_group]") {
     group.push(p.get_future());
 
     REQUIRE(group.size() == 2);
-    REQUIRE(group.valid_count() == 1);
-    REQUIRE(group.completed_count() == 1);
+    REQUIRE(group.validCount() == 1);
+    REQUIRE(group.completedCount() == 1);
     REQUIRE_FALSE(group.ready());
 
     p.set_value(7);
@@ -150,7 +150,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
     REQUIRE(group.get().size() == 3);
 
     REQUIRE(group.size() == 3);
-    REQUIRE(group.valid_count() == 0);
+    REQUIRE(group.validCount() == 0);
     REQUIRE(group.ready());
     REQUIRE(group.get().empty());
   }
@@ -163,7 +163,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
 
     REQUIRE(pending.group.ready());
     pending.group.get();
-    REQUIRE(pending.group.valid_count() == 0);
+    REQUIRE(pending.group.validCount() == 0);
   }
 
   SECTION("Move-Only Results") {
@@ -186,7 +186,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
 
     REQUIRE_THROWS_AS(pending.group.get(), std::runtime_error);
     // The futures behind the failing one are consumed as well.
-    REQUIRE(pending.group.valid_count() == 0);
+    REQUIRE(pending.group.validCount() == 0);
     REQUIRE(pending.group.get().empty());
   }
 
@@ -198,7 +198,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
     pending.promises[0].set_value(1);
 
     REQUIRE_THROWS_AS(pending.group.get(), std::runtime_error);
-    REQUIRE(pending.group.valid_count() == 0);
+    REQUIRE(pending.group.validCount() == 0);
   }
 
   SECTION("get Waits For The Remaining Futures Before Rethrowing") {
@@ -215,7 +215,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
 
     REQUIRE_THROWS_AS(pending.group.get(), std::runtime_error);
     REQUIRE(all_resolved.load(std::memory_order_acquire));
-    REQUIRE(pending.group.valid_count() == 0);
+    REQUIRE(pending.group.validCount() == 0);
     producer.join();
   }
 
@@ -225,7 +225,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
     pending.promises[1].set_exception(std::make_exception_ptr(std::runtime_error("failed")));
 
     REQUIRE_THROWS_AS(pending.group.get(), std::runtime_error);
-    REQUIRE(pending.group.valid_count() == 0);
+    REQUIRE(pending.group.validCount() == 0);
   }
 
   SECTION("Void get Consumes The Futures Behind A Failure") {
@@ -235,7 +235,7 @@ TEST_CASE("FutureGroup Collects Results", "[threading][future_group]") {
     pending.promises[2].set_value();
 
     REQUIRE_THROWS_AS(pending.group.get(), std::runtime_error);
-    REQUIRE(pending.group.valid_count() == 0);
+    REQUIRE(pending.group.validCount() == 0);
   }
 }
 
@@ -256,7 +256,7 @@ TEST_CASE("FutureGroup Blocks Until Done", "[threading][future_group]") {
     REQUIRE(resolved.load(std::memory_order_acquire) == 8);
     REQUIRE(pending.group.ready());
     // wait does not consume.
-    REQUIRE(pending.group.valid_count() == 8);
+    REQUIRE(pending.group.validCount() == 8);
 
     producer.join();
   }
@@ -382,10 +382,10 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
   SECTION("Becomes Ready Once The Pool Is Idle") {
     auto group = sc::threading::enqueueBatch(std::move(tasks), [](int value) { return value; });
 
-    sc::threading::wait_until_finished();
+    sc::threading::waitUntilFinished();
 
     REQUIRE(group.ready());
-    REQUIRE(group.completed_count() == task_count);
+    REQUIRE(group.completedCount() == task_count);
     REQUIRE(group.progress() == 1.0f);
   }
 
@@ -400,8 +400,8 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
     group.wait();
     REQUIRE(group.ready());
     REQUIRE_THROWS_AS(group.get(), std::runtime_error);
-    REQUIRE(group.valid_count() == 0);
-    sc::threading::wait_until_finished();
+    REQUIRE(group.validCount() == 0);
+    sc::threading::waitUntilFinished();
   }
 
   SECTION("A Throwing Task On The Merged Path Surfaces Through get") {
@@ -416,7 +416,7 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
     });
 
     REQUIRE_THROWS_AS(group.get(), std::runtime_error);
-    REQUIRE(group.valid_count() == 0);
-    sc::threading::wait_until_finished();
+    REQUIRE(group.validCount() == 0);
+    sc::threading::waitUntilFinished();
   }
 }

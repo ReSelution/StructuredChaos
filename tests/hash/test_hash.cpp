@@ -11,6 +11,8 @@
 
 #include "sc/hash/hash.hpp"
 
+using namespace sc::literals;
+
 namespace {
 
   constexpr size_t MAX_LENGTH = 300;
@@ -225,16 +227,16 @@ TEST_CASE("Lowercase Hash", "[hash]") {
   }
 }
 
-TEST_CASE("IdentityHash", "[hash]") {
+TEST_CASE("TransparentHash", "[hash]") {
   SECTION("Passes Numbers Through And Hashes Strings") {
-    sc::IdentityHash hasher;
+    sc::TransparentHash hasher;
     REQUIRE(hasher(uint64_t{0x1234}) == 0x1234);
     REQUIRE(hasher(std::string_view{"abc"}) == sc::hash(std::string_view{"abc"}));
     REQUIRE(hasher(std::string{"abc"}) == hasher(std::string_view{"abc"}));
   }
 
   SECTION("Looks Up A String Key By View") {
-    std::unordered_map<std::string, int, sc::IdentityHash, std::equal_to<>> map;
+    std::unordered_map<std::string, int, sc::TransparentHash, std::equal_to<>> map;
     map.emplace("Desc_IronPlate_C", 7);
 
     const std::string_view key = "Desc_IronPlate_C";

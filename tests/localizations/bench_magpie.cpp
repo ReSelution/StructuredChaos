@@ -44,7 +44,7 @@ namespace {
 
 TEST_CASE("Benchmark: storing texts", "[!benchmark][magpie]") {
   constexpr size_t COUNT = 10'000;
-  auto &magpie = *Magpie::get();
+  auto &magpie = Magpie::get();
   const auto texts = make_texts(COUNT, 0);
 
   BENCHMARK("storeStr: 10000 texts, then clear") {
@@ -79,23 +79,23 @@ TEST_CASE("Benchmark: storing texts", "[!benchmark][magpie]") {
 TEST_CASE("Benchmark: filling the table from several threads", "[!benchmark][magpie]") {
   constexpr size_t THREADS = 8;
   constexpr size_t PER_THREAD = 5'000;
-  auto &magpie = *Magpie::get();
+  auto &magpie = Magpie::get();
 
   std::vector<std::vector<Text>> texts;
   for (size_t t = 0; t < THREADS; ++t) {
     texts.push_back(make_texts(PER_THREAD, t));
   }
 
-  BENCHMARK("mt_InsertStored + mt_Merge: 8 threads x 5000, then clear") {
+  BENCHMARK("insertStoredLocal + mergeLocal: 8 threads x 5000, then clear") {
     {
       std::vector<std::jthread> workers;
       for (size_t t = 0; t < THREADS; ++t) {
         workers.emplace_back([&, t] {
-          Magpie::mt_reserve(PER_THREAD);
+          magpie.reserveLocal(PER_THREAD);
           for (const Text &text: texts[t]) {
-            Magpie::mt_InsertStored(MagpieKey("bench", text.key), magpie.storeStr(text.value), "bench", text.key);
+            magpie.insertStoredLocal(MagpieKey("bench", text.key), magpie.storeStr(text.value), "bench", text.key);
           }
-          magpie.mt_Merge(false);
+          magpie.mergeLocal(sc::MergeMode::KeepExisting);
         });
       }
     }

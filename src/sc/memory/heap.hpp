@@ -1,7 +1,7 @@
 #pragma once
 
-#include <algorithm>
-#include <atomic>
+#include <bit>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -13,6 +13,7 @@
 
 #include <mimalloc.h>
 
+#include "sc/memory/cleanup_list.hpp"
 #include "sc/memory/pmr_traits.hpp"
 
 namespace sc {
@@ -36,18 +37,6 @@ namespace sc {
   // Cannot be copied or moved: pmr containers keep the address of the heap as
   // their resource.
   class Heap final : public std::pmr::memory_resource {
-    // Remembers one object that needs its destructor run. Lies in the block of
-    // the object, right behind it, so that the object itself starts the block
-    // and takes its alignment from there.
-    struct CleanupNode {
-      void (*destroy)(CleanupNode *) noexcept;
-      CleanupNode *next;
-    };
-
-    // Distance from the object to its node.
-    template<typename T>
-    static constexpr size_t nodeOffset = (sizeof(T) + alignof(CleanupNode) - 1) & ~(alignof(CleanupNode) - 1);
-
   public:
     Heap() : m_heap(create()) {}
 
@@ -65,6 +54,7 @@ namespace sc {
     // virtual call.
     // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
     [[nodiscard]] void *allocate(size_t size, size_t align = alignof(std::max_align_t)) {
+      assert(std::has_single_bit(align) && "the alignment has to be a power of two");
       return checked(align <= alignof(std::max_align_t) ? mi_heap_malloc(m_heap, size)
                                                         : mi_heap_malloc_aligned(m_heap, size, align));
     }
@@ -91,7 +81,7 @@ namespace sc {
       } else {
         void *block = allocateWithNode<T>();
         T *object = construct<T>(block, std::forward<Args>(args)...);
-        remember<T>(block);
+        m_cleanup.remember<T>(block);
         return object;
       }
     }
@@ -104,13 +94,13 @@ namespace sc {
       requires std::uses_allocator_v<T, std::pmr::polymorphic_allocator<>>
     T *makePmr(Args &&...args) {
       const std::pmr::polymorphic_allocator<> allocator(this);
-      if constexpr (detail::ownsOnlyResourceMemory<T>) {
+      if constexpr (internal::ownsOnlyResourceMemory<T>) {
         void *block = allocate<alignof(T)>(sizeof(T));
         return constructPmr<T>(block, allocator, std::forward<Args>(args)...);
       } else {
         void *block = allocateWithNode<T>();
         T *object = constructPmr<T>(block, allocator, std::forward<Args>(args)...);
-        remember<T>(block);
+        m_cleanup.remember<T>(block);
         return object;
       }
     }
@@ -144,10 +134,12 @@ namespace sc {
     }
 
     // Destroys the objects from make() and frees everything that was
-    // allocated from the heap.
+    // allocated from the heap. The new heap is created first: if that fails,
+    // nothing has changed.
     void reset() {
+      mi_heap_t *fresh = create();
       destroy();
-      m_heap = create();
+      m_heap = fresh;
     }
 
   private:
@@ -162,8 +154,7 @@ namespace sc {
     // Room for an object and the node behind it.
     template<typename T>
     void *allocateWithNode() {
-      constexpr size_t Align = std::max(alignof(T), alignof(CleanupNode));
-      return allocate<Align>(nodeOffset<T> + sizeof(CleanupNode));
+      return allocate<internal::CleanupList::blockAlignment<T>>(internal::CleanupList::blockSize<T>);
     }
 
     // Gives the block back if the constructor throws.
@@ -185,22 +176,6 @@ namespace sc {
       } catch (...) {
         mi_free(block);
         throw;
-      }
-    }
-
-    // Puts the object of a block from allocateWithNode() on the list. Only an
-    // object that exists is remembered.
-    template<typename T>
-    void remember(void *block) noexcept {
-      auto *node = new (static_cast<std::byte *>(block) + nodeOffset<T>)
-          CleanupNode{.destroy =
-                          [](CleanupNode *n) noexcept {
-                            void *start = reinterpret_cast<std::byte *>(n) - nodeOffset<T>;
-                            std::launder(static_cast<T *>(start))->~T();
-                          },
-                      .next = m_cleanup.load(std::memory_order_relaxed)};
-      while (!m_cleanup.compare_exchange_weak(node->next, node, std::memory_order_release, std::memory_order_relaxed)) {
-        ;
       }
     }
 
@@ -227,20 +202,8 @@ namespace sc {
       return heap;
     }
 
-    // Newest first. Runs again for what a destructor created meanwhile.
-    void runCleanups() noexcept {
-      while (CleanupNode *node = m_cleanup.exchange(nullptr, std::memory_order_acq_rel)) {
-        while (node != nullptr) {
-          // The destructor may not touch the node, but read it first anyway.
-          CleanupNode *next = node->next;
-          node->destroy(node);
-          node = next;
-        }
-      }
-    }
-
     void destroy() noexcept {
-      runCleanups();
+      m_cleanup.runAll();
       if (m_heap != nullptr) {
         mi_heap_destroy(m_heap);
         m_heap = nullptr;
@@ -248,6 +211,6 @@ namespace sc {
     }
 
     mi_heap_t *m_heap;
-    std::atomic<CleanupNode *> m_cleanup{nullptr};
+    internal::CleanupList m_cleanup;
   };
 } // namespace sc

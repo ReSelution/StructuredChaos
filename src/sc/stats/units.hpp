@@ -10,12 +10,13 @@ namespace sc::stats {
 
   struct DataUnits {
     static constexpr double base = 1024.0;
-    static constexpr std::array suffixes{"B", "KB", "MB", "GB", "TB", "PB"};
+    static constexpr std::array suffixes{"B", "KiB", "MiB", "GiB", "TiB", "PiB"};
   };
 
   struct MetricUnits {
     static constexpr double base = 1000.0;
-    static constexpr std::array suffixes{"", "K", "M", "B", "T"}; // for counts (1K, 1M...)
+    // SI prefixes for counts. "B" for billion would read as bytes.
+    static constexpr std::array suffixes{"", "K", "M", "G", "T"};
   };
 
   template<typename System>

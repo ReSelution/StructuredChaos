@@ -1,114 +1,44 @@
 #pragma once
 
-#include <array>
 #include <atomic>
+#include <exception>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include <spdlog/pattern_formatter.h>
-#include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/spdlog.h>
+#include <spdlog/logger.h>
 
 #include "sc/stats/timer.hpp"
 #include "sc/util/fixed_string.hpp"
 
 namespace sc {
 
-  namespace internal {
-
-    struct LogState {
-      std::mutex mutex;
-      std::filesystem::path directory{"logs"};
-      // File sink per module, null where the file could not be opened.
-      std::unordered_map<std::string, spdlog::sink_ptr> fileSinks;
-    };
-
-    inline LogState &logState() {
-      static LogState state;
-      return state;
-    }
-
-    // Pattern flag that prints "[category] " for a logger named
-    // "module:category" and nothing for a logger without category. It lets all
-    // loggers of a module write to one file sink with one pattern.
-    class LogCategoryFlag final : public spdlog::custom_flag_formatter {
-    public:
-      void format(const spdlog::details::log_msg &msg, const std::tm &, spdlog::memory_buf_t &dest) override {
-        const std::string_view name{msg.logger_name.data(), msg.logger_name.size()};
-        const size_t separator = name.find(':');
-        if (separator == std::string_view::npos) {
-          return;
-        }
-        const std::string_view category = name.substr(separator + 1);
-        dest.push_back('[');
-        dest.append(category.data(), category.data() + category.size());
-        dest.push_back(']');
-        dest.push_back(' ');
-      }
-
-      [[nodiscard]] std::unique_ptr<spdlog::custom_flag_formatter> clone() const override {
-        return std::make_unique<LogCategoryFlag>();
-      }
-    };
-
-    // The file sink of a module, shared by all of its loggers: two sinks on the
-    // same file would each truncate it and write over one another. Returns null
-    // if the file cannot be opened; the module then only logs to the console.
-    inline spdlog::sink_ptr logFileSink(const std::string &module) {
-      LogState &state = logState();
-      std::scoped_lock lock(state.mutex);
-
-      if (const auto it = state.fileSinks.find(module); it != state.fileSinks.end()) {
-        return it->second;
-      }
-
-      spdlog::sink_ptr sink;
-      try {
-        std::error_code ec;
-        std::filesystem::create_directories(state.directory, ec);
-
-        auto fileSink =
-            std::make_shared<spdlog::sinks::basic_file_sink_mt>((state.directory / (module + ".log")).string(), true);
-        fileSink->set_level(spdlog::level::trace);
-
-        auto formatter = std::make_unique<spdlog::pattern_formatter>();
-        formatter->add_flag<LogCategoryFlag>('*').set_pattern("[%T] %*[%l]: %v");
-        fileSink->set_formatter(std::move(formatter));
-
-        sink = std::move(fileSink);
-      } catch (const spdlog::spdlog_ex &) { // NOLINT(bugprone-empty-catch)
-        // Logging must not take the program down because a directory is missing
-        // or read-only.
-      }
-
-      state.fileSinks.emplace(module, sink);
-      return sink;
-    }
-
-  } // namespace internal
+  using LogLevel = spdlog::level::level_enum;
 
   // Directory the log files are written to, "logs" below the working directory
   // by default. Applies to every module that has not logged yet.
-  inline void setLogDirectory(std::filesystem::path directory) {
-    internal::LogState &state = internal::logState();
-    std::scoped_lock lock(state.mutex);
-    state.directory = std::move(directory);
-  }
+  void setLogDirectory(std::filesystem::path directory);
 
-  inline std::filesystem::path logDirectory() {
-    internal::LogState &state = internal::logState();
-    std::scoped_lock lock(state.mutex);
-    return state.directory;
-  }
+  [[nodiscard]] std::filesystem::path logDirectory();
+
+  // Flushes and drops every logger of the process. Logging afterwards still
+  // works through the loggers that already exist. A logger that is used for
+  // the first time afterwards is set up anew and writes to the same file as
+  // the other loggers of its module.
+  void shutdownLogging();
+
+  namespace internal {
+    // The logger "module" or "module:category", created with a console sink of
+    // the given level and the file sink of the module, or the one that is
+    // registered with spdlog under that name already.
+    [[nodiscard]] std::shared_ptr<spdlog::logger> makeLogger(std::string_view module, std::string_view category,
+                                                             LogLevel consoleLevel);
+  } // namespace internal
 
   // Logger of a module, optionally with a category:
   //   using NetLog = sc::Logger<"Net">;
@@ -122,12 +52,11 @@ namespace sc {
   class Logger {
 
   public:
-    using LogLevel = spdlog::level::level_enum;
+    using LogLevel = sc::LogLevel;
 
     // Sets the logger up with the given console level. Only the first call has
     // an effect; logging without it uses the default level.
     static void init(LogLevel level = spdlog::level::info);
-    static void shutdown() { spdlog::shutdown(); }
     // Writes everything logged so far to the file. Happens on its own for
     // warnings and above.
     static void flush() { get()->flush(); }
@@ -172,161 +101,105 @@ namespace sc {
       stats<StatsTypes...>(LogLevel::info, fmt, std::forward<Args>(args)...);
     }
 
+    // Logs the message together with the current values of the stats. Without
+    // any stat there is nothing to report, and nothing is logged.
     template<typename... StatsTypes, typename... Args>
     static void stats(LogLevel level, spdlog::format_string_t<Args...> fmt, Args &&...args) {
-      if constexpr (sizeof...(StatsTypes) == 0) {
-        return;
+      if constexpr (sizeof...(StatsTypes) != 0) {
+        std::vector<std::pair<std::string_view, std::string>> collected;
+        collected.reserve(sizeof...(StatsTypes));
+        (collected.emplace_back(StatsTypes::name(), StatsTypes::str()), ...);
+
+        const std::string userMessage = spdlog::fmt_lib::format(fmt, std::forward<Args>(args)...);
+        logStats(level, userMessage, collected);
       }
-
-      std::vector<std::pair<std::string_view, std::string>> collected;
-      collected.reserve(sizeof...(StatsTypes));
-
-      (collected.emplace_back(StatsTypes::name(), StatsTypes::str()), ...);
-
-      std::string user_msg = spdlog::fmt_lib::format(fmt, std::forward<Args>(args)...);
-
-      log_stats_impl(level, user_msg, collected);
     }
 
     // Timer
     template<typename... Args>
-    [[nodiscard]] static auto time(std::string_view fmt_str, Args &&...args) {
-      return time(spdlog::level::info, fmt_str, std::forward<Args>(args)...);
+    [[nodiscard]] static auto time(std::string_view fmt, Args &&...args) {
+      return time(spdlog::level::info, fmt, std::forward<Args>(args)...);
     }
 
     // The timer logs when it is destroyed, which is after this call returned.
-    // Arguments passed as lvalues are kept as references and read only then,
-    // so the line shows the values they have at the end of the measurement;
-    // they have to outlive the timer. Temporaries and the format string are
-    // copied.
+    // The first placeholder receives the duration. Arguments passed as lvalues
+    // are kept as references and read only then, so the line shows the values
+    // they have at the end of the measurement; they have to outlive the timer.
+    // Temporaries and the format string are copied.
+    //
+    // The format string may be built at run time, so it is only checked then.
+    // A broken one logs an error instead of the line.
     template<typename... Args>
-    [[nodiscard]] static auto time(spdlog::level::level_enum level, std::string_view fmt_str, Args &&...args) {
-      return sc::stats::Timer([level, format = std::string(fmt_str),
+    [[nodiscard]] static auto time(LogLevel level, std::string_view fmt, Args &&...args) {
+      return sc::stats::Timer([level, format = std::string(fmt),
                                kept = std::tuple<Args...>(std::forward<Args>(args)...)](sc::stats::TimeResult res) {
-        std::string timeStr = spdlog::fmt_lib::format("{:.2f}{}", res.value, res.suffix);
-        std::apply(
-            [&](const auto &...values) { get()->log(level, spdlog::fmt_lib::runtime(format), timeStr, values...); },
-            kept);
+        const std::string duration = spdlog::fmt_lib::format("{:.2f}{}", res.value, res.suffix);
+        try {
+          std::apply(
+              [&](const auto &...values) { get()->log(level, spdlog::fmt_lib::runtime(format), duration, values...); },
+              kept);
+        } catch (const std::exception &e) {
+          get()->error("Cannot format the timer line \"{}\": {}", format, e.what());
+        }
       });
     }
 
   private:
     static spdlog::logger *get();
-    static inline std::shared_ptr<spdlog::logger> logger = nullptr;
-    static inline std::atomic<spdlog::logger *> rawLogger{nullptr};
-    static inline std::mutex initMutex;
 
-    static void log_stats_impl(LogLevel level, std::string_view user_msg,
-                               const std::vector<std::pair<std::string_view, std::string>> &collected_stats) {
-      if (collected_stats.empty() && user_msg.empty()) {
-        return;
-      }
+    // s_owner keeps the logger alive, also after shutdownLogging() dropped it
+    // from spdlog's registry. s_logger is the same logger for the fast path,
+    // which only needs an atomic load instead of a shared_ptr copy.
+    static inline std::shared_ptr<spdlog::logger> s_owner = nullptr;
+    static inline std::atomic<spdlog::logger *> s_logger{nullptr};
+    static inline std::mutex s_initMutex;
 
-      std::string stats_msg;
-      if (!collected_stats.empty()) {
-        stats_msg.reserve(collected_stats.size() * 64);
-        bool first = true;
-        for (const auto &[name, value_str]: collected_stats) {
-          if (!first) {
-            stats_msg += " | ";
-          }
-          stats_msg += name;
-          stats_msg += ": ";
-          stats_msg += value_str;
-          first = false;
+    static void logStats(LogLevel level, std::string_view userMessage,
+                         const std::vector<std::pair<std::string_view, std::string>> &collected) {
+      std::string statsMessage;
+      for (const auto &[name, value]: collected) {
+        if (!statsMessage.empty()) {
+          statsMessage += " | ";
         }
+        statsMessage += name;
+        statsMessage += ": ";
+        statsMessage += value;
       }
 
-      bool has_user = !user_msg.empty();
-      bool has_stats = !stats_msg.empty();
-
-      if (has_user && has_stats) {
-        get()->log(level, "{} -> [{}]", user_msg, stats_msg);
-      } else if (has_stats) {
-        get()->log(level, "[{}]", stats_msg);
-      } else if (has_user) {
-        get()->log(level, "{}", user_msg);
+      const bool hasUser = !userMessage.empty();
+      const bool hasStats = !statsMessage.empty();
+      if (hasUser && hasStats) {
+        get()->log(level, "{} -> [{}]", userMessage, statsMessage);
+      } else if (hasStats) {
+        get()->log(level, "[{}]", statsMessage);
+      } else if (hasUser) {
+        get()->log(level, "{}", userMessage);
       }
     }
   };
 
   template<FixedString M, FixedString C>
   spdlog::logger *Logger<M, C>::get() {
-    auto *ptr = rawLogger.load(std::memory_order_acquire);
+    auto *ptr = s_logger.load(std::memory_order_acquire);
     if (ptr == nullptr) [[unlikely]] {
       init();
-      ptr = rawLogger.load(std::memory_order_acquire);
+      ptr = s_logger.load(std::memory_order_acquire);
     }
     return ptr;
   }
 
   template<FixedString M, FixedString C>
-  void Logger<M, C>::init(spdlog::level::level_enum level) {
-    if (rawLogger.load(std::memory_order_acquire) != nullptr) {
+  void Logger<M, C>::init(LogLevel level) {
+    if (s_logger.load(std::memory_order_acquire) != nullptr) {
       return;
     }
 
-    std::scoped_lock lock(initMutex);
-    if (logger) {
+    std::scoped_lock lock(s_initMutex);
+    if (s_owner) {
       return;
     }
-
-    constexpr bool hasCat = (C.text() != NoCat.text());
-
-    std::string logerName;
-    size_t nameReserve = M.text().size();
-    if constexpr (hasCat) {
-      nameReserve += C.text().size() + 1;
-    }
-
-    logerName.reserve(nameReserve);
-    logerName += M.text();
-    if constexpr (hasCat) {
-      logerName += ":";
-      logerName += C.text();
-    }
-
-    auto spdLogger = spdlog::get(logerName);
-    if (spdLogger) {
-      logger = spdLogger;
-      rawLogger.store(logger.get(), std::memory_order_release);
-      return;
-    }
-
-    auto consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    consoleSink->set_level(level);
-
-    std::string conPattern;
-    size_t conReserve = M.text().size() + 16;
-    if constexpr (hasCat) {
-      conReserve += C.text().size() + 3;
-    }
-
-    conPattern.reserve(conReserve);
-    conPattern += "[";
-    conPattern += M.text();
-    conPattern += "]";
-    if constexpr (hasCat) {
-      conPattern += " [";
-      conPattern += C.text();
-      conPattern += "]";
-    }
-    conPattern += ": %v%$";
-    consoleSink->set_pattern(conPattern);
-
-    std::vector<spdlog::sink_ptr> sinks{consoleSink};
-    if (auto fileSink = internal::logFileSink(std::string(M.text()))) {
-      sinks.push_back(std::move(fileSink));
-    }
-
-    logger = std::make_shared<spdlog::logger>(logerName, sinks.begin(), sinks.end());
-    // The sinks decide what they show. The logger itself has to let everything
-    // through, or the file would never see debug and trace messages.
-    logger->set_level(spdlog::level::trace);
-    logger->flush_on(spdlog::level::warn);
-
-    spdlog::register_logger(logger);
-    rawLogger.store(logger.get(), std::memory_order_release);
+    s_owner = internal::makeLogger(M.text(), C.text(), level);
+    s_logger.store(s_owner.get(), std::memory_order_release);
   }
 
 } // namespace sc
