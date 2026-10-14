@@ -15,6 +15,19 @@ namespace sc::threading {
 
   void wait_until_finished();
 
+  // Does one piece of the work that is waiting in the pool, on the calling
+  // thread, and returns whether there was any. In the order a pool thread
+  // takes it: a parallelFor loop that has room for helpers first, worked on
+  // until nothing of it is left to take, then a task of the queues, then one
+  // of the store of another thread.
+  //
+  // For a thread that waits for something another thread does and would
+  // otherwise only yield. The piece is done to its end before this returns,
+  // even if what the caller waits for is there long before: a whole task can
+  // take much longer than the wait. Exceptions stay inside the task, as on a
+  // pool thread. Before init there is nothing to help.
+  bool helpThread();
+
   /// @brief Id of the calling thread: 0 for the thread that called init and
   /// for threads outside the pool, a positive number for pool workers.
   [[nodiscard]] inline int32_t thread_id() noexcept { return impl::threadId; }

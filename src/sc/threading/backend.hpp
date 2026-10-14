@@ -123,6 +123,9 @@ namespace sc::threading::impl {
   // is void. Only for threads that have nothing else to do.
   bool helpParallel();
 
+  // See sc::threading::helpThread().
+  bool help_impl();
+
   // Closes the slot, which makes the tickets nobody has taken void, and
   // returns once the threads that are inside the loop have left it. Does not
   // work on anything in the meantime: what is left of the loop is the chunk

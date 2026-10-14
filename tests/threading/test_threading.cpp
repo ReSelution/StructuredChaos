@@ -513,6 +513,103 @@ TEST_CASE("Threading Parallel For", "[threading][parallel_for]") {
   }
 }
 
+TEST_CASE("Threading Help Thread", "[threading][help]") {
+  sc::threading::init();
+  sc::threading::wait_until_finished();
+
+  // Keeps every pool thread inside a task until release is set, so that only
+  // the test thread can take what comes after. False if not all of them got
+  // there in time.
+  const size_t workers = sc::threading::impl::threads.size();
+  if (workers == 0) {
+    SKIP("No pool threads to keep busy");
+  }
+  std::atomic<size_t> blocked{0};
+  std::atomic<bool> release{false};
+  const auto blockWorkers = [&] {
+    for (size_t i = 0; i < workers; ++i) {
+      sc::threading::detach([&] {
+        blocked.fetch_add(1);
+        while (!release.load()) {
+          std::this_thread::yield();
+        }
+      });
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (blocked.load() < workers && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::yield();
+    }
+    return blocked.load() == workers;
+  };
+  const auto releaseWorkers = [&] {
+    release.store(true);
+    sc::threading::wait_until_finished();
+  };
+
+  SECTION("Nothing To Do") { REQUIRE(!sc::threading::helpThread()); }
+
+  SECTION("Takes A Task") {
+    REQUIRE(blockWorkers());
+    std::thread::id ranOn;
+    sc::threading::detach([&] { ranOn = std::this_thread::get_id(); });
+    const bool helped = sc::threading::helpThread();
+    const bool nothingLeft = !sc::threading::helpThread();
+    releaseWorkers();
+    REQUIRE(helped);
+    REQUIRE(ranOn == std::this_thread::get_id());
+    REQUIRE(nothingLeft);
+  }
+
+  SECTION("A Task That Throws Stays Inside It") {
+    REQUIRE(blockWorkers());
+    sc::threading::detach([] { throw std::runtime_error("task"); });
+    bool helped = false;
+    bool threw = false;
+    try {
+      helped = sc::threading::helpThread();
+    } catch (...) {
+      threw = true;
+    }
+    // Would not return if the task were still outstanding.
+    releaseWorkers();
+    REQUIRE(helped);
+    REQUIRE(!threw);
+  }
+
+  SECTION("Joins A parallelFor") {
+    REQUIRE(blockWorkers());
+    // The owner is a thread outside the pool. Whoever takes the first of the
+    // two chunks waits in it until the other one is taken as well: besides
+    // the owner only the test thread can do that, through the ticket the loop
+    // handed out. Which of the two gets the first chunk is up to timing.
+    std::atomic<int> started{0};
+    std::array<std::thread::id, 2> ranOn;
+    std::thread owner([&] {
+      sc::threading::parallelFor(2, 1, [&](size_t first, size_t) {
+        ranOn[first] = std::this_thread::get_id();
+        if (started.fetch_add(1) == 0) {
+          const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+          while (started.load() < 2 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+          }
+        }
+      });
+    });
+    const std::thread::id ownerId = owner.get_id();
+    bool helped = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!helped && started.load() < 2 && std::chrono::steady_clock::now() < deadline) {
+      helped = sc::threading::helpThread();
+    }
+    owner.join();
+    releaseWorkers();
+    REQUIRE(helped);
+    REQUIRE(started.load() == 2);
+    const std::thread::id self = std::this_thread::get_id();
+    REQUIRE(((ranOn[0] == self && ranOn[1] == ownerId) || (ranOn[0] == ownerId && ranOn[1] == self)));
+  }
+}
+
 TEST_CASE("Threading Raw Speed Benchmarks", "[threading][efficiency][benchmark]") {
   sc::threading::init();
 

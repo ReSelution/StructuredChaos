@@ -89,6 +89,27 @@ namespace sc::threading::impl {
     longRunningThreads.clear();
   }
 
+  bool help_impl() {
+    // Before init there is nobody to help.
+    if (workerStores.empty()) {
+      return false;
+    }
+    if (helpParallel()) {
+      return true;
+    }
+    MoveOnlyFunction task;
+    if (!queues.try_pop_any(task, threadId)) {
+      task = helpThread(threadId);
+      if (!task) {
+        return false;
+      }
+    }
+    on_task_started();
+    task();
+    on_task_finished();
+    return true;
+  }
+
   void workerThread(const std::stop_token &st, int id) {
     threadId = id;
     while (!st.stop_requested()) {
