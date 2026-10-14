@@ -13,16 +13,17 @@ concurrency:
 permissions:
   contents: read
 
-# Clang comes from apt.llvm.org in the same major version as on the development
-# machines, which keeps clang-format and clang-tidy results identical to a
-# local run.
-env:
-  LLVM_VERSION: 22
-
 jobs:
+  # The Linux jobs run in the Fedora release of the development machines, so
+  # that Clang, libstdc++, clang-format and clang-tidy are the same versions as
+  # in a local run. Ubuntu LTS ships a libstdc++ that is years behind. The
+  # image is named in both jobs: container cannot read the env context.
   test:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+      options: ${{ matrix.container-options }}
     strategy:
       fail-fast: false
       matrix:
@@ -35,19 +36,24 @@ jobs:
             setup: --buildtype=debug -Db_sanitize=address,undefined
           - name: tsan
             setup: --buildtype=debug -Db_sanitize=thread
+            # TSan restarts itself without address randomization, which the
+            # default seccomp profile of the container forbids.
+            container-options: --security-opt seccomp=unconfined
           # The options change which code is compiled at all.
           - name: options
             setup: --buildtype=debug -Ddump_magpie=true -Denable_chaos_stats=true
     env:
-      CCACHE_DIR: /home/runner/.cache/ccache
+      CCACHE_DIR: /github/home/.cache/ccache
       CCACHE_MAXSIZE: 500M
     steps:
+      # For actions/checkout and actions/cache, the bare image has none of them.
+      - name: Install git, tar and zstd
+        run: dnf install -y --setopt=install_weak_deps=False git tar zstd
+
       - uses: actions/checkout@v5
 
       - name: Install toolchain
         uses: ./.github/actions/setup-toolchain
-        with:
-          llvm-version: ${{ env.LLVM_VERSION }}
 
       - name: Cache subprojects
         uses: actions/cache@v4
@@ -64,8 +70,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-${{ matrix.name }}-${{ github.sha }}
-          restore-keys: ccache-${{ runner.os }}-${{ matrix.name }}-
+          key: ccache-fedora-${{ matrix.name }}-${{ github.sha }}
+          restore-keys: ccache-fedora-${{ matrix.name }}-
 
       - name: Configure
         run: >-
@@ -168,13 +174,17 @@ jobs:
   lint:
     name: format + tidy
     runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
     steps:
+      # For actions/checkout and actions/cache, the bare image has none of them.
+      - name: Install git, tar and zstd
+        run: dnf install -y --setopt=install_weak_deps=False git tar zstd
+
       - uses: actions/checkout@v5
 
       - name: Install toolchain
         uses: ./.github/actions/setup-toolchain
-        with:
-          llvm-version: ${{ env.LLVM_VERSION }}
 
       - name: Cache subprojects
         uses: actions/cache@v4
