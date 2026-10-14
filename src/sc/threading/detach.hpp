@@ -51,7 +51,7 @@ namespace sc::threading::internal {
   template<Priority P, typename R, typename F, typename... Args>
   void detachBatchInline(R &&r, F &&f, Args &&...args) {
     for (auto &&item: r) {
-      queues.submit<P>([f, args..., arg = std::forward_like<R>(item)]() mutable {
+      queues.submit<P>([f, args..., arg = forwardElement<R>(item)]() mutable {
         try {
           f(std::move(arg), args...);
         } catch (...) {
@@ -66,7 +66,7 @@ namespace sc::threading::internal {
     auto state = std::make_shared<DetachBatchState>(count, std::forward<Finished>(finished));
 
     for (auto &&item: r) {
-      queues.submit<P>([f, args..., arg = std::forward_like<R>(item), state]() mutable {
+      queues.submit<P>([f, args..., arg = forwardElement<R>(item), state]() mutable {
         try {
           f(std::move(arg), args...);
         } catch (...) {

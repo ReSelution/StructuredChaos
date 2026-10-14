@@ -14,6 +14,18 @@ namespace sc::threading::internal {
 
   using MoveOnlyFunction = std::move_only_function<void()>;
 
+  // An element of a range passed as R: moved from if the range is an rvalue,
+  // copied otherwise. std::forward_like does the same, but clang cannot use
+  // the one of libstdc++ 14 in a lambda capture, as its return type is
+  // deduced.
+  template<typename R, typename T>
+  using ElementRef = std::conditional_t<std::is_lvalue_reference_v<R>, T &, T &&>;
+
+  template<typename R, typename T>
+  constexpr ElementRef<R, T> forwardElement(T &item) noexcept {
+    return static_cast<ElementRef<R, T>>(item);
+  }
+
   // Capacity of each priority queue. The queue blocks a producer while it is
   // full, which could stall a pool whose workers all produce, so it is large.
   // The memory of a slot is only touched when it is used, see RingQueue.

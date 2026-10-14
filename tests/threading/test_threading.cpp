@@ -28,6 +28,14 @@ using BatchThroughput = sc::stats::Stat<"Batch Processing", sc::stats::Throughpu
 
 namespace {
 
+  // A chunk that takes a little time. sleep_for is no good for that: on
+  // Windows it sleeps at least a millisecond, often 15.
+  void busyWait(std::chrono::microseconds duration) {
+    const auto end = std::chrono::steady_clock::now() + duration;
+    while (std::chrono::steady_clock::now() < end) {
+    }
+  }
+
   struct SFOBreaker {
     std::array<std::byte, 100> weight;
   };
@@ -602,7 +610,7 @@ TEST_CASE("Threading Help Thread", "[threading][help]") {
         if (std::this_thread::get_id() == self) {
           mine.fetch_add(1);
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        busyWait(std::chrono::microseconds(100));
       });
     });
     bool helped = false;
@@ -647,7 +655,7 @@ TEST_CASE("Threading Help Thread", "[threading][help]") {
             if (std::this_thread::get_id() == self) {
               mine.fetch_add(1);
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            busyWait(std::chrono::microseconds(100));
           },
           [&](sc::threading::LoopTicket ticket) { published.store(ticket.value); });
     });

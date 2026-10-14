@@ -83,7 +83,7 @@ namespace sc::threading::internal {
     }
 
     for (auto &&item: r) {
-      queues.submit<P>([f, args..., arg = std::forward_like<R>(item), state]() mutable {
+      queues.submit<P>([f, args..., arg = forwardElement<R>(item), state]() mutable {
         std::exception_ptr error;
         try {
           f(std::move(arg), args...);
@@ -105,7 +105,7 @@ namespace sc::threading::internal {
     for (auto &&item: r) {
       std::promise<RetType> promise;
       futures.push(promise.get_future());
-      queues.submit<P>([f, args..., arg = std::forward_like<R>(item), p = std::move(promise)]() mutable {
+      queues.submit<P>([f, args..., arg = forwardElement<R>(item), p = std::move(promise)]() mutable {
         try {
           p.set_value(f(std::move(arg), args...));
         } catch (...) {
