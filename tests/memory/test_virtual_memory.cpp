@@ -77,4 +77,34 @@ TEST_CASE("Virtual Memory", "[memory][virtual]") {
     REQUIRE(start[bytes - 1] == 0xcd);
     sc::memory::release(start, bytes);
   }
+
+  SECTION("Decommitted Memory Is Usable Again After Commit") {
+    const size_t page = sc::memory::pageSize();
+    const size_t bytes = 4 * page;
+    auto *const start = static_cast<unsigned char *>(sc::memory::reserve(bytes));
+    sc::memory::commit(start, bytes);
+    std::memset(start, 0xab, bytes);
+
+    sc::memory::decommit(start + page, 2 * page);
+#ifdef _WIN32
+    // No longer committed, and only the part itself.
+    MEMORY_BASIC_INFORMATION info{};
+    REQUIRE(VirtualQuery(start + page, &info, sizeof(info)) != 0);
+    REQUIRE(info.State == MEM_RESERVE);
+    REQUIRE(info.RegionSize == 2 * page);
+    REQUIRE(VirtualQuery(start, &info, sizeof(info)) != 0);
+    REQUIRE(info.State == MEM_COMMIT);
+#endif
+    const auto all = [](const unsigned char *first, const unsigned char *last, unsigned char value) {
+      return std::all_of(first, last, [value](unsigned char byte) { return byte == value; });
+    };
+    REQUIRE(all(start, start + page, 0xab));
+    REQUIRE(all(start + (3 * page), start + bytes, 0xab));
+
+    sc::memory::commit(start + page, 2 * page);
+    std::memset(start, 0xcd, bytes);
+    REQUIRE(all(start, start + bytes, 0xcd));
+    REQUIRE(start[bytes - 1] == 0xcd);
+    sc::memory::release(start, bytes);
+  }
 }

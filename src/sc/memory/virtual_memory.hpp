@@ -145,6 +145,27 @@ namespace sc::memory {
 #endif
   }
 
+  // Takes the memory of a part back from the OS and with it the promise of
+  // memory for it, which on Windows counts against the commit limit for as
+  // long as the part is committed. On Windows the part is not usable after
+  // this until commit is called for it again; elsewhere it stays usable, as
+  // after discard. What is in it once it is used again is not defined. Only
+  // the pieces of the OS that lie in the part as a whole are taken back, as
+  // with discard.
+  inline void decommit(void *address, size_t bytes) noexcept {
+    const Pieces pieces = piecesWithin(reinterpret_cast<uintptr_t>(address), bytes, pageSize());
+    if (pieces.bytes == 0) {
+      return;
+    }
+#ifdef _WIN32
+    VirtualFree(reinterpret_cast<void *>(pieces.address), pieces.bytes, MEM_DECOMMIT);
+#else
+    // Linux promises nothing for a range reserved with MAP_NORESERVE, so
+    // there is nothing to take back but the memory.
+    madvise(reinterpret_cast<void *>(pieces.address), pieces.bytes, MADV_DONTNEED);
+#endif
+  }
+
   // Gives the whole range back, with the address and size it was reserved
   // with.
   inline void release(void *address, [[maybe_unused]] size_t bytes) noexcept {
