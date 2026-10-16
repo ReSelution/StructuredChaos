@@ -118,6 +118,11 @@ namespace sc::ecs2 {
     // The pages are those of every column of the world, see Pages.
     explicit World(Pages pages = Pages::Huge) : m_pages(pages), m_table(memory::reserve(TABLE_BYTES)) {
       // All null from the start, and without memory until used.
+      // TODO: TABLE_BYTES is about 1 MiB per world, committed right away. On
+      // Windows that counts against the commit limit for every world, though
+      // only programs with more than NEAR_COMPONENT_TYPES component types
+      // touch it. Could be made in blocks when first used, as the headers of
+      // a column are.
       memory::commit(m_table, TABLE_BYTES);
       auto *const start = static_cast<std::byte *>(m_table);
       m_farColumns = {reinterpret_cast<std::atomic<internal::ColumnBase *> *>(start), FAR_COMPONENT_TYPES};
@@ -411,7 +416,11 @@ namespace sc::ecs2 {
       return count;
     }
 
-    template <typename Type> internal::Column<Type> &makeColumn(std::atomic<internal::ColumnBase *> &slot) {
+    // Out of line: column is called wherever a component is looked up, and
+    // with this inlined into a loop of get the loop took 16 % longer (clang,
+    // the get benchmark of tests/ecs_compare).
+    template <typename Type>
+    [[gnu::noinline]] internal::Column<Type> &makeColumn(std::atomic<internal::ColumnBase *> &slot) {
       std::scoped_lock lock{m_columnMutex};
       if (internal::ColumnBase *found = slot.load(std::memory_order_relaxed)) {
         return static_cast<internal::Column<Type> &>(*found);

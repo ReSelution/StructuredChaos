@@ -8,12 +8,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <new>
 #include <thread>
 #include <type_traits>
 #include <utility>
 
-#include "entity.hpp"
 #include "sc/memory/virtual_memory.hpp"
+
+#include "entity.hpp"
 
 namespace sc::ecs2 {
 
@@ -24,7 +27,8 @@ namespace sc::ecs2 {
   // Its column then gets memory in small pieces, a page of the column at a
   // time, instead of the huge pages that make going through many components
   // fast: a huge page would be held by a handful of components.
-  template <typename Component> inline constexpr bool rareComponent = false;
+  template<typename Component>
+  inline constexpr bool rareComponent = false;
 
   // What the OS backs the columns of a world with: World world{Pages::Small}.
   enum class Pages : uint8_t {
@@ -68,6 +72,19 @@ namespace sc::ecs2::internal {
   // How many pages the indices are cut into.
   inline constexpr size_t PAGE_COUNT = INDEX_LIMIT >> PAGE_BITS;
 
+  // How many indices a chunk of a column of components of the given size
+  // has, as a power of two: enough for memory::HUGE_PAGE_SIZE, so that huge
+  // pages fit into it, and at least 16 pages, so that a column has at most
+  // 256 chunks.
+  template<size_t ComponentBytes>
+  constexpr unsigned chunkBits() noexcept {
+    unsigned bits = PAGE_BITS + 4;
+    while ((size_t{1} << bits) < INDEX_LIMIT && ComponentBytes * (size_t{1} << bits) < memory::HUGE_PAGE_SIZE) {
+      ++bits;
+    }
+    return bits;
+  }
+
   // What the world needs of a column without knowing its component.
   struct ColumnBase {
     virtual ~ColumnBase() = default;
@@ -77,16 +94,20 @@ namespace sc::ecs2::internal {
 
   // The components of one type, each at the index of its entity.
   //
-  // The column reserves the addresses for every index below INDEX_LIMIT, once,
-  // and nothing else: the component of an index is always at the same place,
-  // one page of the column right after the other. A page gets memory with the
-  // first component in it and gives it back when the last one is gone, so a
-  // range of indices without the component costs nothing, neither memory nor
-  // time to go through.
+  // The component of an index is always at the same place. The column
+  // reserves the addresses for them a chunk of CHUNK_SIZE indices at a time,
+  // the first time a page of the chunk gets memory, and keeps them until it
+  // goes; within a chunk one page of the column lies right after the other. A
+  // page gets memory with the first component in it and gives it back when
+  // the last one is gone, so a range of indices without the component costs
+  // nothing, neither memory nor time to go through. The same goes for what
+  // the column knows about the entities of a page, its header: the headers
+  // come in blocks of HEADER_BLOCK_PAGES pages, made when the first of them
+  // is used.
   //
-  // The pages lie without gaps on purpose. Memory that an allocator hands out
-  // page by page has unused bytes between the pages, and with them parts of
-  // the CPU cache that the column never gets to use.
+  // The pages of a chunk lie without gaps on purpose. Memory that an
+  // allocator hands out page by page has unused bytes between the pages, and
+  // with them parts of the CPU cache that the column never gets to use.
   //
   // Reading is safe from any number of threads. Adding and removing is safe
   // for threads that keep to different indices, also next to threads that ask
@@ -97,7 +118,8 @@ namespace sc::ecs2::internal {
   // erase, in any mix: one of them does it and the others are told that they
   // did not. An index has the component from when it is made in full until
   // just before it is destroyed, for every thread that asks.
-  template <typename T> class Column final : public ColumnBase {
+  template<typename T>
+  class Column final : public ColumnBase {
     static_assert(std::is_nothrow_destructible_v<T>, "a component is destroyed where nothing may be thrown");
     static_assert(!std::is_const_v<T> && !std::is_reference_v<T>);
     static_assert(alignof(T) <= memory::OS_PAGE_SIZE);
@@ -157,64 +179,41 @@ namespace sc::ecs2::internal {
       explicit operator bool() const noexcept { return mask != nullptr; }
     };
 
-    // A rare component gets small pages whatever the world asks for.
-    explicit Column(Pages pages = Pages::Huge)
-        : m_memory(memory::reserve(TOTAL_BYTES)),
-          m_hugePages(!rareComponent<T> &&
-                      (pages == Pages::Huge || (pages == Pages::BySize && sizeof(T) >= HUGE_PAGE_COMPONENT_BYTES))),
-          m_grows(!rareComponent<T> && pages == Pages::Adaptive) {
-      auto *start = static_cast<std::byte *>(m_memory);
-      m_headers = reinterpret_cast<Header *>(start);
-      // Few enough to have memory from the start, all zero until used.
-      // TODO: HEADER_BYTES is 4.25 MiB per column (sizeof(Header) = 1088,
-      // measured with clang on Linux, times PAGE_COUNT 4096). On Linux the
-      // commit costs nothing until touched, on Windows MEM_COMMIT counts
-      // against the commit limit right away, for every column of every
-      // world. The values also reserve sizeof(T) * INDEX_LIMIT of address
-      // space: 1 GiB for a 64 B component, 16 GiB for 1 KiB, so large
-      // components held by value run out of the 128 TiB user space after a
-      // few thousand columns.
-      // On Windows the values never give their commit back either:
-      // memory::discard is DiscardVirtualMemory, which frees the RAM but keeps
-      // the pages committed, so a column's commit charge stays at the most it
-      // ever held until the column is destroyed. Only MEM_DECOMMIT lowers it.
-      // On Linux with vm.overcommit_memory=2, MAP_NORESERVE is ignored and
-      // memory::reserve counts the whole writable range against the commit
-      // limit, so it fails after a few columns. Reserving with PROT_NONE and
-      // making it writable in commit with mprotect would avoid that.
-      memory::commit(m_headers, HEADER_BYTES);
-      if constexpr (HAS_VALUE) {
-        // Where a huge page may start: an address, not an offset, the range
-        // itself may begin anywhere.
-        const auto address = reinterpret_cast<uintptr_t>(start) + HEADER_BYTES;
-        m_values = reinterpret_cast<T *>((address + memory::HUGE_PAGE_SIZE - 1) & ~(memory::HUGE_PAGE_SIZE - 1));
-        if (hugePages()) {
-          memory::preferHugePages(m_values, VALUE_BYTES);
-        } else {
-          memory::preferSmallPages(m_values, VALUE_BYTES);
-        }
-      }
-    }
+    // A rare component gets small pages whatever the world asks for. Has no
+    // memory of its own until a component is added, only the addresses of
+    // its headers.
+    explicit Column(Pages pages = Pages::Huge) :
+        m_hugePages(!rareComponent<T> &&
+                    (pages == Pages::Huge || (pages == Pages::BySize && sizeof(T) >= HUGE_PAGE_COMPONENT_BYTES))),
+        m_grows(!rareComponent<T> && pages == Pages::Adaptive),
+        m_headers(static_cast<Header *>(memory::reserve(HEADER_BYTES))) {}
 
     ~Column() override {
       if constexpr (DESTROYS) {
         // The pages that have components, which are as many as have memory.
         size_t left = pages();
         for (uint32_t number = 0; left != 0 && number < PAGE_COUNT; ++number) {
-          Header &header = m_headers[number];
-          if (header.count.load(std::memory_order_relaxed) == 0) {
+          const Header *const header = findHeader(number);
+          if (header == nullptr || header->count.load(std::memory_order_relaxed) == 0) {
             continue;
           }
           --left;
           T *const values = valuesOf(number);
           for (uint32_t word = 0; word < PAGE_WORDS; ++word) {
-            for (uint64_t mask = header.mask[word].load(std::memory_order_relaxed); mask != 0; mask &= mask - 1) {
+            for (uint64_t mask = header->mask[word].load(std::memory_order_relaxed); mask != 0; mask &= mask - 1) {
               std::destroy_at(values + (word * 64) + static_cast<uint32_t>(std::countr_zero(mask)));
             }
           }
         }
       }
-      memory::release(m_memory, TOTAL_BYTES);
+      for (void *const reserved: m_chunkMemory) {
+        if (reserved != nullptr) {
+          memory::release(reserved, CHUNK_RESERVED_BYTES);
+        }
+      }
+      // The headers have nothing to do at their end.
+      static_assert(std::is_trivially_destructible_v<Header>);
+      memory::release(m_headers, HEADER_BYTES);
     }
 
     Column(const Column &) = delete;
@@ -224,40 +223,48 @@ namespace sc::ecs2::internal {
     // component.
     [[nodiscard]] Page page(uint32_t number) const noexcept {
       assert(number < PAGE_COUNT);
-      const Header &header = m_headers[number];
-      const uint32_t count = header.count.load(std::memory_order_relaxed);
+      const Header *const header = findHeader(number);
+      if (header == nullptr) {
+        return {};
+      }
+      const uint32_t count = header->count.load(std::memory_order_relaxed);
       if (count == 0) {
         return {};
       }
-      return {.mask = header.mask.data(), .count = count, .values = valuesOf(number)};
+      return {.mask = header->mask.data(), .count = count, .values = valuesOf(number)};
     }
 
     [[nodiscard]] bool contains(uint32_t index) const noexcept {
       // Any index may be asked for, also that of an entity there never was.
-      return index < INDEX_LIMIT && has(m_headers[index >> PAGE_BITS], index & (PAGE_SIZE - 1));
+      if (index >= INDEX_LIMIT) {
+        return false;
+      }
+      const Header *const header = findHeader(index >> PAGE_BITS);
+      return header != nullptr && has(*header, index & (PAGE_SIZE - 1));
     }
 
     // There must be a component at the index.
     [[nodiscard]] T &get(uint32_t index) const noexcept {
       assert(contains(index));
-      return m_values[index];
+      return *valueAt(index);
     }
 
     // There must be no component at the index yet, and no other thread that
     // adds or removes the component of this index. Returns the new component,
     // or nothing for a component without members. If making the component
     // throws, there is none at the index afterwards, as before.
-    template <typename... Args> decltype(auto) emplace(uint32_t index, Args &&...args) {
+    template<typename... Args>
+    decltype(auto) emplace(uint32_t index, Args &&...args) {
       assert(index < INDEX_LIMIT);
       const uint32_t number = index >> PAGE_BITS;
-      Header &header = m_headers[number];
+      Header &header = makeHeader(number);
       const uint32_t slot = index & (PAGE_SIZE - 1);
       assert(!has(header, slot));
       occupy(header, number, 1);
       if constexpr (HAS_VALUE) {
         T *made = nullptr;
         try {
-          made = ::new (static_cast<void *>(m_values + index)) T{std::forward<Args>(args)...};
+          made = ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
         } catch (...) {
           forsake(header, number, 1);
           throw;
@@ -274,10 +281,11 @@ namespace sc::ecs2::internal {
     // other threads may be giving it or taking it from at the same time:
     // false if it had the component or another thread was first. The
     // component is that thread's then, with its arguments.
-    template <typename... Args> bool tryEmplace(uint32_t index, [[maybe_unused]] Args &&...args) {
+    template<typename... Args>
+    bool tryEmplace(uint32_t index, [[maybe_unused]] Args &&...args) {
       assert(index < INDEX_LIMIT);
       const uint32_t number = index >> PAGE_BITS;
-      Header &header = m_headers[number];
+      Header &header = makeHeader(number);
       const uint32_t slot = index & (PAGE_SIZE - 1);
       if (has(header, slot)) {
         return false;
@@ -298,7 +306,7 @@ namespace sc::ecs2::internal {
         occupy(header, number, 1);
         if constexpr (HAS_VALUE) {
           try {
-            ::new (static_cast<void *>(m_values + index)) T{std::forward<Args>(args)...};
+            ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
           } catch (...) {
             forsake(header, number, 1);
             throw;
@@ -334,13 +342,13 @@ namespace sc::ecs2::internal {
       assert(size_t{index} + count <= INDEX_LIMIT);
       while (count != 0) {
         const uint32_t number = index >> PAGE_BITS;
-        Header &header = m_headers[number];
+        Header &header = makeHeader(number);
         const uint32_t slot = index & (PAGE_SIZE - 1);
         const uint32_t here = std::min(count, PAGE_SIZE - slot);
         occupy(header, number, here);
         if constexpr (HAS_VALUE) {
           try {
-            std::uninitialized_fill_n(m_values + index, here, value);
+            std::uninitialized_fill_n(valueAt(index), here, value);
           } catch (...) {
             // The ones before stay, these are all gone again.
             forsake(header, number, here);
@@ -364,11 +372,12 @@ namespace sc::ecs2::internal {
         return false;
       }
       const uint32_t number = index >> PAGE_BITS;
-      Header &header = m_headers[number];
+      Header *const found = findHeader(number);
       const uint32_t slot = index & (PAGE_SIZE - 1);
-      if (!has(header, slot)) {
+      if (found == nullptr || !has(*found, slot)) {
         return false;
       }
+      Header &header = *found;
       const uint64_t bit = uint64_t{1} << (slot % 64);
       if constexpr (DESTROYS) {
         // Not for long: whoever has it is about to be done with the index.
@@ -379,7 +388,7 @@ namespace sc::ecs2::internal {
         const bool removed = (header.mask[slot / 64].fetch_and(~bit, std::memory_order_acq_rel) & bit) != 0;
         if (removed) {
           // Before the page may give its memory back.
-          std::destroy_at(m_values + index);
+          std::destroy_at(valueAt(index));
         }
         making.fetch_and(~bit, std::memory_order_release);
         if (!removed) {
@@ -399,26 +408,51 @@ namespace sc::ecs2::internal {
     // How many pages have memory.
     [[nodiscard]] size_t pages() const noexcept { return m_pages.load(std::memory_order_relaxed); }
 
+    // How many blocks of headers have memory, see HEADER_BLOCK_PAGES. They
+    // keep it until the column goes.
+    [[nodiscard]] size_t headerBlocks() const noexcept {
+      return static_cast<size_t>(std::popcount(m_headerBlocks.load(std::memory_order_relaxed)));
+    }
+
+    // How many chunks of the values have their addresses reserved, see
+    // CHUNK_SIZE. They stay until the column goes.
+    [[nodiscard]] size_t chunks() const noexcept { return m_chunkCount.load(std::memory_order_relaxed); }
+
+    // The headers come in blocks of this many pages.
+    static constexpr uint32_t HEADER_BLOCK_PAGES = 64;
+    // The values are reserved in chunks of this many indices.
+    static constexpr uint32_t CHUNK_SIZE = uint32_t{1} << chunkBits<sizeof(T)>();
+
   private:
     // The values of a page are a whole number of memory::OS_PAGE_SIZE, so a
     // page gets and gives back its memory without touching its neighbours.
     // Where the pages of the OS are larger and a small component makes the
-    // two share one, the shared ones stay with the column: memory::discard
+    // two share one, the shared ones stay with the column: memory::decommit
     // only gives back what belongs to the page alone.
     static constexpr size_t PAGE_BYTES = sizeof(T) * PAGE_SIZE;
     static_assert(!HAS_VALUE || PAGE_BYTES % memory::OS_PAGE_SIZE == 0);
 
-    static constexpr size_t HEADER_BYTES = sizeof(Header) * PAGE_COUNT;
-    static constexpr size_t VALUE_BYTES = HAS_VALUE ? PAGE_BYTES * PAGE_COUNT : 0;
-    // With room to move the values to where a huge page may start.
-    static constexpr size_t TOTAL_BYTES = HEADER_BYTES + (HAS_VALUE ? memory::HUGE_PAGE_SIZE + VALUE_BYTES : 0);
+    static constexpr size_t HEADER_BLOCK_COUNT = PAGE_COUNT / HEADER_BLOCK_PAGES;
+    static_assert(PAGE_COUNT % HEADER_BLOCK_PAGES == 0);
+    static_assert(HEADER_BLOCK_COUNT <= 64, "one bit of m_headerBlocks for every block");
+    static constexpr size_t HEADER_BLOCK_BYTES = sizeof(Header) * HEADER_BLOCK_PAGES;
+    static constexpr size_t HEADER_BYTES = HEADER_BLOCK_BYTES * HEADER_BLOCK_COUNT;
+    // A block gets its memory without touching its neighbours.
+    static_assert(HEADER_BLOCK_BYTES % memory::OS_PAGE_SIZE == 0);
 
-    static_assert(HEADER_BYTES % memory::OS_PAGE_SIZE == 0);
+    static constexpr unsigned CHUNK_BITS = chunkBits<sizeof(T)>();
+    static constexpr uint32_t CHUNK_PAGES = CHUNK_SIZE >> PAGE_BITS;
+    static constexpr size_t CHUNK_COUNT = HAS_VALUE ? INDEX_LIMIT >> CHUNK_BITS : 0;
+    static constexpr size_t CHUNK_BYTES = PAGE_BYTES * CHUNK_PAGES;
+    // With room to move the values to where a huge page may start.
+    static constexpr size_t CHUNK_RESERVED_BYTES = CHUNK_BYTES + memory::HUGE_PAGE_SIZE;
 
     // The OS may hand the values out in huge pages, each of which holds
-    // several pages of the column or a part of one.
-    static constexpr size_t REGION_COUNT = HAS_VALUE ? VALUE_BYTES / memory::HUGE_PAGE_SIZE : 1;
-    static_assert(VALUE_BYTES % memory::HUGE_PAGE_SIZE == 0);
+    // several pages of the column or a part of one. A chunk starts at a huge
+    // page; its last one may be cut short where the chunk is not a whole
+    // number of them.
+    static constexpr size_t CHUNK_REGIONS = (CHUNK_BYTES + memory::HUGE_PAGE_SIZE - 1) / memory::HUGE_PAGE_SIZE;
+    static constexpr size_t REGION_COUNT = CHUNK_COUNT * CHUNK_REGIONS;
     // What m_regions says about a huge page.
     static constexpr uint32_t UNTOUCHED = 0;
     static constexpr uint32_t STARTING = 1;
@@ -428,12 +462,88 @@ namespace sc::ecs2::internal {
       return ((header.mask[slot / 64].load(std::memory_order_relaxed) >> (slot % 64)) & 1u) != 0;
     }
 
+    // The header of a page, null as long as no page of its block was used.
+    [[nodiscard]] Header *findHeader(uint32_t number) const noexcept {
+      const uint64_t blocks = m_headerBlocks.load(std::memory_order_acquire);
+      return ((blocks >> (number / HEADER_BLOCK_PAGES)) & 1u) != 0 ? m_headers + number : nullptr;
+    }
+
+    // The same, with the block given its memory if it has none yet. Throws
+    // std::bad_alloc if there is no memory for it.
+    [[nodiscard]] Header &makeHeader(uint32_t number) {
+      const uint64_t bit = uint64_t{1} << (number / HEADER_BLOCK_PAGES);
+      if ((m_headerBlocks.load(std::memory_order_acquire) & bit) == 0) [[unlikely]] {
+        startHeaderBlock(number / HEADER_BLOCK_PAGES);
+      }
+      return m_headers[number];
+    }
+
+    // Gives a block of headers its memory, all zero, which makes all of its
+    // headers empty. Without a lock: several threads may do it for the same
+    // block at the same time, memory::commit allows that, and on Linux it is
+    // nothing at all; the pages come with the first access, in whichever
+    // thread makes it. A lock here had the threads of a parallel loop that
+    // all start with the same block sleep and wake up again: 36 % more
+    // context switches and a 15 % slower parallel create (tests/ecs_compare).
+    // Out of line, so that what adds a component stays small enough to be
+    // inlined where it is called.
+    [[gnu::noinline]] void startHeaderBlock(size_t block) {
+      memory::commit(m_headers + (block * HEADER_BLOCK_PAGES), HEADER_BLOCK_BYTES);
+      m_headerBlocks.fetch_or(uint64_t{1} << block, std::memory_order_acq_rel);
+    }
+
+    // Where the component of an index is, made or not. Its chunk must be
+    // reserved. Relaxed: a thread that may touch the component has seen the
+    // page get its memory, and with it the chunk.
+    [[nodiscard]] T *valueAt(uint32_t index) const noexcept {
+      return m_chunks[index >> CHUNK_BITS].load(std::memory_order_relaxed) + (index & (CHUNK_SIZE - 1));
+    }
+
+    // The values of a page, null for a component without members and for a
+    // page whose chunk was never reserved.
     [[nodiscard]] T *valuesOf(uint32_t number) const noexcept {
       if constexpr (HAS_VALUE) {
-        return m_values + (size_t{number} << PAGE_BITS);
+        T *const values = m_chunks[number / CHUNK_PAGES].load(std::memory_order_relaxed);
+        return values != nullptr ? values + (size_t{number % CHUNK_PAGES} << PAGE_BITS) : nullptr;
       } else {
         return nullptr;
       }
+    }
+
+    // The values of a chunk, reserved if they are not yet. Throws
+    // std::bad_alloc if the OS has no room for them. Out of line, as
+    // makeHeaderBlock.
+    [[gnu::noinline]] T *makeChunk(size_t chunk) {
+      std::atomic<T *> &slot = m_chunks[chunk];
+      T *values = slot.load(std::memory_order_acquire);
+      if (values != nullptr) [[likely]] {
+        return values;
+      }
+      // One thread reserves it, the others wait: a reservation that is given
+      // back again would hold up every thread of the process that has a page
+      // fault just then, the OS keeps its mappings under one lock.
+      const std::scoped_lock lock{m_growMutex};
+      values = slot.load(std::memory_order_relaxed);
+      if (values != nullptr) {
+        return values;
+      }
+      void *const reserved = memory::reserve(CHUNK_RESERVED_BYTES);
+      // Where a huge page may start: an address, not an offset, the range
+      // itself may begin anywhere.
+      const auto address = reinterpret_cast<uintptr_t>(reserved);
+      auto *const fresh = reinterpret_cast<T *>((address + memory::HUGE_PAGE_SIZE - 1) & ~(memory::HUGE_PAGE_SIZE - 1));
+      // A chunk reserved while the column moves to huge pages may keep small
+      // ones, as a page started just then does, see moveToHugePages.
+      if (hugePages()) {
+        memory::preferHugePages(fresh, CHUNK_BYTES);
+      } else {
+        memory::preferSmallPages(fresh, CHUNK_BYTES);
+      }
+      slot.store(fresh, std::memory_order_release);
+      // Only read when the column goes, after every thread is done with it.
+      m_chunkMemory[chunk] = reserved;
+      m_chunkCount.fetch_add(1, std::memory_order_relaxed);
+      return fresh;
     }
 
     // Counts so many components more in a page, which is all there is to it
@@ -447,6 +557,12 @@ namespace sc::ecs2::internal {
           header.started.load(std::memory_order_seq_cst)) [[likely]] {
         return;
       }
+      start(header, number, count);
+    }
+
+    // The rest of occupy, for the first components of a page. Out of line, as
+    // makeHeaderBlock.
+    [[gnu::noinline]] void start(Header &header, uint32_t number, uint32_t count) {
       const Busy busy{header};
       if (header.started.load(std::memory_order_relaxed)) {
         return;
@@ -477,6 +593,13 @@ namespace sc::ecs2::internal {
     // here the memory is marked as gone first and the count looked at after.
     // So either the count seen here is not zero and the memory stays, or the
     // other thread finds the memory gone and waits in occupy until it is.
+    //
+    // On Windows the promise of memory goes back with it, see
+    // memory::decommit. On Linux with vm.overcommit_memory=2 that promise is
+    // made for the whole chunk when it is reserved and kept until the column
+    // goes: taking it back page by page would take mprotect, which cuts the
+    // mapping of the chunk into pieces, and the kernel allows a process only
+    // vm.max_map_count of them.
     void vacate(Header &header, uint32_t number) noexcept {
       const Busy busy{header};
       if (!header.started.exchange(false, std::memory_order_seq_cst)) {
@@ -488,7 +611,7 @@ namespace sc::ecs2::internal {
         return;
       }
       if constexpr (HAS_VALUE) {
-        memory::discard(valuesOf(number), PAGE_BYTES);
+        memory::decommit(valuesOf(number), PAGE_BYTES);
       }
       m_pages.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -507,10 +630,14 @@ namespace sc::ecs2::internal {
     // in one go: left to the first accesses, the OS would be asked once for
     // every OS_PAGE_SIZE of it.
     void startPage(uint32_t number) {
-      auto *const first = reinterpret_cast<std::byte *>(valuesOf(number));
+      const size_t chunk = number / CHUNK_PAGES;
+      auto *const base = reinterpret_cast<std::byte *>(makeChunk(chunk));
+      // Within the chunk.
+      const size_t offset = size_t{number % CHUNK_PAGES} * PAGE_BYTES;
+      std::byte *const first = base + offset;
       memory::commit(first, PAGE_BYTES);
-      const size_t offset = static_cast<size_t>(first - reinterpret_cast<std::byte *>(m_values));
-      const size_t lastRegion = (offset + PAGE_BYTES - 1) / memory::HUGE_PAGE_SIZE;
+      const size_t firstRegion = (chunk * CHUNK_REGIONS) + (offset / memory::HUGE_PAGE_SIZE);
+      const size_t lastRegion = (chunk * CHUNK_REGIONS) + ((offset + PAGE_BYTES - 1) / memory::HUGE_PAGE_SIZE);
 
       if (!hugePages()) {
         if (m_grows && (pages() + 1) * PAGE_BYTES >= HUGE_PAGE_COLUMN_BYTES) {
@@ -518,7 +645,7 @@ namespace sc::ecs2::internal {
         } else {
           // Remembered for moveToHugePages. Whoever comes to the huge page
           // later finds it started.
-          for (size_t region = offset / memory::HUGE_PAGE_SIZE; region <= lastRegion; ++region) {
+          for (size_t region = firstRegion; region <= lastRegion; ++region) {
             m_regions[region].store(STARTED, std::memory_order_release);
           }
           memory::populate(first, PAGE_BYTES);
@@ -526,7 +653,7 @@ namespace sc::ecs2::internal {
         }
       }
 
-      for (size_t region = offset / memory::HUGE_PAGE_SIZE; region <= lastRegion; ++region) {
+      for (size_t region = firstRegion; region <= lastRegion; ++region) {
         std::atomic<uint32_t> &state = m_regions[region];
         uint32_t seen = state.load(std::memory_order_acquire);
         if (seen == STARTED) [[likely]] {
@@ -535,8 +662,8 @@ namespace sc::ecs2::internal {
         if (seen == UNTOUCHED &&
             state.compare_exchange_strong(seen, STARTING, std::memory_order_acq_rel, std::memory_order_acquire)) {
           // Within this page: the rest of the huge page belongs to others.
-          const size_t touched = std::max(offset, region * memory::HUGE_PAGE_SIZE);
-          *reinterpret_cast<volatile std::byte *>(reinterpret_cast<std::byte *>(m_values) + touched) = std::byte{0};
+          const size_t touched = std::max(offset, (region - (chunk * CHUNK_REGIONS)) * memory::HUGE_PAGE_SIZE);
+          *reinterpret_cast<volatile std::byte *>(base + touched) = std::byte{0};
           state.store(STARTED, std::memory_order_release);
           state.notify_all();
           continue;
@@ -556,23 +683,41 @@ namespace sc::ecs2::internal {
       if (m_hugePages.exchange(true, std::memory_order_acq_rel)) {
         return;
       }
-      memory::preferHugePages(m_values, VALUE_BYTES);
-      auto *const values = reinterpret_cast<std::byte *>(m_values);
-      for (size_t region = 0; region < REGION_COUNT; ++region) {
-        if (m_regions[region].load(std::memory_order_acquire) == STARTED) {
-          memory::collapse(values + region * memory::HUGE_PAGE_SIZE, memory::HUGE_PAGE_SIZE);
+      for (size_t chunk = 0; chunk < CHUNK_COUNT; ++chunk) {
+        T *const values = m_chunks[chunk].load(std::memory_order_acquire);
+        if (values == nullptr) {
+          continue;
+        }
+        memory::preferHugePages(values, CHUNK_BYTES);
+        auto *const base = reinterpret_cast<std::byte *>(values);
+        // Only the huge pages that lie in the chunk as a whole.
+        for (size_t region = 0; (region + 1) * memory::HUGE_PAGE_SIZE <= CHUNK_BYTES; ++region) {
+          if (m_regions[(chunk * CHUNK_REGIONS) + region].load(std::memory_order_acquire) == STARTED) {
+            memory::collapse(base + (region * memory::HUGE_PAGE_SIZE), memory::HUGE_PAGE_SIZE);
+          }
         }
       }
     }
 
-    void *m_memory = nullptr;
     // Changes once at most, from small pages to huge ones, see Pages::Adaptive.
     std::atomic<bool> m_hugePages{true};
     bool m_grows = false;
-    Header *m_headers = nullptr;
-    // The component of every index, at that index.
-    T *m_values = nullptr;
-    // Whether the first access to a huge page of the values was made.
+    // The header of every page, reserved for all of them and given memory a
+    // block of HEADER_BLOCK_PAGES at a time, when a page of the block is
+    // first used; a bit of m_headerBlocks for every block that has it. On
+    // Linux with vm.overcommit_memory=2 the whole range of HEADER_BYTES is
+    // promised from the start, see vacate.
+    Header *m_headers;
+    std::atomic<uint64_t> m_headerBlocks{0};
+    // The values of every chunk, at a huge page, null until the chunk is
+    // reserved; and the range reserved for it, which they lie in.
+    std::array<std::atomic<T *>, CHUNK_COUNT> m_chunks{};
+    std::array<void *, CHUNK_COUNT> m_chunkMemory{};
+    std::atomic<size_t> m_chunkCount{0};
+    // Held while a chunk is reserved.
+    std::mutex m_growMutex;
+    // Whether the first access to a huge page of the values was made, by
+    // chunk.
     std::array<std::atomic<uint32_t>, REGION_COUNT> m_regions{};
     std::atomic<size_t> m_pages{0};
   };
