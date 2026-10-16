@@ -107,4 +107,30 @@ TEST_CASE("Virtual Memory", "[memory][virtual]") {
     REQUIRE(start[bytes - 1] == 0xcd);
     sc::memory::release(start, bytes);
   }
+
+  SECTION("Offered Memory Stays Usable And Leaves What Is Next To It") {
+    const size_t page = sc::memory::pageSize();
+    const size_t bytes = 4 * page;
+    auto *const start = static_cast<unsigned char *>(sc::memory::reserve(bytes));
+    sc::memory::commit(start, bytes);
+    std::memset(start, 0xab, bytes);
+
+    // From the middle of the first piece to the middle of the last one.
+    sc::memory::offer(start + (page / 2), 3 * page);
+    const auto all = [](const unsigned char *first, const unsigned char *last, unsigned char value) {
+      return std::all_of(first, last, [value](unsigned char byte) { return byte == value; });
+    };
+    REQUIRE(all(start, start + page, 0xab));
+    REQUIRE(all(start + (3 * page), start + bytes, 0xab));
+    // The two in between are as they were, unless the OS took them.
+    for (size_t piece = 1; piece < 3; ++piece) {
+      const unsigned char *const first = start + (piece * page);
+      REQUIRE((all(first, first + page, 0xab) || all(first, first + page, 0)));
+    }
+
+    // Usable without a commit.
+    std::memset(start, 0xcd, bytes);
+    REQUIRE(all(start, start + bytes, 0xcd));
+    sc::memory::release(start, bytes);
+  }
 }
