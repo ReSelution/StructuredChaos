@@ -174,6 +174,14 @@ namespace sc::ecs2::internal {
       // space: 1 GiB for a 64 B component, 16 GiB for 1 KiB, so large
       // components held by value run out of the 128 TiB user space after a
       // few thousand columns.
+      // On Windows the values never give their commit back either:
+      // memory::discard is DiscardVirtualMemory, which frees the RAM but keeps
+      // the pages committed, so a column's commit charge stays at the most it
+      // ever held until the column is destroyed. Only MEM_DECOMMIT lowers it.
+      // On Linux with vm.overcommit_memory=2, MAP_NORESERVE is ignored and
+      // memory::reserve counts the whole writable range against the commit
+      // limit, so it fails after a few columns. Reserving with PROT_NONE and
+      // making it writable in commit with mprotect would avoid that.
       memory::commit(m_headers, HEADER_BYTES);
       if constexpr (HAS_VALUE) {
         // Where a huge page may start: an address, not an offset, the range
