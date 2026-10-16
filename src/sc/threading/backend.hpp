@@ -52,9 +52,9 @@ namespace sc::threading::internal {
 
   extern Queues queues;
 
-  // 0 for the thread that called init and for threads outside the pool, a
-  // positive number for pool workers.
-  extern constinit thread_local int32_t currentThreadId;
+  // 0 for the thread that called init, a positive number for pool workers
+  // and NO_THREAD_ID for every other thread.
+  extern constinit thread_local uint32_t currentThreadId;
 
   // Asked by a helper before it takes the next chunk of a loop, see
   // sc::threading::helpThread(stop). Null for whoever does not stop early.

@@ -29,7 +29,7 @@
 namespace sc::threading::internal {
 
   Queues queues;
-  constinit thread_local int32_t currentThreadId = 0;
+  constinit thread_local uint32_t currentThreadId = NO_THREAD_ID;
 
   namespace {
     // Guards the worker list in init and shutdown.
@@ -127,7 +127,7 @@ namespace sc::threading::internal {
       onTasksFinished();
     }
 
-    void workerThread(const std::stop_token &st, int32_t id) {
+    void workerThread(const std::stop_token &st, uint32_t id) {
       currentThreadId = id;
       setThreadName("sc-worker-" + std::to_string(id));
       while (!st.stop_requested()) {
@@ -136,7 +136,7 @@ namespace sc::threading::internal {
           continue;
         }
         MoveOnlyFunction task;
-        if (queues.tryPopAny(task, currentThreadId)) {
+        if (queues.tryPopAny(task, static_cast<int32_t>(currentThreadId))) {
           runTask(task);
           continue;
         }
@@ -196,7 +196,7 @@ namespace sc::threading::internal {
 
     threads.reserve(threadCount);
     for (size_t i = 0; i < threadCount; ++i) {
-      threads.emplace_back(workerThread, static_cast<int32_t>(i + 1));
+      threads.emplace_back(workerThread, static_cast<uint32_t>(i + 1));
     }
     workerCount.store(threads.size(), std::memory_order_release);
     currentThreadId = 0;

@@ -287,6 +287,10 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
 
     REQUIRE(future.get() > 0);
     REQUIRE(sc::threading::threadId() == 0);
+
+    uint32_t outside = 0;
+    std::thread([&] { outside = sc::threading::threadId(); }).join();
+    REQUIRE(outside == sc::threading::NO_THREAD_ID);
   }
 
   SECTION("Forwards Exceptions Through The Future") {

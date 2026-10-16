@@ -26,4 +26,8 @@ namespace sc::threading {
   };
 
   inline constexpr size_t PRIORITY_COUNT = 3;
+
+  // The threadId of every thread that is neither a pool worker nor the thread
+  // that called init.
+  inline constexpr uint32_t NO_THREAD_ID = UINT32_MAX;
 } // namespace sc::threading

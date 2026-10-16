@@ -68,9 +68,10 @@ namespace sc::threading {
                                   const_cast<void *>(static_cast<const void *>(std::addressof(stop))));
   }
 
-  // Id of the calling thread: 0 for the thread that called init and for
-  // threads outside the pool, a positive number for pool workers.
-  [[nodiscard]] inline int32_t threadId() noexcept { return internal::currentThreadId; }
+  // Id of the calling thread: 0 for the thread that called init, a positive
+  // number for pool workers and NO_THREAD_ID for every other thread, which
+  // has no slot of its own in an array of threadSlots entries.
+  [[nodiscard]] inline uint32_t threadId() noexcept { return internal::currentThreadId; }
 
   // One more than the highest threadId there is: the size of an array that
   // has an entry for every thread. Changes with init.
