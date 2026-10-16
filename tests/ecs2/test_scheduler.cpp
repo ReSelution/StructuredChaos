@@ -318,7 +318,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     REQUIRE(spawned == spawners * 3);
     // A page for every thread at most, next to the first ones: after that
     // the indices of the destroyed entities do.
-    REQUIRE(world.pageLimit() <= 3 + sc::threading::thread_slots());
+    REQUIRE(world.pageLimit() <= 3 + sc::threading::threadSlots());
     for (const Entity entity : entities) {
       REQUIRE(world.valid(entity));
     }

@@ -140,7 +140,7 @@ namespace sc::ecs {
     const std::vector<std::vector<size_t>> &stages = this->stages();
 
     // Here and not when the system is added: the pool may be set up later.
-    const size_t threads = threading::thread_slots();
+    const size_t threads = threading::threadSlots();
     for (System &system : m_systems) {
       if (system.access.commandsPerThread && system.commands.size() < threads) {
         while (system.commands.size() < threads) {

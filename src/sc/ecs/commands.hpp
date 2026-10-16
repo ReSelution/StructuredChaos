@@ -256,13 +256,13 @@ namespace sc::ecs {
     using Buffer = internal::CommandBuffer<Components...>;
     using Buffers = std::span<const std::unique_ptr<internal::CommandBufferBase>>;
 
-    // One buffer for every sc::threading::thread_id.
+    // One buffer for every sc::threading::threadId.
     ParallelCommands(Registry &registry, Buffers buffers) : m_registry(&registry), m_buffers(buffers) {}
 
     // The Commands of the calling thread, which must not be handed to another
     // one. Best taken once for many entities.
     [[nodiscard]] Commands<Components...> local() const {
-      const auto thread = static_cast<size_t>(threading::thread_id());
+      const auto thread = static_cast<size_t>(threading::threadId());
       assert(thread < m_buffers.size());
       return Commands<Components...>{*m_registry, static_cast<Buffer &>(*m_buffers[thread])};
     }

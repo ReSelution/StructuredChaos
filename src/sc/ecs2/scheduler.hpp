@@ -330,11 +330,11 @@ namespace sc::ecs2 {
   private:
     // The one of the calling thread.
     [[nodiscard]] internal::CommandList &list() const {
-      return m_lists[static_cast<size_t>(threading::thread_id())];
+      return m_lists[static_cast<size_t>(threading::threadId())];
     }
 
     World *m_world;
-    // One for every sc::threading::thread_id.
+    // One for every sc::threading::threadId.
     std::span<internal::CommandList> m_lists;
   };
 
@@ -593,7 +593,7 @@ namespace sc::ecs2 {
       const std::vector<std::vector<size_t>> &stages = this->stages();
 
       // Here and not when the system is added: the pool may be set up later.
-      const size_t threads = threading::thread_slots();
+      const size_t threads = threading::threadSlots();
       for (System &system : m_systems) {
         if (system.access.commands && system.commands.size() < threads) {
           system.commands = std::vector<internal::CommandList>(threads);

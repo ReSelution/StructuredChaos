@@ -374,7 +374,7 @@ namespace sc::ecs2 {
       // A thread for every so many entities: a page with few entities in it
       // is not worth waking one up.
       const size_t helpers =
-          countUpTo(columns, pages, threading::thread_slots() * ENTITIES_PER_THREAD) / ENTITIES_PER_THREAD;
+          countUpTo(columns, pages, threading::threadSlots() * ENTITIES_PER_THREAD) / ENTITIES_PER_THREAD;
       threading::parallelFor(pages.count(), grain, helpers, [&](size_t first, size_t last) {
         eachInRange(get, without, columns, excluded, pages, static_cast<uint32_t>(first), static_cast<uint32_t>(last),
                     function);

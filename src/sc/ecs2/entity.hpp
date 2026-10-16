@@ -238,7 +238,7 @@ namespace sc::ecs2::internal {
 
   private:
     Share &shareOfThread() noexcept {
-      const auto thread = static_cast<size_t>(threading::thread_id());
+      const auto thread = static_cast<size_t>(threading::threadId());
       assert(thread < MAX_THREADS);
       return m_shares[thread];
     }
