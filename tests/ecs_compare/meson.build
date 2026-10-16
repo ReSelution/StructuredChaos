@@ -10,7 +10,6 @@ flecs_dep = dependency(
   default_options: ['default_library=static', 'warning_level=0'],
 ).as_system()
 gaia_ecs_dep = dependency('gaia-ecs', fallback: ['gaia-ecs', 'gaia_ecs_dep'])
-ginseng_dep = dependency('ginseng', fallback: ['ginseng', 'ginseng_dep'])
 # Built with the standard of the benchmarks: its headers define inline
 # variables that are constants in one standard and initialized at startup in
 # another, and the two must not meet in one executable.
@@ -31,7 +30,6 @@ ecs_compare_libraries = {
   'entt': ['bench_entt.cpp', [entt_dep], []],
   'flecs': ['bench_flecs.cpp', [flecs_dep], []],
   'gaia': ['bench_gaia.cpp', [gaia_ecs_dep], []],
-  'ginseng': ['bench_ginseng.cpp', [ginseng_dep], []],
   'mustache': ['bench_mustache.cpp', [mustache_dep], []],
 }
 

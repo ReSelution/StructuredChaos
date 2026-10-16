@@ -42,7 +42,6 @@ LIBRARIES = {
     "flecs": "Flecs",
     "gaia": "gaia-ecs",
     "mustache": "mustache",
-    "ginseng": "ginseng",
 }
 
 # How tests/ecs_compare/common.hpp marks the two runs of a parallel benchmark.

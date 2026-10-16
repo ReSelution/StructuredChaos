@@ -330,9 +330,8 @@ that does the same work on one thread and on all of them: `sc::ecs`, `sc::ecs2`
 huge pages and small ones),
 [EnTT](https://github.com/skypjack/entt),
 [Flecs](https://github.com/SanderMertens/flecs),
-[gaia-ecs](https://github.com/richardbiely/gaia-ecs),
-[mustache](https://github.com/kirillochnev/mustache) and
-[ginseng](https://github.com/apples/ginseng). `scripts/ecs_compare.py` sets up
+[gaia-ecs](https://github.com/richardbiely/gaia-ecs) and
+[mustache](https://github.com/kirillochnev/mustache). `scripts/ecs_compare.py` sets up
 an optimized build with the option in `build-bench-ecs`, builds them, runs them
 and prints the results side by side:
 
