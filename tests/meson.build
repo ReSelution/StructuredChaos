@@ -157,6 +157,7 @@ test_memory = executable(
     'memory/test_heap.cpp',
     'memory/test_huge_page_resource.cpp',
     'memory/test_monotonic_resource.cpp',
+    'memory/test_range_cache.cpp',
     'memory/test_virtual_memory.cpp',
   ],
   dependencies: [
