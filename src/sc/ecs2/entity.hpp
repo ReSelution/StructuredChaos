@@ -7,8 +7,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include <mimalloc.h>
@@ -71,9 +73,10 @@ namespace sc::ecs2::internal {
   // two meet. Every thread has a page of its own to take new indices from,
   // and takes another one when that is used up.
   //
-  // create and valid are safe from the threads of the pool and the thread that
-  // set it up, at any time and without a lock. destroy must have nothing
-  // running next to it.
+  // create and valid are safe from any thread at any time. The threads of the
+  // pool and the thread that set it up need no lock for it, every other thread
+  // takes turns with the others of its kind for a new index. destroy must have
+  // nothing running next to it.
   class EntityAllocator {
     // The generations of this many indices are kept in one piece.
     static constexpr unsigned BLOCK_BITS = 16;
@@ -143,19 +146,21 @@ namespace sc::ecs2::internal {
         return makeEntity(index, *generation(index));
       }
 
-      Share &share = shareOfThread();
-      if (share.next == share.end) [[unlikely]] {
-        share.next = makePage(false);
-        share.end = share.next + PAGE_SIZE;
-      }
-      // Never handed out before.
-      return makeEntity(share.next++, 0);
+      return withShare([this](Share &share) {
+        if (share.next == share.end) [[unlikely]] {
+          share.next = makePage(false);
+          share.end = share.next + PAGE_SIZE;
+        }
+        // Never handed out before.
+        return makeEntity(share.next++, 0);
+      });
     }
 
     // An entity for every place of the span, as create makes them. Calls the
     // function with every run of indices it handed out, as (first index,
     // count): what destroy gave back one by one, the rest in rows as long as
-    // the pages of the thread allow.
+    // the pages of the thread allow. For a thread outside the pool the
+    // function is called under the lock of withShare.
     template <typename Function> void create(std::span<Entity> entities, Function &&run) {
       size_t made = 0;
       for (uint32_t index = 0; made < entities.size() && m_free.take(index); ++made) {
@@ -163,20 +168,24 @@ namespace sc::ecs2::internal {
         run(index, uint32_t{1});
       }
 
-      Share &share = shareOfThread();
-      while (made < entities.size()) {
-        if (share.next == share.end) {
-          share.next = makePage(false);
-          share.end = share.next + PAGE_SIZE;
-        }
-        const auto count = static_cast<uint32_t>(std::min<size_t>(entities.size() - made, share.end - share.next));
-        for (uint32_t i = 0; i < count; ++i) {
-          entities[made + i] = makeEntity(share.next + i, 0);
-        }
-        run(share.next, count);
-        share.next += count;
-        made += count;
+      if (made == entities.size()) {
+        return;
       }
+      withShare([&](Share &share) {
+        while (made < entities.size()) {
+          if (share.next == share.end) {
+            share.next = makePage(false);
+            share.end = share.next + PAGE_SIZE;
+          }
+          const auto count = static_cast<uint32_t>(std::min<size_t>(entities.size() - made, share.end - share.next));
+          for (uint32_t i = 0; i < count; ++i) {
+            entities[made + i] = makeEntity(share.next + i, 0);
+          }
+          run(share.next, count);
+          share.next += count;
+          made += count;
+        }
+      });
     }
 
     // The same from the other end: an index among those of the rare entities.
@@ -185,12 +194,13 @@ namespace sc::ecs2::internal {
         return makeEntity(index, *generation(index));
       }
 
-      Share &share = shareOfThread();
-      if (share.rareNext == share.rareEnd) [[unlikely]] {
-        share.rareNext = makePage(true);
-        share.rareEnd = share.rareNext + PAGE_SIZE;
-      }
-      return makeEntity(share.rareNext++, 0);
+      return withShare([this](Share &share) {
+        if (share.rareNext == share.rareEnd) [[unlikely]] {
+          share.rareNext = makePage(true);
+          share.rareEnd = share.rareNext + PAGE_SIZE;
+        }
+        return makeEntity(share.rareNext++, 0);
+      });
     }
 
     [[nodiscard]] bool valid(Entity entity) const noexcept {
@@ -237,15 +247,16 @@ namespace sc::ecs2::internal {
     }
 
   private:
-    // TODO: threadId() is 0 for every thread outside the pool, so such threads
-    // share the Share of the thread that called init and race on next++:
-    // the same index is handed out twice. A library user like SAA creates
-    // entities from its own threads. Beyond MAX_THREADS there is only the
-    // assert, a release build indexes past m_shares.
-    Share &shareOfThread() noexcept {
-      const auto thread = static_cast<size_t>(threading::threadId());
-      assert(thread < MAX_THREADS);
-      return m_shares[thread];
+    // Calls the function with the Share of the calling thread. The threads
+    // without one of their own, those outside the pool (threading::NO_THREAD_ID)
+    // and pool threads beyond MAX_THREADS, use one together, one at a time.
+    template <typename Function> std::invoke_result_t<Function &, Share &> withShare(Function &&function) {
+      const uint32_t thread = threading::threadId();
+      if (thread < MAX_THREADS) [[likely]] {
+        return function(m_shares[thread]);
+      }
+      const std::scoped_lock lock{m_sharedMutex};
+      return function(m_shared);
     }
 
     // The first index of a page no thread has indices of yet: the next one
@@ -288,6 +299,9 @@ namespace sc::ecs2::internal {
     FreeList m_free;
     FreeList m_rareFree;
     std::array<Share, MAX_THREADS> m_shares{};
+    // For the threads that have none in m_shares, see withShare.
+    Share m_shared;
+    std::mutex m_sharedMutex;
   };
 
 } // namespace sc::ecs2::internal

@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "sc/ecs2/scheduler.hpp"
@@ -456,6 +457,32 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     scheduler.run(world);
     REQUIRE(seen == 0);
     REQUIRE(world.get<Spawner>(entities[0]).count == -1);
+  }
+
+  SECTION("Threads Outside The Pool Record Through Commands") {
+    constexpr size_t threadCount = 8;
+    scheduler.add([&](Commands commands) {
+      std::vector<std::jthread> threads;
+      for (size_t t = 0; t < threadCount; ++t) {
+        threads.emplace_back([&, t] {
+          for (size_t i = t; i < entities.size(); i += threadCount) {
+            commands.emplace<Spawner>(entities[i], static_cast<int>(i));
+            if (i % 5 == 0) {
+              commands.destroy(entities[i]);
+            }
+          }
+        });
+      }
+    });
+    scheduler.run(world);
+
+    for (size_t i = 0; i < entities.size(); ++i) {
+      if (i % 5 == 0) {
+        REQUIRE_FALSE(world.valid(entities[i]));
+      } else {
+        REQUIRE(world.get<Spawner>(entities[i]).count == static_cast<int>(i));
+      }
+    }
   }
 
   SECTION("Recorded Components Are Added And Removed In Their Order") {

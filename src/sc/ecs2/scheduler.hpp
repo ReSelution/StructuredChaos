@@ -8,6 +8,7 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <span>
 #include <string>
@@ -119,6 +120,10 @@ namespace sc::ecs2::internal {
 
     void destroy(Entity entity) { m_destroyed.push_back(entity); }
 
+    // Taken by the threads outside the pool around every change they record:
+    // they all share one list, see Commands::withList.
+    [[nodiscard]] std::mutex &mutex() noexcept { return m_mutex; }
+
     // Does what was recorded: the components in the order they were added and
     // removed, then the entities. Nothing may be running next to it. If
     // making a component throws, the rest is dropped.
@@ -173,6 +178,7 @@ namespace sc::ecs2::internal {
     ValueStore m_values;
     // The entities to destroy.
     std::vector<Entity> m_destroyed;
+    std::mutex m_mutex;
   };
 
 } // namespace sc::ecs2::internal
@@ -292,7 +298,8 @@ namespace sc::ecs2 {
   // It is done once all systems that run at the same time are done, so
   // nothing an entity has goes away or turns up while they run. Safe to use
   // from the function of a parallel loop, for any entity and from several
-  // threads for the same one.
+  // threads for the same one, also from threads outside the pool, which take
+  // turns with a list they share.
   //
   // What one thread records for the components is done in that order, so a
   // component that is erased and then emplaced is replaced. The threads come
@@ -309,14 +316,17 @@ namespace sc::ecs2 {
     [[nodiscard]] Entity create() const { return m_world->create(); }
 
     // Does nothing if the entity does not exist any more by then.
-    void destroy(Entity entity) const { list().destroy(entity); }
+    void destroy(Entity entity) const {
+      withList([&](internal::CommandList &list) { list.destroy(entity); });
+    }
 
     // Makes the component now, from the arguments, and gives it to the entity
     // later. Does nothing if the entity does not exist any more by then or
     // has the component already: the one that was made is dropped. Like
     // erase, this does not count as writing the component.
     template <typename Component, typename... Args> void emplace(Entity entity, Args &&...args) const {
-      list().emplace(entity, m_world->template column<Component>(), std::forward<Args>(args)...);
+      auto &column = m_world->template column<Component>();
+      withList([&](internal::CommandList &list) { list.emplace(entity, column, std::forward<Args>(args)...); });
     }
 
     // Does nothing if the entity does not exist any more by then or does not
@@ -324,21 +334,27 @@ namespace sc::ecs2 {
     // the component: the systems that use it run at the same time and still
     // find it.
     template <typename Component> void erase(Entity entity) const {
-      list().erase(entity, m_world->template column<Component>());
+      auto &column = m_world->template column<Component>();
+      withList([&](internal::CommandList &list) { list.erase(entity, column); });
     }
 
   private:
-    // The one of the calling thread.
-    // TODO: threadId() is 0 for every thread outside the pool: a system that
-    // hands Commands to its own threads has them all push into list 0 at the
-    // same time, which is not thread-safe. Same cause as
-    // EntityAllocator::shareOfThread.
-    [[nodiscard]] internal::CommandList &list() const {
-      return m_lists[static_cast<size_t>(threading::threadId())];
+    // Calls the function with the list of the calling thread. The last list
+    // is shared by the threads outside the pool, which lock it for the call.
+    template <typename Function> void withList(Function &&function) const {
+      const uint32_t thread = threading::threadId();
+      if (thread < m_lists.size() - 1) [[likely]] {
+        function(m_lists[thread]);
+        return;
+      }
+      internal::CommandList &shared = m_lists.back();
+      const std::scoped_lock lock{shared.mutex()};
+      function(shared);
     }
 
     World *m_world;
-    // One for every sc::threading::threadId.
+    // One for every sc::threading::threadId, and one more for the threads
+    // outside the pool.
     std::span<internal::CommandList> m_lists;
   };
 
@@ -599,8 +615,9 @@ namespace sc::ecs2 {
       // Here and not when the system is added: the pool may be set up later.
       const size_t threads = threading::threadSlots();
       for (System &system : m_systems) {
-        if (system.access.commands && system.commands.size() < threads) {
-          system.commands = std::vector<internal::CommandList>(threads);
+        // One more for the threads outside the pool, see Commands::withList.
+        if (system.access.commands && system.commands.size() < threads + 1) {
+          system.commands = std::vector<internal::CommandList>(threads + 1);
         }
       }
 
@@ -664,8 +681,9 @@ namespace sc::ecs2 {
       std::move_only_function<void(const internal::SystemContext &)> run;
       std::string name;
       internal::SystemAccess access;
-      // What the threads recorded through Commands, one list for every
-      // thread; empty for a system that does not take Commands.
+      // What the threads recorded through Commands, one list for every pool
+      // thread and one for all others; empty for a system that does not take
+      // Commands.
       std::vector<internal::CommandList> commands;
     };
 

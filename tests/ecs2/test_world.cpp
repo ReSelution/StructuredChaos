@@ -10,6 +10,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -268,6 +269,39 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     for (const Entity entity : earlier) {
       REQUIRE_FALSE(world.valid(entity));
     }
+  }
+
+  SECTION("Threads Outside The Pool Create Other Entities") {
+    constexpr size_t perThread = 20000;
+    constexpr size_t threadCount = 8;
+    std::vector<Entity> created(perThread * threadCount);
+    std::vector<Entity> createdRare(perThread * threadCount);
+    std::atomic<bool> go{false};
+    {
+      std::vector<std::jthread> threads;
+      for (size_t t = 0; t < threadCount; ++t) {
+        threads.emplace_back([&, t] {
+          while (!go.load(std::memory_order_acquire)) {
+          }
+          for (size_t i = 0; i < perThread; ++i) {
+            created[t * perThread + i] = world.create();
+            createdRare[t * perThread + i] = world.create(sc::ecs2::rare);
+          }
+        });
+      }
+      go.store(true, std::memory_order_release);
+    }
+
+    std::unordered_set<uint32_t> indices;
+    for (const Entity entity : created) {
+      REQUIRE(world.valid(entity));
+      indices.insert(sc::ecs2::indexOf(entity));
+    }
+    for (const Entity entity : createdRare) {
+      REQUIRE(world.valid(entity));
+      indices.insert(sc::ecs2::indexOf(entity));
+    }
+    REQUIRE(indices.size() == created.size() + createdRare.size());
   }
 }
 
