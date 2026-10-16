@@ -14,6 +14,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "sc/memory/range_cache.hpp"
 #include "sc/memory/virtual_memory.hpp"
 
 #include "entity.hpp"
@@ -105,10 +106,17 @@ namespace sc::ecs2::internal {
   // the last one is gone, so a range of indices without the component costs
   // nothing, neither memory nor time to go through. Only the last
   // SPARE_PAGES pages that were emptied keep theirs for a while, see park.
-  // The same goes for what
-  // the column knows about the entities of a page, its header: the headers
-  // come in blocks of HEADER_BLOCK_PAGES pages, made when the first of them
-  // is used.
+  // The same goes for what the column knows about the entities of a page,
+  // its header: the headers come in blocks of HEADER_BLOCK_PAGES pages, made
+  // when the first of them is used.
+  //
+  // The chunks come from memory::rangeCache and go back to it, with the
+  // memory they have: a column made after another one went gets its memory
+  // without the OS clearing it first. Such a chunk may hold memory in pages
+  // without components that no page of the column counts, at most a chunk
+  // of it, until the column goes; the cache offered it to the OS, which
+  // takes it when it needs it. The headers are reserved anew, they must be
+  // zero.
   //
   // The pages of a chunk lie without gaps on purpose. Memory that an
   // allocator hands out page by page has unused bytes between the pages, and
@@ -148,6 +156,9 @@ namespace sc::ecs2::internal {
       std::atomic_flag busy;
       // Whether the page is one of the spares, see park.
       std::atomic<bool> parked;
+      // Whether the values gave their memory back since the column has
+      // them. Only used by the thread that has busy set.
+      bool vacated;
     };
 
     // Has busy of a header set for as long as it exists.
@@ -220,7 +231,7 @@ namespace sc::ecs2::internal {
       }
       for (void *const reserved: m_chunkMemory) {
         if (reserved != nullptr) {
-          memory::release(reserved, CHUNK_RESERVED_BYTES);
+          memory::rangeCache().release(reserved, CHUNK_RESERVED_BYTES);
         }
       }
       // The headers have nothing to do at their end.
@@ -569,7 +580,8 @@ namespace sc::ecs2::internal {
       if (values != nullptr) {
         return values;
       }
-      void *const reserved = memory::reserve(CHUNK_RESERVED_BYTES);
+      bool kept = false;
+      void *const reserved = memory::rangeCache().reserve(CHUNK_RESERVED_BYTES, kept);
       // Where a huge page may start: an address, not an offset, the range
       // itself may begin anywhere.
       const auto address = reinterpret_cast<uintptr_t>(reserved);
@@ -581,6 +593,8 @@ namespace sc::ecs2::internal {
       } else {
         memory::preferSmallPages(fresh, CHUNK_BYTES);
       }
+      // Before the chunk is there for others, who read it after they saw it.
+      m_chunkKept[chunk] = kept;
       slot.store(fresh, std::memory_order_release);
       // Only read when the column goes, after every thread is done with it.
       m_chunkMemory[chunk] = reserved;
@@ -614,7 +628,7 @@ namespace sc::ecs2::internal {
       }
       if constexpr (HAS_VALUE) {
         try {
-          startPage(number);
+          startPage(number, header.vacated);
         } catch (...) {
           header.count.fetch_sub(count, std::memory_order_seq_cst);
           throw;
@@ -703,6 +717,7 @@ namespace sc::ecs2::internal {
       }
       if constexpr (HAS_VALUE) {
         memory::decommit(valuesOf(number), PAGE_BYTES);
+        header.vacated = true;
       }
       m_pages.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -719,8 +734,13 @@ namespace sc::ecs2::internal {
     //
     // With small pages the memory of the page is its own, and it is fetched
     // in one go: left to the first accesses, the OS would be asked once for
-    // every OS_PAGE_SIZE of it.
-    void startPage(uint32_t number) {
+    // every OS_PAGE_SIZE of it. Not in a chunk that memory::rangeCache kept,
+    // until the page gave its memory back: the memory is there already, or
+    // offered to the OS and still there unless it took it. Writing to it is
+    // all it takes then, while fetching it in one go has the OS go through
+    // every piece of it: 1.5 instead of 2.5 ms to create 100 000 entities
+    // with 320 bytes of components each in small pages.
+    void startPage(uint32_t number, bool vacated) {
       const size_t chunk = number / CHUNK_PAGES;
       auto *const base = reinterpret_cast<std::byte *>(makeChunk(chunk));
       // Within the chunk.
@@ -739,7 +759,9 @@ namespace sc::ecs2::internal {
           for (size_t region = firstRegion; region <= lastRegion; ++region) {
             m_regions[region].store(STARTED, std::memory_order_release);
           }
-          memory::populate(first, PAGE_BYTES);
+          if (vacated || !m_chunkKept[chunk]) {
+            memory::populate(first, PAGE_BYTES);
+          }
           return;
         }
       }
@@ -804,6 +826,8 @@ namespace sc::ecs2::internal {
     // reserved; and the range reserved for it, which they lie in.
     std::array<std::atomic<T *>, CHUNK_COUNT> m_chunks{};
     std::array<void *, CHUNK_COUNT> m_chunkMemory{};
+    // Whether memory::rangeCache kept the range of a chunk, see startPage.
+    std::array<bool, CHUNK_COUNT> m_chunkKept{};
     std::atomic<size_t> m_chunkCount{0};
     // Held while a chunk is reserved.
     std::mutex m_growMutex;
