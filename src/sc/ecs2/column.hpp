@@ -166,6 +166,14 @@ namespace sc::ecs2::internal {
       auto *start = static_cast<std::byte *>(m_memory);
       m_headers = reinterpret_cast<Header *>(start);
       // Few enough to have memory from the start, all zero until used.
+      // TODO: HEADER_BYTES is 4.25 MiB per column (sizeof(Header) = 1088,
+      // measured with clang on Linux, times PAGE_COUNT 4096). On Linux the
+      // commit costs nothing until touched, on Windows MEM_COMMIT counts
+      // against the commit limit right away, for every column of every
+      // world. The values also reserve sizeof(T) * INDEX_LIMIT of address
+      // space: 1 GiB for a 64 B component, 16 GiB for 1 KiB, so large
+      // components held by value run out of the 128 TiB user space after a
+      // few thousand columns.
       memory::commit(m_headers, HEADER_BYTES);
       if constexpr (HAS_VALUE) {
         // Where a huge page may start: an address, not an offset, the range

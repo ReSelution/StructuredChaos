@@ -329,6 +329,10 @@ namespace sc::ecs2 {
 
   private:
     // The one of the calling thread.
+    // TODO: threadId() is 0 for every thread outside the pool: a system that
+    // hands Commands to its own threads has them all push into list 0 at the
+    // same time, which is not thread-safe. Same cause as
+    // EntityAllocator::shareOfThread.
     [[nodiscard]] internal::CommandList &list() const {
       return m_lists[static_cast<size_t>(threading::threadId())];
     }

@@ -237,6 +237,11 @@ namespace sc::ecs2::internal {
     }
 
   private:
+    // TODO: threadId() is 0 for every thread outside the pool, so such threads
+    // share the Share of the thread that called init and race on next++:
+    // the same index is handed out twice. A library user like SAA creates
+    // entities from its own threads. Beyond MAX_THREADS there is only the
+    // assert, a release build indexes past m_shares.
     Share &shareOfThread() noexcept {
       const auto thread = static_cast<size_t>(threading::threadId());
       assert(thread < MAX_THREADS);
