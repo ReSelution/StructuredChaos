@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <memory>
 #include <random>
 #include <span>
@@ -133,6 +134,22 @@ namespace {
     }
     REQUIRE(once == expected.size());
   }
+
+#ifdef __linux__
+  // The addresses the process has reserved, used or not, in bytes.
+  size_t addressSpace() {
+    std::ifstream status{"/proc/self/status"};
+    std::string key;
+    size_t kilobytes = 0;
+    while (status >> key) {
+      if (key == "VmSize:") {
+        status >> kilobytes;
+        break;
+      }
+    }
+    return kilobytes * 1024;
+  }
+#endif
 
 } // namespace
 
@@ -711,6 +728,102 @@ TEST_CASE("World Components", "[ecs2][world]") {
       world.destroy(entity);
     }
     REQUIRE(positions.pages() == 0);
+  }
+
+  SECTION("Headers And Values Get Memory Only Where Pages Are Used") {
+    using Column = sc::ecs2::internal::Column<Position>;
+    Column column{world.pages()};
+    REQUIRE(column.headerBlocks() == 0);
+    REQUIRE(column.chunks() == 0);
+    // Asking makes nothing.
+    REQUIRE_FALSE(column.contains(5));
+    REQUIRE_FALSE(column.page(0));
+    REQUIRE_FALSE(column.erase(5));
+    REQUIRE(column.headerBlocks() == 0);
+    REQUIRE(column.chunks() == 0);
+
+    // A chunk has room for a huge page and more than one block of headers.
+    static_assert(Column::CHUNK_SIZE * sizeof(Position) >= sc::memory::HUGE_PAGE_SIZE);
+    static_assert(Column::CHUNK_SIZE / PAGE_SIZE == Column::HEADER_BLOCK_PAGES);
+    const uint32_t far = (130 * PAGE_SIZE) + 5;
+    column.emplace(far, 1.0f, 2.0f);
+    REQUIRE(column.headerBlocks() == 1);
+    REQUIRE(column.chunks() == 1);
+    // Another page of the same block and chunk.
+    const uint32_t near = 129 * PAGE_SIZE;
+    column.emplace(near, 3.0f, 4.0f);
+    REQUIRE(column.headerBlocks() == 1);
+    REQUIRE(column.chunks() == 1);
+    // The last index there is, which is a rare entity's.
+    const uint32_t last = sc::ecs2::INDEX_LIMIT - 1;
+    column.emplace(last, 5.0f, 6.0f);
+    REQUIRE(column.headerBlocks() == 2);
+    REQUIRE(column.chunks() == 2);
+    REQUIRE(column.pages() == 3);
+    REQUIRE(column.get(far).y == 2.0f);
+    REQUIRE(column.get(near).y == 4.0f);
+    REQUIRE(column.get(last).y == 6.0f);
+
+    // Pages that are emptied give back their memory, not their addresses.
+    REQUIRE(column.erase(far));
+    REQUIRE(column.erase(last));
+    REQUIRE(column.pages() == 1);
+    REQUIRE(column.headerBlocks() == 2);
+    REQUIRE(column.chunks() == 2);
+    REQUIRE_FALSE(column.contains(far));
+    REQUIRE(column.get(near).x == 3.0f);
+  }
+
+  SECTION("A Column Reserves The Addresses Of Its Chunks Only") {
+    struct Large {
+      std::byte bytes[1024];
+    };
+    // 64 MiB of addresses for a chunk; all indices would be 16 GiB.
+    static_assert(sc::ecs2::internal::Column<Large>::CHUNK_SIZE == 1u << 16);
+#ifdef __linux__
+    const size_t before = addressSpace();
+#endif
+    std::vector<Entity> entities(10000);
+    world.create(entities, Large{});
+    REQUIRE(world.column<Large>().chunks() == 1);
+#ifdef __linux__
+    // With room for what else the process reserves meanwhile: mimalloc may
+    // take a whole arena of 1 GiB.
+    REQUIRE(addressSpace() - before < (size_t{2} << 30));
+#endif
+  }
+
+  SECTION("A Page Emptied And Filled Again Has The New Components") {
+    std::vector<Entity> entities;
+    for (size_t i = 0; i < 3 * PAGE_SIZE; ++i) {
+      entities.push_back(world.create());
+      world.emplace<Position>(entities.back(), static_cast<float>(i), 0.0f);
+      world.emplace<Named>(entities.back(), "a name too long for the string itself " + std::to_string(i), nullptr);
+    }
+    for (int round = 1; round <= 2; ++round) {
+      // The middle page, all of it.
+      for (size_t i = PAGE_SIZE; i < 2 * PAGE_SIZE; ++i) {
+        world.erase<Position>(entities[i]);
+        world.erase<Named>(entities[i]);
+      }
+      REQUIRE(world.column<Position>().pages() == 2);
+      REQUIRE(world.column<Named>().pages() == 2);
+      for (size_t i = PAGE_SIZE; i < 2 * PAGE_SIZE; ++i) {
+        world.emplace<Position>(entities[i], static_cast<float>(i), static_cast<float>(round));
+        world.emplace<Named>(entities[i], "filled again in round " + std::to_string(round) + " " + std::to_string(i),
+                             nullptr);
+      }
+      REQUIRE(world.column<Position>().pages() == 3);
+      size_t right = 0;
+      for (size_t i = 0; i < entities.size(); ++i) {
+        const bool refilled = i >= PAGE_SIZE && i < 2 * PAGE_SIZE;
+        const Position &pos = world.get<const Position>(entities[i]);
+        const std::string &name = world.get<const Named>(entities[i]).name;
+        right += pos.x == static_cast<float>(i) && pos.y == (refilled ? static_cast<float>(round) : 0.0f) &&
+                 name.ends_with(" " + std::to_string(i)) && name.contains("round") == refilled;
+      }
+      REQUIRE(right == entities.size());
+    }
   }
 }
 
