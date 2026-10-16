@@ -416,7 +416,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
 
     REQUIRE(used == entities.size());
     REQUIRE(seen == targets);
-    REQUIRE(world.column<Spawner>().pages() == 0);
+    REQUIRE(world.column<Spawner>().pages() == world.column<Spawner>().spares());
     REQUIRE_FALSE(world.valid(entities.back()));
     for (size_t i = 0; i + 1 < entities.size(); ++i) {
       REQUIRE(world.contains<Health>(entities[i]));

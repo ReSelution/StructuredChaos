@@ -62,6 +62,10 @@ namespace sc::ecs2 {
   // huge page it does not need, and little of it has to be moved over.
   inline constexpr size_t HUGE_PAGE_COLUMN_BYTES = memory::HUGE_PAGE_SIZE;
 
+  // How much memory of emptied pages a column keeps at most, for pages that
+  // get components again, see Column::SPARE_PAGES.
+  inline constexpr size_t SPARE_BYTES = 2 * memory::HUGE_PAGE_SIZE;
+
 } // namespace sc::ecs2
 
 namespace sc::ecs2::internal {
@@ -99,7 +103,9 @@ namespace sc::ecs2::internal {
   // goes; within a chunk one page of the column lies right after the other. A
   // page gets memory with the first component in it and gives it back when
   // the last one is gone, so a range of indices without the component costs
-  // nothing, neither memory nor time to go through. The same goes for what
+  // nothing, neither memory nor time to go through. Only the last
+  // SPARE_PAGES pages that were emptied keep theirs for a while, see park.
+  // The same goes for what
   // the column knows about the entities of a page, its header: the headers
   // come in blocks of HEADER_BLOCK_PAGES pages, made when the first of them
   // is used.
@@ -140,6 +146,8 @@ namespace sc::ecs2::internal {
       std::atomic<bool> started;
       // Set while a thread gives the values their memory or takes it back.
       std::atomic_flag busy;
+      // Whether the page is one of the spares, see park.
+      std::atomic<bool> parked;
     };
 
     // Has busy of a header set for as long as it exists.
@@ -185,15 +193,20 @@ namespace sc::ecs2::internal {
         m_hugePages(!rareComponent<T> &&
                     (pages == Pages::Huge || (pages == Pages::Auto && sizeof(T) >= HUGE_PAGE_COMPONENT_BYTES))),
         m_grows(!rareComponent<T> && pages == Pages::Auto && sizeof(T) < HUGE_PAGE_COMPONENT_BYTES),
-        m_headers(static_cast<Header *>(memory::reserve(HEADER_BYTES))) {}
+        m_headers(static_cast<Header *>(memory::reserve(HEADER_BYTES))) {
+      for (std::atomic<uint32_t> &spare: m_spares) {
+        spare.store(NO_PAGE, std::memory_order_relaxed);
+      }
+    }
 
     ~Column() override {
       if constexpr (DESTROYS) {
-        // The pages that have components, which are as many as have memory.
+        // The pages that have memory, the spares among them, which have no
+        // components.
         size_t left = pages();
         for (uint32_t number = 0; left != 0 && number < PAGE_COUNT; ++number) {
           const Header *const header = findHeader(number);
-          if (header == nullptr || header->count.load(std::memory_order_relaxed) == 0) {
+          if (header == nullptr || !header->started.load(std::memory_order_relaxed)) {
             continue;
           }
           --left;
@@ -404,8 +417,31 @@ namespace sc::ecs2::internal {
     // Whether the OS may hand the values out in huge pages.
     [[nodiscard]] bool hugePages() const noexcept { return m_hugePages.load(std::memory_order_relaxed); }
 
-    // How many pages have memory.
+    // How many pages have memory, the spares among them.
     [[nodiscard]] size_t pages() const noexcept { return m_pages.load(std::memory_order_relaxed); }
+
+    // How many pages have memory but no component, kept for when they get
+    // one again, see park. Exact only while no thread adds or removes.
+    [[nodiscard]] size_t spares() const noexcept {
+      size_t found = 0;
+      for (const std::atomic<uint32_t> &spare: m_spares) {
+        const uint32_t number = spare.load(std::memory_order_relaxed);
+        found += number != NO_PAGE && m_headers[number].count.load(std::memory_order_relaxed) == 0 &&
+                 m_headers[number].started.load(std::memory_order_relaxed);
+      }
+      return found;
+    }
+
+    // Gives the memory of the spares back now. Safe next to threads that add
+    // and remove: a spare that got a component meanwhile keeps its memory.
+    void trim() noexcept {
+      for (std::atomic<uint32_t> &spare: m_spares) {
+        const uint32_t number = spare.exchange(NO_PAGE, std::memory_order_acq_rel);
+        if (number != NO_PAGE) {
+          unpark(number);
+        }
+      }
+    }
 
     // How many blocks of headers have memory, see HEADER_BLOCK_PAGES. They
     // keep it until the column goes.
@@ -421,6 +457,11 @@ namespace sc::ecs2::internal {
     static constexpr uint32_t HEADER_BLOCK_PAGES = 64;
     // The values are reserved in chunks of this many indices.
     static constexpr uint32_t CHUNK_SIZE = uint32_t{1} << chunkBits<sizeof(T)>();
+    // How many emptied pages keep their memory at most: 4, fewer where that
+    // would be more than SPARE_BYTES, but at least one. A component without
+    // members has no memory to keep.
+    static constexpr size_t SPARE_PAGES =
+        HAS_VALUE ? std::clamp<size_t>(SPARE_BYTES / (sizeof(T) * PAGE_SIZE), 1, 4) : 0;
 
   private:
     // The values of a page are a whole number of memory::OS_PAGE_SIZE, so a
@@ -456,6 +497,8 @@ namespace sc::ecs2::internal {
     static constexpr uint32_t UNTOUCHED = 0;
     static constexpr uint32_t STARTING = 1;
     static constexpr uint32_t STARTED = 2;
+    // An empty place among the spares.
+    static constexpr uint32_t NO_PAGE = ~uint32_t{0};
 
     [[nodiscard]] static bool has(const Header &header, uint32_t slot) noexcept {
       return ((header.mask[slot / 64].load(std::memory_order_relaxed) >> (slot % 64)) & 1u) != 0;
@@ -546,14 +589,17 @@ namespace sc::ecs2::internal {
     }
 
     // Counts so many components more in a page, which is all there is to it
-    // unless they are its first ones: the values get their memory then.
+    // unless the page has no memory: the values get it then. A spare has it,
+    // also for its first component.
     //
     // Other threads may add to the page and remove from it at the same time.
     // A thread that finds the memory missing waits here for the one that
-    // fetches it, or that is taking it back, see vacate.
+    // fetches it, or that is taking it back, see vacate. One that finds it
+    // there may use it: vacate marks it as gone before it looks at the count,
+    // which it finds raised then.
     void occupy(Header &header, uint32_t number, uint32_t count) {
-      if (header.count.fetch_add(count, std::memory_order_seq_cst) != 0 &&
-          header.started.load(std::memory_order_seq_cst)) [[likely]] {
+      header.count.fetch_add(count, std::memory_order_seq_cst);
+      if (header.started.load(std::memory_order_seq_cst)) [[likely]] {
         return;
       }
       start(header, number, count);
@@ -581,12 +627,58 @@ namespace sc::ecs2::internal {
     // Counts so many components less in a page, which are gone already.
     void forsake(Header &header, uint32_t number, uint32_t count) noexcept {
       if (header.count.fetch_sub(count, std::memory_order_seq_cst) == count) [[unlikely]] {
-        vacate(header, number);
+        if constexpr (HAS_VALUE) {
+          park(header, number);
+        } else {
+          vacate(header, number);
+        }
       }
     }
 
-    // The last component of a page was removed: its memory goes back, unless
-    // a thread has added one since.
+    // A page that was just emptied keeps its memory as one of the spares,
+    // and the one it takes the place of gives its own back, unless it got
+    // components again meanwhile. Returning the memory of a page at once
+    // and fetching it again with its next component took 2.3 µs with huge
+    // pages and 22 µs with small ones per component added and removed again
+    // (16 byte components, a page with just one entity); as a spare it
+    // takes 9 to 12 ns, 7 ns in a page that holds other components as well.
+    // With huge pages it also cut the huge page the page lies in into small
+    // ones for good. The spares keep that from a few pages whose components
+    // come and go all the time, more than one so that two of them do not
+    // take each other's place over and over.
+    //
+    // A page is among the spares once at most: parked is set before it goes
+    // in and cleared after it came out. A page emptied again while it is
+    // still in has nothing to do; one emptied while it comes out goes in
+    // again or finds its memory gone in unpark.
+    //
+    // parked is sequentially consistent, as the count: a thread that finds
+    // it set came before unpark clears it, and so did its count, which
+    // vacate sees then. Only looked at first, which on x86 costs nothing,
+    // while the exchange would add a locked instruction to every page that
+    // is emptied again while it is in: 11 to 14 instead of 9 to 12 ns per
+    // component added and removed again.
+    void park(Header &header, uint32_t number) noexcept {
+      if (header.parked.load(std::memory_order_seq_cst) || header.parked.exchange(true, std::memory_order_seq_cst)) {
+        return;
+      }
+      const uint32_t place = m_nextSpare.fetch_add(1, std::memory_order_relaxed) % SPARE_PAGES;
+      const uint32_t replaced = m_spares[place].exchange(number, std::memory_order_acq_rel);
+      if (replaced != NO_PAGE) {
+        unpark(replaced);
+      }
+    }
+
+    // A page that came out of the spares gives its memory back if it still
+    // has no component, see park.
+    void unpark(uint32_t number) noexcept {
+      Header &header = m_headers[number];
+      header.parked.store(false, std::memory_order_seq_cst);
+      vacate(header, number);
+    }
+
+    // A page has no component: its memory goes back, unless a thread has
+    // added one since.
     //
     // Whoever adds one counts it first and looks for the memory after, and
     // here the memory is marked as gone first and the count looked at after.
@@ -719,6 +811,10 @@ namespace sc::ecs2::internal {
     // chunk.
     std::array<std::atomic<uint32_t>, REGION_COUNT> m_regions{};
     std::atomic<size_t> m_pages{0};
+    // The emptied pages that keep their memory, NO_PAGE for an empty place;
+    // the next one takes the place m_nextSpare points to.
+    std::array<std::atomic<uint32_t>, SPARE_PAGES> m_spares;
+    std::atomic<uint32_t> m_nextSpare{0};
   };
 
 } // namespace sc::ecs2::internal

@@ -151,6 +151,9 @@ namespace {
   }
 #endif
 
+  // The pages of a column that hold components, without the spares it keeps.
+  template <typename Column> size_t usedPages(const Column &column) { return column.pages() - column.spares(); }
+
 } // namespace
 
 // Gamma as well, so that the loops below go through columns of both kinds.
@@ -493,7 +496,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     });
     REQUIRE(removed == entities.size());
     REQUIRE(alive.use_count() == 1);
-    REQUIRE(world.column<Named>().pages() == 0);
+    REQUIRE(usedPages(world.column<Named>()) == 0);
     // Counted as many as there are.
     size_t tags = 0;
     world.each<const Tag>([&](Entity) { ++tags; });
@@ -529,12 +532,12 @@ TEST_CASE("World Components", "[ecs2][world]") {
       world.erase<Named>(entity);
     }
     REQUIRE(alive.use_count() == 1);
-    REQUIRE(world.column<Named>().pages() == 0);
+    REQUIRE(usedPages(world.column<Named>()) == 0);
 
     // One that cannot be made is not there for the next to try.
     REQUIRE_THROWS_AS(world.tryEmplace<Fragile>(entities[0], "no", true), std::runtime_error);
     REQUIRE_FALSE(world.contains<Fragile>(entities[0]));
-    REQUIRE(world.column<Fragile>().pages() == 0);
+    REQUIRE(usedPages(world.column<Fragile>()) == 0);
     REQUIRE(world.tryEmplace<Fragile>(entities[0], "yes", false));
     REQUIRE(world.get<Fragile>(entities[0]).text == "yes");
   }
@@ -558,11 +561,14 @@ TEST_CASE("World Components", "[ecs2][world]") {
       }
     });
     REQUIRE(wrong == 0);
-    REQUIRE(world.column<Position>().pages() == 0);
+    // The page is a spare now.
+    REQUIRE(world.column<Position>().pages() == 1);
+    REQUIRE(world.column<Position>().spares() == 1);
     REQUIRE_FALSE(world.column<Position>().page(0));
 
     world.emplace<Position>(entities[0], 3.0f, 4.0f);
     REQUIRE(world.column<Position>().pages() == 1);
+    REQUIRE(world.column<Position>().spares() == 0);
     REQUIRE(world.get<Position>(entities[0]).y == 4.0f);
   }
 
@@ -578,7 +584,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
       REQUIRE(alive.use_count() == 2);
       REQUIRE(owning.erase<Named>(first));
       REQUIRE(alive.use_count() == 1);
-      REQUIRE(owning.column<Named>().pages() == 0);
+      REQUIRE(usedPages(owning.column<Named>()) == 0);
 
       owning.emplace<Named>(first, name, alive);
       owning.emplace<Owner>(first, std::make_unique<int>(7));
@@ -619,7 +625,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     const Entity entity = world.create();
     REQUIRE_THROWS_AS(world.emplace<Fragile>(entity, std::string(100, 'f'), true), std::runtime_error);
     REQUIRE_FALSE(world.contains<Fragile>(entity));
-    REQUIRE(world.column<Fragile>().pages() == 0);
+    REQUIRE(usedPages(world.column<Fragile>()) == 0);
     REQUIRE_FALSE(world.column<Fragile>().page(0));
 
     // Next to one that is there.
@@ -634,7 +640,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(world.get<Fragile>(entity).text == "made");
     REQUIRE(world.erase<Fragile>(entity));
     REQUIRE(world.erase<Fragile>(other));
-    REQUIRE(world.column<Fragile>().pages() == 0);
+    REQUIRE(usedPages(world.column<Fragile>()) == 0);
   }
 
   SECTION("Added, Read, Changed And Removed") {
@@ -697,12 +703,13 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(kept->x == static_cast<float>(PAGE_SIZE + 7));
   }
 
-  SECTION("A Page Has Memory Only While It Holds A Component") {
+  SECTION("A Page Has Memory Only While It Holds A Component Or Is A Spare") {
     std::vector<Entity> entities;
     for (size_t i = 0; i < 4 * PAGE_SIZE; ++i) {
       entities.push_back(world.create());
     }
     auto &positions = world.column<Position>();
+    STATIC_REQUIRE(std::remove_reference_t<decltype(positions)>::SPARE_PAGES == 4);
     REQUIRE(positions.pages() == 0);
 
     // One entity of the third page.
@@ -719,15 +726,86 @@ TEST_CASE("World Components", "[ecs2][world]") {
     for (size_t i = PAGE_SIZE; i < 2 * PAGE_SIZE; ++i) {
       world.erase<Position>(entities[i]);
     }
-    REQUIRE(positions.pages() == 3);
+    // It keeps its memory as a spare, but is not gone through.
+    REQUIRE(positions.pages() == 4);
+    REQUIRE(positions.spares() == 1);
+    REQUIRE_FALSE(positions.page(1));
     size_t visited = 0;
     world.each<const Position>([&](const Position &) { ++visited; });
     REQUIRE(visited == 3 * PAGE_SIZE);
 
+    // All four are spares now, until they are trimmed.
     for (const Entity entity : entities) {
       world.destroy(entity);
     }
+    REQUIRE(positions.pages() == 4);
+    REQUIRE(positions.spares() == 4);
+    positions.trim();
     REQUIRE(positions.pages() == 0);
+    REQUIRE(positions.spares() == 0);
+  }
+
+  SECTION("A Column Keeps The Last Pages That Were Emptied") {
+    using Column = sc::ecs2::internal::Column<Position>;
+    Column column{world.pages()};
+    constexpr uint32_t pages = Column::SPARE_PAGES + 2;
+    for (uint32_t number = 0; number < pages; ++number) {
+      column.emplace(number * PAGE_SIZE, static_cast<float>(number), 0.0f);
+    }
+    for (uint32_t number = 0; number < pages; ++number) {
+      REQUIRE(column.erase(number * PAGE_SIZE));
+    }
+    // The first two gave their memory back.
+    REQUIRE(column.pages() == Column::SPARE_PAGES);
+    REQUIRE(column.spares() == Column::SPARE_PAGES);
+
+    // A spare that gets a component again keeps its memory, it is not
+    // given back when it comes out of the spares.
+    column.emplace((pages - 1) * PAGE_SIZE, 1.0f, 2.0f);
+    REQUIRE(column.spares() == Column::SPARE_PAGES - 1);
+    for (uint32_t number = 0; number < Column::SPARE_PAGES; ++number) {
+      column.emplace(number * PAGE_SIZE, 0.0f, 0.0f);
+      REQUIRE(column.erase(number * PAGE_SIZE));
+    }
+    REQUIRE(column.get((pages - 1) * PAGE_SIZE).y == 2.0f);
+    REQUIRE(usedPages(column) == 1);
+    column.trim();
+    REQUIRE(column.pages() == 1);
+    REQUIRE(column.get((pages - 1) * PAGE_SIZE).y == 2.0f);
+
+    // Large components keep fewer pages, but at least one.
+    struct Large {
+      std::byte bytes[1024];
+    };
+    STATIC_REQUIRE(sc::ecs2::internal::Column<Large>::SPARE_PAGES == 1);
+    STATIC_REQUIRE(sc::ecs2::internal::Column<sc::ecs2::Entity>::SPARE_PAGES == 4);
+    STATIC_REQUIRE(sc::ecs2::internal::Column<Tag>::SPARE_PAGES == 0);
+  }
+
+  SECTION("Threads Empty And Fill More Pages Than There Are Spares") {
+    // Each thread an entity of a page of its own, so that pages come out of
+    // the spares while their thread gives them a component again.
+    constexpr size_t chunks = 16;
+    std::vector<Entity> entities(chunks * PAGE_SIZE);
+    world.create(std::span<Entity>{entities});
+    const auto alive = std::make_shared<int>(0);
+    std::atomic<size_t> wrong = 0;
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        const Entity entity = entities[chunk * PAGE_SIZE];
+        for (int round = 1; round <= 5000; ++round) {
+          world.emplace<Named>(entity, std::string(100, static_cast<char>('a' + chunk)), alive);
+          wrong += world.get<Named>(entity).name != std::string(100, static_cast<char>('a' + chunk));
+          wrong += !world.erase<Named>(entity);
+        }
+      }
+    });
+    REQUIRE(wrong == 0);
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE(usedPages(world.column<Named>()) == 0);
+    REQUIRE(world.column<Named>().pages() <= world.column<Named>().SPARE_PAGES);
+    world.column<Named>().trim();
+    REQUIRE(world.column<Named>().pages() == 0);
   }
 
   SECTION("Headers And Values Get Memory Only Where Pages Are Used") {
@@ -764,9 +842,12 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(column.get(near).y == 4.0f);
     REQUIRE(column.get(last).y == 6.0f);
 
-    // Pages that are emptied give back their memory, not their addresses.
+    // Pages that are emptied give back their memory once they are trimmed,
+    // not their addresses.
     REQUIRE(column.erase(far));
     REQUIRE(column.erase(last));
+    REQUIRE(column.pages() == 3);
+    column.trim();
     REQUIRE(column.pages() == 1);
     REQUIRE(column.headerBlocks() == 2);
     REQUIRE(column.chunks() == 2);
@@ -806,8 +887,15 @@ TEST_CASE("World Components", "[ecs2][world]") {
         world.erase<Position>(entities[i]);
         world.erase<Named>(entities[i]);
       }
-      REQUIRE(world.column<Position>().pages() == 2);
-      REQUIRE(world.column<Named>().pages() == 2);
+      REQUIRE(usedPages(world.column<Position>()) == 2);
+      REQUIRE(usedPages(world.column<Named>()) == 2);
+      // From the second round on with memory fetched again.
+      if (round == 2) {
+        world.column<Position>().trim();
+        world.column<Named>().trim();
+        REQUIRE(world.column<Position>().pages() == 2);
+        REQUIRE(world.column<Named>().pages() == 2);
+      }
       for (size_t i = PAGE_SIZE; i < 2 * PAGE_SIZE; ++i) {
         world.emplace<Position>(entities[i], static_cast<float>(i), static_cast<float>(round));
         world.emplace<Named>(entities[i], "filled again in round " + std::to_string(round) + " " + std::to_string(i),
@@ -935,8 +1023,8 @@ TEST_CASE("World Loops", "[ecs2][world][threading]") {
     for (const Entity player : players) {
       REQUIRE(world.destroy(player));
     }
-    REQUIRE(world.column<Player>().pages() == 0);
-    REQUIRE(world.column<Position>().pages() == 4);
+    REQUIRE(usedPages(world.column<Player>()) == 0);
+    REQUIRE(usedPages(world.column<Position>()) == 4);
   }
 
   SECTION("A Loop Changes Other Components Of Its Entity") {
@@ -946,7 +1034,7 @@ TEST_CASE("World Loops", "[ecs2][world][threading]") {
       }
       world.erase<Velocity>(entity);
     });
-    REQUIRE(world.column<Velocity>().pages() == 0);
+    REQUIRE(usedPages(world.column<Velocity>()) == 0);
     size_t alphas = 0;
     world.each<const Alpha, const Position>([&](Entity entity, const Alpha &alpha, const Position &pos) {
       alphas += alpha.owner == entity && static_cast<size_t>(pos.x) % 2 == 0;
