@@ -142,8 +142,9 @@ namespace sc::ecs {
     // Here and not when the system is added: the pool may be set up later.
     const size_t threads = threading::threadSlots();
     for (System &system : m_systems) {
-      if (system.access.commandsPerThread && system.commands.size() < threads) {
-        while (system.commands.size() < threads) {
+      // One more for the threads outside the pool, see ParallelCommands::local.
+      if (system.access.commandsPerThread && system.commands.size() < threads + 1) {
+        while (system.commands.size() < threads + 1) {
           system.commands.push_back(system.access.makeCommands());
         }
         // The plans name the queues of the buffers.

@@ -905,6 +905,31 @@ TEST_CASE("Loops That Take The Entity And Record Changes", "[ecs][scheduler][com
     }
   }
 
+  SECTION("Threads Outside The Pool Record Through ParallelCommands") {
+    constexpr size_t threadCount = 8;
+    scheduler.add([&](sc::ecs::ParallelCommands<Frozen> commands) {
+      std::vector<std::jthread> threads;
+      for (size_t t = 0; t < threadCount; ++t) {
+        threads.emplace_back([&, t] {
+          auto local = commands.local();
+          // A second one and a copy on the same thread, which share the lock.
+          auto again = commands.local();
+          const auto copy = again;
+          for (size_t i = t; i < count; i += threadCount) {
+            (i % 2 == 0 ? local : again).emplace<Frozen>(entities[i]);
+          }
+          static_cast<void>(copy);
+        });
+      }
+    });
+    scheduler.run(registry);
+
+    REQUIRE(registry.view<Frozen>().size() == count);
+    for (size_t i = 0; i < count; ++i) {
+      REQUIRE(registry.storage<Frozen>().contains(entities[i]));
+    }
+  }
+
   SECTION("An Exception Drops What Every Thread Recorded") {
     scheduler.addParallel(
         [](entt::entity entity, Commands<Frozen> commands, const Position &pos) {

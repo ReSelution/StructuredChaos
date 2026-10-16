@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <tuple>
 #include <utility>
@@ -142,6 +143,11 @@ namespace sc::ecs::internal {
     size_t spareNext = ENTITY_BLOCK_SIZE;
     // Registry::id of the registry the spare entities belong to.
     uint64_t spareRegistry = 0;
+
+    // Held by every Commands of a thread outside the pool for as long as it
+    // exists: those threads share one buffer, see ParallelCommands::local.
+    // Recursive, so that a thread may have several of them at once.
+    std::recursive_mutex mutex;
   };
 
   template <typename... Components> struct CommandBuffer final : CommandBufferBase {
@@ -183,12 +189,46 @@ namespace sc::ecs {
   public:
     using Buffer = internal::CommandBuffer<Components...>;
 
-    Commands(Registry &registry, Buffer &buffer) : m_registry(&registry), m_buffer(&buffer) {
+    // A Commands with a lock holds it until it is destroyed, and so does every
+    // copy of it.
+    Commands(Registry &registry, Buffer &buffer, std::recursive_mutex *lock = nullptr)
+        : m_registry(&registry), m_buffer(&buffer), m_lock(lock) {
+      if (m_lock != nullptr) {
+        m_lock->lock();
+      }
       if (buffer.spareRegistry != registry.id()) {
         // Left over from another registry.
         buffer.releaseSpares();
         buffer.spareRegistry = registry.id();
       }
+    }
+
+    ~Commands() {
+      if (m_lock != nullptr) {
+        m_lock->unlock();
+      }
+    }
+
+    Commands(const Commands &other) : m_registry(other.m_registry), m_buffer(other.m_buffer), m_lock(other.m_lock) {
+      if (m_lock != nullptr) {
+        m_lock->lock();
+      }
+    }
+
+    Commands &operator=(const Commands &other) {
+      if (this != &other) {
+        // Taken before the old one goes: the two may be the same.
+        if (other.m_lock != nullptr) {
+          other.m_lock->lock();
+        }
+        if (m_lock != nullptr) {
+          m_lock->unlock();
+        }
+        m_registry = other.m_registry;
+        m_buffer = other.m_buffer;
+        m_lock = other.m_lock;
+      }
+      return *this;
     }
 
     // The entity exists right away; safe next to everything else.
@@ -234,11 +274,14 @@ namespace sc::ecs {
   private:
     Registry *m_registry;
     Buffer *m_buffer;
+    // The mutex of a buffer shared by the threads outside the pool, or null.
+    std::recursive_mutex *m_lock;
   };
 
   // Commands for a system that records changes from several threads at once,
-  // as the function of a parallelEach does. Every thread has a buffer of its
-  // own, so recording needs no locking here either:
+  // as the function of a parallelEach does. Every pool thread has a buffer of
+  // its own, so recording needs no locking here either; the threads outside
+  // the pool share one, see local:
   //
   //   void reap(View<const Lifetime> view, ParallelCommands<> commands) {
   //     parallelEach(view, [&](entt::entity entity, const Lifetime &lifetime) {
@@ -256,15 +299,23 @@ namespace sc::ecs {
     using Buffer = internal::CommandBuffer<Components...>;
     using Buffers = std::span<const std::unique_ptr<internal::CommandBufferBase>>;
 
-    // One buffer for every sc::threading::threadId.
+    // One buffer for every sc::threading::threadId, and one more for the
+    // threads outside the pool.
     ParallelCommands(Registry &registry, Buffers buffers) : m_registry(&registry), m_buffers(buffers) {}
 
     // The Commands of the calling thread, which must not be handed to another
     // one. Best taken once for many entities.
+    //
+    // The threads outside the pool share the last buffer: their Commands
+    // locks it for as long as it exists, so such a thread keeps the others
+    // waiting until it lets go of it.
     [[nodiscard]] Commands<Components...> local() const {
-      const auto thread = static_cast<size_t>(threading::threadId());
-      assert(thread < m_buffers.size());
-      return Commands<Components...>{*m_registry, static_cast<Buffer &>(*m_buffers[thread])};
+      const uint32_t thread = threading::threadId();
+      if (thread < m_buffers.size() - 1) [[likely]] {
+        return Commands<Components...>{*m_registry, static_cast<Buffer &>(*m_buffers[thread])};
+      }
+      internal::CommandBufferBase &shared = *m_buffers.back();
+      return Commands<Components...>{*m_registry, static_cast<Buffer &>(shared), &shared.mutex};
     }
 
   private:
