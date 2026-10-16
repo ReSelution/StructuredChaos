@@ -36,9 +36,8 @@ SETUP_OPTIONS = ["-Dbuildtype=release", "-Db_ndebug=true", "-Decs_comparison=tru
 LIBRARIES = {
     "sc": "sc::ecs",
     "sc2": "sc::ecs2",
+    "sc2_huge": "sc::ecs2 huge pages",
     "sc2_small": "sc::ecs2 small pages",
-    "sc2_by_size": "sc::ecs2 pages by size",
-    "sc2_adaptive": "sc::ecs2 adaptive pages",
     "entt": "EnTT",
     "flecs": "Flecs",
     "gaia": "gaia-ecs",

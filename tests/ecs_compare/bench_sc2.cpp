@@ -27,7 +27,7 @@ namespace {
   // The executable is built several times, see meson.build: once for each
   // kind of pages a world can have its columns backed with.
 #ifndef ECS_COMPARE_PAGES
-#define ECS_COMPARE_PAGES Huge
+#define ECS_COMPARE_PAGES Auto
 #endif
   constexpr sc::ecs2::Pages PAGES = sc::ecs2::Pages::ECS_COMPARE_PAGES;
 

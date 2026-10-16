@@ -142,7 +142,7 @@ template <> inline constexpr bool sc::ecs2::rareComponent<Gamma> = true;
 
 TEST_CASE("World Entities", "[ecs2][world]") {
   sc::threading::init();
-  World world{GENERATE(Pages::Huge, Pages::Small, Pages::BySize, Pages::Adaptive)};
+  World world{GENERATE(Pages::Auto, Pages::Huge, Pages::Small)};
 
   SECTION("An Entity Exists Until It Is Destroyed") {
     const Entity first = world.create();
@@ -307,7 +307,7 @@ TEST_CASE("World Entities", "[ecs2][world]") {
 
 TEST_CASE("World Components", "[ecs2][world]") {
   sc::threading::init();
-  World world{GENERATE(Pages::Huge, Pages::Small, Pages::BySize, Pages::Adaptive)};
+  World world{GENERATE(Pages::Auto, Pages::Huge, Pages::Small)};
 
   SECTION("Entities Are Created With Their Components All At Once") {
     // Some indices to hand out again, in no order, before the new ones.
@@ -344,7 +344,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     size_t tagged = 0;
     world.each<const Tag, const Player>([&](const Player &) { ++tagged; });
     REQUIRE(tagged == count);
-    REQUIRE(world.column<Position>().hugePages() == (world.pages() == Pages::Huge || world.pages() == Pages::Adaptive));
+    REQUIRE(world.column<Position>().hugePages() == (world.pages() == Pages::Huge || world.pages() == Pages::Auto));
 
     // An entity of the batch is one like any other.
     REQUIRE(world.erase<Position>(entities[count / 2]));
@@ -358,7 +358,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     // As many entities as it takes, and their components are still there.
     const size_t count = sc::ecs2::HUGE_PAGE_COLUMN_BYTES / sizeof(Position) + PAGE_SIZE;
     std::vector<Entity> entities;
-    const bool small = world.pages() == Pages::Small || world.pages() == Pages::BySize;
+    const bool small = world.pages() == Pages::Small;
     for (size_t i = 0; i < count; ++i) {
       entities.push_back(world.create());
       world.emplace<Position>(entities.back(), static_cast<float>(i), 2.0f);
@@ -377,13 +377,14 @@ TEST_CASE("World Components", "[ecs2][world]") {
   }
 
   SECTION("The Columns Are Backed With The Pages Of The World") {
+    REQUIRE(World{}.pages() == Pages::Auto);
     REQUIRE(world.column<Position>().hugePages() == (world.pages() == Pages::Huge));
     // Large enough for huge pages wherever the size decides.
     struct Large {
       std::byte bytes[sc::ecs2::HUGE_PAGE_COMPONENT_BYTES];
     };
     static_assert(sizeof(Position) < sc::ecs2::HUGE_PAGE_COMPONENT_BYTES);
-    REQUIRE(world.column<Large>().hugePages() == (world.pages() == Pages::Huge || world.pages() == Pages::BySize));
+    REQUIRE(world.column<Large>().hugePages() == (world.pages() == Pages::Huge || world.pages() == Pages::Auto));
     // A rare component gets small pages either way.
     REQUIRE_FALSE(world.column<Player>().hugePages());
   }
@@ -715,7 +716,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
 TEST_CASE("World Loops", "[ecs2][world][threading]") {
   sc::threading::init();
-  World world{GENERATE(Pages::Huge, Pages::Small, Pages::BySize, Pages::Adaptive)};
+  World world{GENERATE(Pages::Auto, Pages::Huge, Pages::Small)};
 
   std::vector<Entity> entities;
   for (size_t i = 0; i < 3 * PAGE_SIZE + 200; ++i) {
@@ -848,7 +849,7 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
   std::mt19937 random{seed};
   const auto below = [&](size_t bound) { return std::uniform_int_distribution<size_t>{0, bound - 1}(random); };
 
-  World world{GENERATE(Pages::Huge, Pages::Small, Pages::BySize, Pages::Adaptive)};
+  World world{GENERATE(Pages::Auto, Pages::Huge, Pages::Small)};
   Model model;
   std::vector<Entity> alive;
 

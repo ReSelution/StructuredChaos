@@ -326,8 +326,8 @@ meson setup build -Denable_chaos_stats=true
 
 With `ecs_comparison`, `tests/ecs_compare` builds one executable per library
 that does the same work on one thread and on all of them: `sc::ecs`, `sc::ecs2`
-(once for each of `sc::ecs2::Pages`: huge pages, small ones, by the size of a
-component, and small ones that become huge as a column grows),
+(once for each of `sc::ecs2::Pages`: chosen by each column, the default, then
+huge pages and small ones),
 [EnTT](https://github.com/skypjack/entt),
 [Flecs](https://github.com/SanderMertens/flecs),
 [gaia-ecs](https://github.com/richardbiely/gaia-ecs),

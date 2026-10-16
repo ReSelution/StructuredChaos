@@ -25,10 +25,9 @@ ecs_compare_libraries = {
   'sc': ['bench_sc.cpp', [sc_dep], []],
   # The prototype of an ECS of our own, see src/sc/ecs2.
   'sc2': ['bench_sc2.cpp', [sc_dep], []],
-  # The same with worlds of other sc::ecs2::Pages than Pages::Huge.
+  # The same with worlds of other sc::ecs2::Pages than Pages::Auto.
+  'sc2_huge': ['bench_sc2.cpp', [sc_dep], ['-DECS_COMPARE_PAGES=Huge']],
   'sc2_small': ['bench_sc2.cpp', [sc_dep], ['-DECS_COMPARE_PAGES=Small']],
-  'sc2_by_size': ['bench_sc2.cpp', [sc_dep], ['-DECS_COMPARE_PAGES=BySize']],
-  'sc2_adaptive': ['bench_sc2.cpp', [sc_dep], ['-DECS_COMPARE_PAGES=Adaptive']],
   'entt': ['bench_entt.cpp', [entt_dep], []],
   'flecs': ['bench_flecs.cpp', [flecs_dep], []],
   'gaia': ['bench_gaia.cpp', [gaia_ecs_dep], []],

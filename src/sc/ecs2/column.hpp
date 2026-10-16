@@ -32,6 +32,16 @@ namespace sc::ecs2 {
 
   // What the OS backs the columns of a world with: World world{Pages::Small}.
   enum class Pages : uint8_t {
+    // Chosen by each column, see the two below:
+    //  - huge pages from the start for the components of at least
+    //    HUGE_PAGE_COMPONENT_BYTES. A huge page holds few large components, so
+    //    little of it is left unused, while their column would need a great
+    //    many small pages, each of them fetched from the OS on its own;
+    //  - for smaller components small pages until the column takes up
+    //    HUGE_PAGE_COLUMN_BYTES, huge ones from then on, also for what it has
+    //    already. A world with few entities gets the memory of small pages,
+    //    one with many the speed of huge ones.
+    Auto,
     // Huge pages where the OS has them. Fastest to go through, but a column
     // takes its memory in pieces of memory::HUGE_PAGE_SIZE, so a world with
     // few entities holds much more than its components need.
@@ -39,28 +49,17 @@ namespace sc::ecs2 {
     // Only pages of memory::OS_PAGE_SIZE, for every component and not just
     // the rare ones. The memory follows the components closely.
     Small,
-    // Huge pages for the components of at least HUGE_PAGE_COMPONENT_BYTES and
-    // small ones for the rest. A huge page holds few large components, so
-    // little of it is left unused, while their column would need a great many
-    // small pages, each of them fetched from the OS on its own. With small
-    // components it is the other way around.
-    BySize,
-    // Small pages for a column until its components take up
-    // HUGE_PAGE_COLUMN_BYTES, huge ones from then on, also for what it has
-    // already. A world with few entities gets the memory of small pages, one
-    // with many the speed of huge ones.
-    Adaptive,
   };
 
-  // From which size on a component gets huge pages in a world of
-  // Pages::BySize. At this size a huge page holds the components of 8 pages
+  // From which size on a component gets huge pages from the start in a world
+  // of Pages::Auto. At this size a huge page holds the components of 8 pages
   // of a column.
   inline constexpr size_t HUGE_PAGE_COMPONENT_BYTES = 64;
 
-  // How much memory the pages of a column take before it moves to huge pages
-  // in a world of Pages::Adaptive: as much as one of them holds. A column
-  // that is filled without gaps then never holds more than a huge page it
-  // does not need, and little of it has to be moved over.
+  // How much memory the pages of a column of smaller components take before
+  // it moves to huge pages in a world of Pages::Auto: as much as one of them
+  // holds. A column that is filled without gaps then never holds more than a
+  // huge page it does not need, and little of it has to be moved over.
   inline constexpr size_t HUGE_PAGE_COLUMN_BYTES = memory::HUGE_PAGE_SIZE;
 
 } // namespace sc::ecs2
@@ -184,8 +183,8 @@ namespace sc::ecs2::internal {
     // its headers.
     explicit Column(Pages pages = Pages::Huge) :
         m_hugePages(!rareComponent<T> &&
-                    (pages == Pages::Huge || (pages == Pages::BySize && sizeof(T) >= HUGE_PAGE_COMPONENT_BYTES))),
-        m_grows(!rareComponent<T> && pages == Pages::Adaptive),
+                    (pages == Pages::Huge || (pages == Pages::Auto && sizeof(T) >= HUGE_PAGE_COMPONENT_BYTES))),
+        m_grows(!rareComponent<T> && pages == Pages::Auto && sizeof(T) < HUGE_PAGE_COMPONENT_BYTES),
         m_headers(static_cast<Header *>(memory::reserve(HEADER_BYTES))) {}
 
     ~Column() override {
@@ -324,7 +323,7 @@ namespace sc::ecs2::internal {
     }
 
     // Says that so many components are about to be added. In a world of
-    // Pages::Adaptive the column moves to huge pages now if they would take
+    // Pages::Auto the column moves to huge pages now if they would take
     // it there, so that their memory is not fetched in small pages first and
     // moved over afterwards.
     void expect(size_t count) {
@@ -699,7 +698,7 @@ namespace sc::ecs2::internal {
       }
     }
 
-    // Changes once at most, from small pages to huge ones, see Pages::Adaptive.
+    // Changes once at most, from small pages to huge ones, see Pages::Auto.
     std::atomic<bool> m_hugePages{true};
     bool m_grows = false;
     // The header of every page, reserved for all of them and given memory a

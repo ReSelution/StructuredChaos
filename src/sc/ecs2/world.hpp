@@ -116,7 +116,7 @@ namespace sc::ecs2 {
     template <typename Component> using ColumnOf = internal::Column<std::remove_const_t<Component>>;
 
     // The pages are those of every column of the world, see Pages.
-    explicit World(Pages pages = Pages::Huge) : m_pages(pages), m_table(memory::reserve(TABLE_BYTES)) {
+    explicit World(Pages pages = Pages::Auto) : m_pages(pages), m_table(memory::reserve(TABLE_BYTES)) {
       // All null from the start, and without memory until used.
       // TODO: TABLE_BYTES is about 1 MiB per world, committed right away. On
       // Windows that counts against the commit limit for every world, though
