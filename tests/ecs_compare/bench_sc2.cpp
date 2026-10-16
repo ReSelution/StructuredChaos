@@ -168,8 +168,8 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
       World world{ENTITY_COUNT};
       world.fill_moving();
       reaper.run(world.world);
-      REQUIRE(world.world.column<Position>().pages() == 0);
-      REQUIRE(world.world.column<Velocity>().pages() == 0);
+      REQUIRE(world.world.column<Position>().pages() == world.world.column<Position>().spares());
+      REQUIRE(world.world.column<Velocity>().pages() == world.world.column<Velocity>().spares());
       REQUIRE_FALSE(world.world.valid(world.entities.front()));
     }
     BENCHMARK_ADVANCED(name::parallel(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
@@ -201,7 +201,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     adder.run(world.world);
     REQUIRE(world.world.column<Health>().pages() == world.world.column<Position>().pages());
     remover.run(world.world);
-    REQUIRE(world.world.column<Health>().pages() == 0);
+    REQUIRE(world.world.column<Health>().pages() == world.world.column<Health>().spares());
     BENCHMARK(name::parallel(name::ADD_REMOVE)) {
       adder.run(world.world);
       remover.run(world.world);
