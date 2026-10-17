@@ -7,6 +7,14 @@
 
 #include "sc/memory/virtual_memory.hpp"
 
+#ifdef _WIN32
+// For VirtualQuery, which the header leaves out on purpose.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace {
 
   using sc::memory::Pieces;

@@ -2,19 +2,10 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <new>
 
-#ifdef _WIN32
-// Without the min and max macros of <windows.h>, which would take the place
-// of std::min and std::max wherever this header is included.
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
+// The calls to the OS are in virtual_memory.cpp: <windows.h> defines macros
+// such as min, max, near, far and small, which would take the place of
+// whatever has those names wherever this header is included.
 
 // A range of addresses that gets its memory piece by piece: reserved once in
 // full, which costs nothing, and backed with memory only where it is used.
@@ -31,18 +22,7 @@ namespace sc::memory {
 
   // The size of the pieces the OS at hand hands out and takes back: 4096
   // bytes mostly, 16384 or 65536 on some.
-  [[nodiscard]] inline size_t pageSize() noexcept {
-#ifdef _WIN32
-    static const size_t size = [] {
-      SYSTEM_INFO info;
-      GetSystemInfo(&info);
-      return static_cast<size_t>(info.dwPageSize);
-    }();
-#else
-    static const auto size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
-#endif
-    return size;
-  }
+  [[nodiscard]] size_t pageSize() noexcept;
 
   // A row of whole pieces, by the address it starts at.
   struct Pieces {
@@ -65,90 +45,51 @@ namespace sc::memory {
     return {.address = first, .bytes = end - first};
   }
 
+  // Where the pieces of a part start, as a pointer into the same range as
+  // the part: reached from it instead of made from the number, which would
+  // leave the compiler no idea what it points into.
+  [[nodiscard]] inline void *startOf(void *part, Pieces pieces) noexcept {
+    const auto offset =
+        static_cast<ptrdiff_t>(pieces.address) - static_cast<ptrdiff_t>(reinterpret_cast<uintptr_t>(part));
+    return static_cast<std::byte *>(part) + offset;
+  }
+
   // Addresses for the given number of bytes, without memory behind them yet.
   // Throws std::bad_alloc if the OS has no room for them.
-  [[nodiscard]] inline void *reserve(size_t bytes) {
-#ifdef _WIN32
-    void *address = VirtualAlloc(nullptr, bytes, MEM_RESERVE, PAGE_READWRITE);
-    if (address == nullptr) {
-      throw std::bad_alloc{};
-    }
-#else
-    // Not counted against the memory there is: most of it is never touched.
-    void *address = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (address == MAP_FAILED) {
-      throw std::bad_alloc{};
-    }
-#endif
-    return address;
-  }
+  [[nodiscard]] void *reserve(size_t bytes);
 
   // Lets the OS back the part of a reserved range with huge pages. Fewer,
   // larger pieces: faster to go through, but a single byte in use holds a
   // whole huge page.
-  inline void preferHugePages([[maybe_unused]] void *address, [[maybe_unused]] size_t bytes) noexcept {
-#ifdef __linux__
-    madvise(address, bytes, MADV_HUGEPAGE);
-#endif
-  }
+  void preferHugePages(void *address, size_t bytes) noexcept;
 
   // The opposite: only the pieces that are used get memory, each of them
   // OS_PAGE_SIZE large.
-  inline void preferSmallPages([[maybe_unused]] void *address, [[maybe_unused]] size_t bytes) noexcept {
-#ifdef __linux__
-    madvise(address, bytes, MADV_NOHUGEPAGE);
-#endif
-  }
+  void preferSmallPages(void *address, size_t bytes) noexcept;
 
   // Makes a part of a reserved range usable; its bytes are zero the first
   // time. Safe to call again for a part that is in use already, and from
   // several threads. Throws std::bad_alloc if there is no memory left.
-  inline void commit([[maybe_unused]] void *address, [[maybe_unused]] size_t bytes) {
-#ifdef _WIN32
-    if (VirtualAlloc(address, bytes, MEM_COMMIT, PAGE_READWRITE) == nullptr) {
-      throw std::bad_alloc{};
-    }
-#endif
-    // Elsewhere the memory comes with the first access.
-  }
+  void commit(void *address, size_t bytes);
 
   // Gives a part of a reserved range its memory now and in one go, instead of
   // piece by piece with the first access to each piece. What is in the part
   // stays. Does nothing where the OS has no means for it; the memory then
   // comes with the accesses as usual. Every piece of the OS that has a byte
   // of the part gets its memory.
-  inline void populate([[maybe_unused]] void *address, [[maybe_unused]] size_t bytes) noexcept {
-#if defined(__linux__) && defined(MADV_POPULATE_WRITE)
-    const Pieces pieces = piecesAround(reinterpret_cast<uintptr_t>(address), bytes, pageSize());
-    madvise(reinterpret_cast<void *>(pieces.address), pieces.bytes, MADV_POPULATE_WRITE);
-#endif
-  }
+  void populate(void *address, size_t bytes) noexcept;
 
   // Moves what a part of a reserved range has in small pages into huge ones,
   // right away. Both ends must be multiples of HUGE_PAGE_SIZE. A huge page is
   // backed in full afterwards, also where nothing was before. Does nothing
   // where the OS has no means for it or no huge page at hand.
-  inline void collapse([[maybe_unused]] void *address, [[maybe_unused]] size_t bytes) noexcept {
-#if defined(__linux__) && defined(MADV_COLLAPSE)
-    madvise(address, bytes, MADV_COLLAPSE);
-#endif
-  }
+  void collapse(void *address, size_t bytes) noexcept;
 
   // Hands the memory of a part back to the OS. The part stays usable; what is
   // in it afterwards is not defined, what is next to it stays. Only the
   // pieces of the OS that lie in the part as a whole go back: all of it if
   // both ends are multiples of pageSize, less otherwise and possibly nothing.
-  inline void discard(void *address, size_t bytes) noexcept {
-    const Pieces pieces = piecesWithin(reinterpret_cast<uintptr_t>(address), bytes, pageSize());
-    if (pieces.bytes == 0) {
-      return;
-    }
-#ifdef _WIN32
-    DiscardVirtualMemory(reinterpret_cast<void *>(pieces.address), pieces.bytes);
-#else
-    madvise(reinterpret_cast<void *>(pieces.address), pieces.bytes, MADV_DONTNEED);
-#endif
-  }
+  void discard(void *address, size_t bytes) noexcept;
 
   // Lets the OS take the memory of a part whenever it needs it, and leaves it
   // where it is until then. The part stays usable: a piece the OS did not
@@ -158,20 +99,7 @@ namespace sc::memory {
   // are offered, as with discard. The memory still counts as the process'
   // until it is taken: Rss on Linux, with LazyFree telling how much of it
   // may go.
-  inline void offer(void *address, size_t bytes) noexcept {
-    const Pieces pieces = piecesWithin(reinterpret_cast<uintptr_t>(address), bytes, pageSize());
-    if (pieces.bytes == 0) {
-      return;
-    }
-#ifdef _WIN32
-    DiscardVirtualMemory(reinterpret_cast<void *>(pieces.address), pieces.bytes);
-#elif defined(MADV_FREE)
-    // Before Linux 4.5 there is no MADV_FREE, and the memory just stays.
-    madvise(reinterpret_cast<void *>(pieces.address), pieces.bytes, MADV_FREE);
-#else
-    madvise(reinterpret_cast<void *>(pieces.address), pieces.bytes, MADV_DONTNEED);
-#endif
-  }
+  void offer(void *address, size_t bytes) noexcept;
 
   // Takes the memory of a part back from the OS and with it the promise of
   // memory for it, which on Windows counts against the commit limit for as
@@ -180,28 +108,10 @@ namespace sc::memory {
   // after discard. What is in it once it is used again is not defined. Only
   // the pieces of the OS that lie in the part as a whole are taken back, as
   // with discard.
-  inline void decommit(void *address, size_t bytes) noexcept {
-    const Pieces pieces = piecesWithin(reinterpret_cast<uintptr_t>(address), bytes, pageSize());
-    if (pieces.bytes == 0) {
-      return;
-    }
-#ifdef _WIN32
-    VirtualFree(reinterpret_cast<void *>(pieces.address), pieces.bytes, MEM_DECOMMIT);
-#else
-    // Linux promises nothing for a range reserved with MAP_NORESERVE, so
-    // there is nothing to take back but the memory.
-    madvise(reinterpret_cast<void *>(pieces.address), pieces.bytes, MADV_DONTNEED);
-#endif
-  }
+  void decommit(void *address, size_t bytes) noexcept;
 
   // Gives the whole range back, with the address and size it was reserved
   // with.
-  inline void release(void *address, [[maybe_unused]] size_t bytes) noexcept {
-#ifdef _WIN32
-    VirtualFree(address, 0, MEM_RELEASE);
-#else
-    munmap(address, bytes);
-#endif
-  }
+  void release(void *address, size_t bytes) noexcept;
 
 } // namespace sc::memory
