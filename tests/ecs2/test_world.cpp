@@ -382,6 +382,43 @@ TEST_CASE("World Components", "[ecs2][world]") {
     world.create(std::span<Entity>{});
   }
 
+  SECTION("Indices Given Back In Rows Come Back In Rows") {
+    std::vector<Entity> made(2 * size_t{PAGE_SIZE});
+    world.create(std::span<Entity>{made}, Position{.x = 9.0f, .y = 9.0f});
+    // A row across the border of two pages, and two on their own.
+    std::vector<Entity> gone(made.begin() + (PAGE_SIZE - 100), made.begin() + (PAGE_SIZE + 100));
+    gone.push_back(made[7]);
+    gone.push_back(made[3]);
+    REQUIRE(world.destroy(std::span<const Entity>{gone}) == gone.size());
+
+    std::vector<Entity> again(gone.size() + 10);
+    world.create(std::span<Entity>{again}, Position{.x = 1.0f, .y = 2.0f});
+    std::vector<uint32_t> given;
+    std::vector<uint32_t> taken;
+    for (size_t i = 0; i < gone.size(); ++i) {
+      given.push_back(sc::ecs2::indexOf(gone[i]));
+      taken.push_back(sc::ecs2::indexOf(again[i]));
+    }
+    std::ranges::sort(given);
+    std::ranges::sort(taken);
+    REQUIRE(taken == given);
+
+    size_t right = 0;
+    for (const Entity entity: again) {
+      right += static_cast<size_t>(world.valid(entity) && world.get<const Position>(entity).x == 1.0f &&
+                                   world.get<const Position>(entity).y == 2.0f);
+    }
+    REQUIRE(right == again.size());
+    size_t old = 0;
+    size_t fresh = 0;
+    world.each<const Position>([&](const Position &position) {
+      old += static_cast<size_t>(position.x == 9.0f);
+      fresh += static_cast<size_t>(position.x == 1.0f);
+    });
+    REQUIRE(old == made.size() - gone.size());
+    REQUIRE(fresh == again.size());
+  }
+
   SECTION("A Column Moves To Huge Pages Once It Is Large") {
     // As many entities as it takes, and their components are still there.
     const size_t count = (sc::ecs2::HUGE_PAGE_COLUMN_BYTES / sizeof(Position)) + PAGE_SIZE;
