@@ -352,7 +352,7 @@ namespace sc::ecs2::internal {
     // moved over afterwards.
     void expect(size_t count) {
       if constexpr (HAS_VALUE) {
-        if (m_grows && !hugePages() && pages() * PAGE_BYTES + count * sizeof(T) >= HUGE_PAGE_COLUMN_BYTES) {
+        if (m_grows && !hugePages() && (pages() * PAGE_BYTES) + (count * sizeof(T)) >= HUGE_PAGE_COLUMN_BYTES) {
           moveToHugePages();
         }
       }
@@ -379,7 +379,7 @@ namespace sc::ecs2::internal {
           }
         }
         for (uint32_t bit = slot; bit < slot + here;) {
-          const uint32_t width = std::min(64 - bit % 64, slot + here - bit);
+          const uint32_t width = std::min(64 - (bit % 64), slot + here - bit);
           const uint64_t bits = (width == 64 ? ~uint64_t{0} : (uint64_t{1} << width) - 1) << (bit % 64);
           [[maybe_unused]] const uint64_t before = header.mask[bit / 64].fetch_or(bits, std::memory_order_relaxed);
           assert((before & bits) == 0);
@@ -585,7 +585,8 @@ namespace sc::ecs2::internal {
       // Where a huge page may start: an address, not an offset, the range
       // itself may begin anywhere.
       const auto address = reinterpret_cast<uintptr_t>(reserved);
-      auto *const fresh = reinterpret_cast<T *>((address + memory::HUGE_PAGE_SIZE - 1) & ~(memory::HUGE_PAGE_SIZE - 1));
+      const uintptr_t aligned = (address + memory::HUGE_PAGE_SIZE - 1) & ~(memory::HUGE_PAGE_SIZE - 1);
+      auto *const fresh = reinterpret_cast<T *>(static_cast<std::byte *>(reserved) + (aligned - address));
       // A chunk reserved while the column moves to huge pages may keep small
       // ones, as a page started just then does, see moveToHugePages.
       if (hugePages()) {

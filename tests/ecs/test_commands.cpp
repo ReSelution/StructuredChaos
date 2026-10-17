@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -340,7 +341,7 @@ TEST_CASE("Commands From Systems Running At The Same Time", "[ecs][commands][thr
   for (uint32_t run = 1; run <= 3; ++run) {
     scheduler.run(registry);
 
-    const size_t alive = static_cast<size_t>(run) * system_count * (per_system - per_system / 5);
+    const size_t alive = static_cast<size_t>(run) * system_count * (per_system - (per_system / 5));
     REQUIRE(registry.view<Owner>().size() == alive);
     REQUIRE(registry.view<Position>().size() == alive);
     REQUIRE(registry.view<Health>().size() == 0);
@@ -355,7 +356,7 @@ TEST_CASE("Commands From Systems Running At The Same Time", "[ecs][commands][thr
     ++perSystem[owner.system];
   }
   for (const uint32_t n: perSystem) {
-    REQUIRE(n == 3 * (per_system - per_system / 5));
+    REQUIRE(n == 3 * (per_system - (per_system / 5)));
   }
 }
 
@@ -370,12 +371,8 @@ TEST_CASE("Commands Give Spare Entities Back", "[ecs][commands]") {
   const auto reused = [](Registry &registry) {
     std::vector<sc::ecs::Entity> entities(SPARE);
     registry.create(entities.begin(), entities.end());
-    for (const sc::ecs::Entity &entity: entities) {
-      if (entt::to_version(entity.entity) == 0) {
-        return false;
-      }
-    }
-    return true;
+    return std::ranges::all_of(entities,
+                               [](const sc::ecs::Entity &entity) { return entt::to_version(entity.entity) != 0; });
   };
 
   SECTION("Kept For The Next Run") {
@@ -457,7 +454,7 @@ TEST_CASE("Commands Emplace", "[ecs][commands][emplace]") {
   }
 
   SECTION("More New Entities Than One Block") {
-    constexpr size_t count_per_run = 3 * sc::ecs::internal::CommandBufferBase::ENTITY_BLOCK_SIZE + 7;
+    constexpr size_t count_per_run = (3 * sc::ecs::internal::CommandBufferBase::ENTITY_BLOCK_SIZE) + 7;
     uint32_t next = 0;
     scheduler.add([&next](Commands<Owner> commands) {
       for (size_t i = 0; i < count_per_run; ++i) {

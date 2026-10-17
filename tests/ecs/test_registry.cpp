@@ -283,10 +283,10 @@ TEST_CASE("Registry Concurrent Entity Creation", "[ecs][registry][threading]") {
   for (const auto &mine: created) {
     all.insert(all.end(), mine.begin(), mine.end());
   }
-  std::sort(all.begin(), all.end());
+  std::ranges::sort(all);
   REQUIRE(all.size() == thread_count * per_thread);
-  REQUIRE(std::adjacent_find(all.begin(), all.end()) == all.end());
-  REQUIRE(std::all_of(all.begin(), all.end(), [&](entt::entity e) { return registry.valid(e); }));
+  REQUIRE(std::ranges::adjacent_find(all) == all.end());
+  REQUIRE(std::ranges::all_of(all, [&](entt::entity e) { return registry.valid(e); }));
 }
 
 TEST_CASE("Registry Emplace", "[ecs][registry][emplace]") {

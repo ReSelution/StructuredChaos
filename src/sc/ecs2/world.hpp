@@ -461,7 +461,7 @@ namespace sc::ecs2 {
     // The values of a page as the function gets them: const for a component
     // that is only read, null for one without members.
     template<typename Component>
-    static auto valuesOf(const typename ColumnOf<Component>::Page &page) noexcept {
+    static auto valuesOf(const ColumnOf<Component>::Page &page) noexcept {
       if constexpr (!ColumnOf<Component>::HAS_VALUE) {
         return nullptr;
       } else {
@@ -535,7 +535,7 @@ namespace sc::ecs2 {
     static_assert(sizeof(std::atomic<internal::ColumnBase *>) == sizeof(internal::ColumnBase *));
     static constexpr size_t FAR_COMPONENT_TYPES = internal::MAX_COMPONENT_TYPES - internal::NEAR_COMPONENT_TYPES;
     static constexpr size_t FAR_BYTES = sizeof(internal::ColumnBase *) * FAR_COMPONENT_TYPES;
-    static constexpr size_t TABLE_BYTES = FAR_BYTES + sizeof(internal::ColumnBase *) * internal::MAX_COMPONENT_TYPES;
+    static constexpr size_t TABLE_BYTES = FAR_BYTES + (sizeof(internal::ColumnBase *) * internal::MAX_COMPONENT_TYPES);
 
     // The column of every component type used with this world, at
     // internal::componentIndex. An entry is written once, under the mutex, and

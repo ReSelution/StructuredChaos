@@ -254,7 +254,7 @@ TEST_CASE("Commands On The Components Of A Group", "[ecs][commands][group][threa
   scheduler.run(registry);
 
   auto group = registry.group<Position, Velocity>(entt::get<Mass>, entt::exclude<Frozen>);
-  REQUIRE(group.size() == per_system - per_system / 4);
+  REQUIRE(group.size() == per_system - (per_system / 4));
   for (auto [entity, pos, vel, mass]: group.each()) {
     const int id = registry.get<Health>(entity).value;
     REQUIRE(id % 4 != 0);
@@ -283,7 +283,7 @@ TEST_CASE("Commands On The Components Of A Group", "[ecs][commands][group][threa
   });
   cleanup.run(registry);
 
-  REQUIRE(group.size() == per_system / 2 - per_system / 8);
+  REQUIRE(group.size() == (per_system / 2) - (per_system / 8));
   for (auto [entity, pos, vel, mass]: group.each()) {
     const int id = registry.get<Health>(entity).value;
     REQUIRE(id % 2 == 0);

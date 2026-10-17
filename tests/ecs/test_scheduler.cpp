@@ -11,6 +11,7 @@
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "sc/ecs/commands.hpp"
@@ -264,7 +265,7 @@ TEST_CASE("Scheduler Runs Systems", "[ecs][scheduler]") {
 
     for (size_t i = 0; i < entities.size(); ++i) {
       // Moved before doubled, in the order the systems were added.
-      const float x = ((static_cast<float>(i) + 1.0f) * 2.0f + 1.0f) * 2.0f;
+      const float x = (((static_cast<float>(i) + 1.0f) * 2.0f) + 1.0f) * 2.0f;
       REQUIRE(registry.get<Position>(entities[i]).x == x);
       REQUIRE(registry.get<Position>(entities[i]).y == 12.0f);
       REQUIRE(registry.get<Health>(entities[i]).value == 98);
@@ -403,7 +404,7 @@ TEST_CASE("Scheduler Runs Systems", "[ecs][scheduler]") {
     for ([[maybe_unused]] const auto entity: registry.view<const Position, sc::ecs::Exclude<Frozen>>()) {
       ++thawed;
     }
-    REQUIRE(thawed == entities.size() - (entities.size() + 4) / 5);
+    REQUIRE(thawed == entities.size() - ((entities.size() + 4) / 5));
     scheduler.add([](Moving view) {
       sc::ecs::parallelEach(view, [](Position &pos, const Velocity &vel) { pos.y += vel.dy; }, 7);
     });
@@ -468,10 +469,10 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
   Registry registry;
   std::vector<sc::ecs::Entity> entities(1000);
   registry.create(entities.begin(), entities.end());
-  for (size_t i = 0; i < entities.size(); ++i) {
-    registry.emplace<Position>(entities[i], 0.0f, 0.0f);
-    registry.emplace<Velocity>(entities[i], 1.0f, 2.0f);
-    registry.emplace<Health>(entities[i]);
+  for (auto entitie: entities) {
+    registry.emplace<Position>(entitie, 0.0f, 0.0f);
+    registry.emplace<Velocity>(entitie, 1.0f, 2.0f);
+    registry.emplace<Health>(entitie);
   }
 
   Scheduler scheduler;
@@ -655,7 +656,7 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
     // The numbers of the destroyed entities are handed out again: after all
     // these runs, no entity has a number much higher than there ever were
     // entities at one time.
-    const size_t bound = spawned * (lifetime + 1) + 2 * sc::ecs::internal::CommandBufferBase::ENTITY_BLOCK_SIZE;
+    const size_t bound = (spawned * (lifetime + 1)) + (2 * sc::ecs::internal::CommandBufferBase::ENTITY_BLOCK_SIZE);
     for (auto [entity, age, pos]: world.view<const Lifetime, const Position>().each()) {
       REQUIRE(world.valid(entity));
       REQUIRE(age.runs < lifetime);
@@ -668,7 +669,7 @@ TEST_CASE("Loops Over Components That Fill Several Pages", "[ecs][scheduler]") {
   sc::threading::init();
 
   // More than the storages keep in one piece.
-  constexpr size_t count = 5 * ENTT_PACKED_PAGE - 120;
+  constexpr size_t count = (5 * ENTT_PACKED_PAGE) - 120;
 
   Registry registry;
   std::vector<sc::ecs::Entity> entities(count);
@@ -704,7 +705,7 @@ TEST_CASE("Loops Over Components That Fill Several Pages", "[ecs][scheduler]") {
   SECTION("Storages That Differ From Some Position On") {
     // The last velocity takes the place of the erased one, in the third page,
     // and the storage ends earlier than the others.
-    registry.erase<Velocity>(entities[2 * ENTT_PACKED_PAGE + 50]);
+    registry.erase<Velocity>(entities[(2 * ENTT_PACKED_PAGE) + 50]);
     sc::ecs::each(registry.view<Position, const Velocity, Health>(), visit);
     check(1);
     sc::ecs::parallelEach(registry.view<Position, const Velocity, Health>(), visit, 100);
@@ -728,13 +729,13 @@ TEST_CASE("Loops Over Components That Fill Several Pages", "[ecs][scheduler]") {
     auto group = registry.group<Position, Velocity>(entt::get<Health>);
     sc::ecs::each(group, visit);
     check(1);
-    registry.erase<Velocity>(entities[2 * ENTT_PACKED_PAGE + 50]);
+    registry.erase<Velocity>(entities[(2 * ENTT_PACKED_PAGE) + 50]);
     sc::ecs::each(group, visit);
     sc::ecs::parallelEach(group, visit, 100);
-    REQUIRE(registry.get<Position>(entities[2 * ENTT_PACKED_PAGE + 50]).y == 2.0f);
+    REQUIRE(registry.get<Position>(entities[(2 * ENTT_PACKED_PAGE) + 50]).y == 2.0f);
     REQUIRE(registry.get<Position>(entities[0]).y == 6.0f);
     REQUIRE(registry.get<Position>(entities[count - 1]).y == 6.0f);
-    REQUIRE(registry.get<Health>(entities[count - 1]).value == 100 + 3 * static_cast<int>(count - 1));
+    REQUIRE(registry.get<Health>(entities[count - 1]).value == 100 + (3 * static_cast<int>(count - 1)));
   }
 
   SECTION("A Storage That Keeps Its Order") {
@@ -766,7 +767,7 @@ TEST_CASE("Loops That Take The Entity And Record Changes", "[ecs][scheduler][com
 
   using sc::ecs::Commands;
 
-  constexpr size_t count = 3 * ENTT_PACKED_PAGE + 200;
+  constexpr size_t count = (3 * ENTT_PACKED_PAGE) + 200;
 
   Registry registry;
   std::vector<sc::ecs::Entity> entities(count);
@@ -783,7 +784,7 @@ TEST_CASE("Loops That Take The Entity And Record Changes", "[ecs][scheduler][com
   SECTION("The Entity Comes Before The Components") {
     std::atomic<size_t> wrong = 0;
     const auto visit = [&](entt::entity entity, Position &pos, const Health &health) {
-      wrong += static_cast<int>(entt::to_integral(entity)) != health.value;
+      wrong += std::cmp_not_equal(entt::to_integral(entity), health.value);
       pos.y += 1.0f;
     };
     sc::ecs::each(registry.view<Position, const Health>(), visit);
@@ -899,7 +900,7 @@ TEST_CASE("Loops That Take The Entity And Record Changes", "[ecs][scheduler][com
     scheduler.add([](View<const Frozen>, Commands<Frozen> commands) { commands.emplace<Frozen>(commands.create()); });
     for (int run = 1; run <= 3; ++run) {
       scheduler.run(registry);
-      REQUIRE(registry.view<Frozen>().size() == (count + 1) / 2 + 2);
+      REQUIRE(registry.view<Frozen>().size() == ((count + 1) / 2) + 2);
       for (auto entity: registry.view<Frozen>()) {
         registry.erase<Frozen>(entity);
       }
@@ -994,7 +995,7 @@ TEST_CASE("Loops Go Through What EnTT Goes Through, Whatever Happened To The Sto
 
   SECTION("Views") {
     // Everything side by side to begin with.
-    for (size_t i = 0; i < 4 * ENTT_PACKED_PAGE + 300; ++i) {
+    for (size_t i = 0; i < (4 * ENTT_PACKED_PAGE) + 300; ++i) {
       const entt::entity entity = registry.create();
       alive.push_back(entity);
       registry.emplace<Alpha>(entity, owner(entity));
@@ -1088,7 +1089,7 @@ TEST_CASE("Loops Go Through What EnTT Goes Through, Whatever Happened To The Sto
     auto triples = registry.group<Gamma>(entt::get<const SmallPages, Alpha>);
     auto loose = registry.group<>(entt::get<SmallPages, Anchored>, entt::exclude<Tag>);
 
-    for (size_t i = 0; i < 3 * ENTT_PACKED_PAGE + 300; ++i) {
+    for (size_t i = 0; i < (3 * ENTT_PACKED_PAGE) + 300; ++i) {
       const entt::entity entity = registry.create();
       alive.push_back(entity);
       for (int component = 0; component < 5; ++component) {

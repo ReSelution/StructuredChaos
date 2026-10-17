@@ -44,6 +44,6 @@ namespace sc::ecs {
   // Exclude leaves out the entities that have one of its components:
   // View<Position, Exclude<Frozen>>.
   template<typename... Components>
-  using View = typename internal::ViewOf<entt::get_t<>, entt::exclude_t<>, Components...>::type;
+  using View = internal::ViewOf<entt::get_t<>, entt::exclude_t<>, Components...>::type;
 
 } // namespace sc::ecs

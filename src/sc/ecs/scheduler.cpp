@@ -113,7 +113,7 @@ namespace sc::ecs {
       const auto family = [&registry](const internal::CommandQueueBase *queue) {
         return registry.family(queue->componentIndex);
       };
-      std::stable_sort(plan.queues.begin(), plan.queues.end(), [&family](const auto *lhs, const auto *rhs) {
+      std::ranges::stable_sort(plan.queues, [&family](const auto *lhs, const auto *rhs) {
         return family(lhs) != family(rhs) ? family(lhs) < family(rhs) : lhs->componentIndex < rhs->componentIndex;
       });
       for (size_t first = 0; first < plan.queues.size();) {

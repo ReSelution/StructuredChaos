@@ -72,12 +72,12 @@ namespace {
     pos.y += vel.dy * DT;
   }
   inline void regenerate(Health &health, const Velocity &vel) {
-    health.value = std::min(100.0f, health.value + vel.dx * 0.1f);
+    health.value = std::min(100.0f, health.value + (vel.dx * 0.1f));
   }
   inline void tick(Timer &timer, const Velocity &vel) { timer.elapsed += vel.dy * DT; }
-  inline void charge(Energy &energy, const Velocity &vel) { energy.value += vel.dx * vel.dx + vel.dy * vel.dy; }
+  inline void charge(Energy &energy, const Velocity &vel) { energy.value += (vel.dx * vel.dx) + (vel.dy * vel.dy); }
   inline void rate(Score &score, const Position &pos, const Health &health) {
-    score.value = pos.x * 0.5f + health.value;
+    score.value = (pos.x * 0.5f) + health.value;
   }
 
   // One of several components that entities have in varying combinations.
@@ -119,7 +119,8 @@ namespace {
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
       indices[i] = i;
     }
-    std::shuffle(indices.begin(), indices.end(), std::mt19937{42});
+    // The same order in every run, so that runs can be compared.
+    std::shuffle(indices.begin(), indices.end(), std::mt19937{42}); // NOLINT(bugprone-random-generator-seed)
     return indices;
   }
 

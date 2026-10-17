@@ -60,6 +60,8 @@ namespace {
     int value{0};
 
     explicit Fragile(int number) : value(number) {}
+    // Throws on purpose: a component whose move fails.
+    // NOLINTNEXTLINE(bugprone-exception-escape,performance-noexcept-move-constructor)
     Fragile(Fragile &&other) : value(other.value) {
       if (breaks) {
         throw std::runtime_error("broken");
@@ -161,7 +163,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
 
   World world;
   std::vector<Entity> entities;
-  for (size_t i = 0; i < 2 * PAGE_SIZE + 300; ++i) {
+  for (size_t i = 0; i < (2 * PAGE_SIZE) + 300; ++i) {
     entities.push_back(world.create());
     world.emplace<Position>(entities.back(), static_cast<float>(i), 0.0f);
     world.emplace<Health>(entities.back());
@@ -283,7 +285,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
       }
     });
     REQUIRE(scheduler.stages() == Stages{{0}, {1}, {2}});
-    const size_t before = (entities.size() - (entities.size() + 2) / 3);
+    const size_t before = (entities.size() - ((entities.size() + 2) / 3));
     scheduler.run(world);
 
     size_t spawned = 0;
@@ -292,7 +294,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     REQUIRE(spawned == spawners * perSpawner);
     size_t velocities = 0;
     world.each<const Velocity>([&](const Velocity &) { ++velocities; });
-    REQUIRE(velocities == before + spawners * perSpawner);
+    REQUIRE(velocities == before + (spawners * perSpawner));
   }
 
   SECTION("Creating And Destroying Run After Run Does Not Use Up The Indices") {

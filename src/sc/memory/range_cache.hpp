@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <mutex>
+#include <new>
 
 #include "sc/memory/virtual_memory.hpp"
 
@@ -183,9 +184,11 @@ namespace sc::memory {
   // The one of the process, which the columns of sc::ecs2 take the ranges of
   // their values from. Never destroyed: a column that goes after the end of
   // main, with a world that is a static, still finds it. The OS takes back
-  // what is kept when the process ends.
+  // what is kept when the process ends. In storage of its own, so that
+  // making it allocates nothing and cannot fail.
   [[nodiscard]] inline RangeCache &rangeCache() noexcept {
-    static RangeCache &cache = *new RangeCache{};
+    alignas(RangeCache) static std::byte storage[sizeof(RangeCache)];
+    static RangeCache &cache = *::new (static_cast<void *>(storage)) RangeCache{};
     return cache;
   }
 

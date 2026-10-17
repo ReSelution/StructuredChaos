@@ -38,7 +38,7 @@ TEST_CASE("Range Cache", "[memory][virtual]") {
     // usable either way.
     size_t wrong = 0;
     for (size_t i = 0; i < SIZE; ++i) {
-      wrong += again[i] != 0xab && again[i] != 0;
+      wrong += static_cast<size_t>(again[i] != 0xab && again[i] != 0);
     }
     REQUIRE(wrong == 0);
     std::memset(again, 0xcd, SIZE);

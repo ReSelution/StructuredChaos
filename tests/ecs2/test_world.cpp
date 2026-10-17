@@ -88,7 +88,7 @@ namespace {
   // called once for exactly those entities of the model, with their own
   // components.
   // Room for the rare entities of a test.
-  constexpr size_t RARE_PLACES = 2 * PAGE_SIZE;
+  constexpr size_t RARE_PLACES = 2 * size_t{PAGE_SIZE};
 
   template<typename... Terms>
   void requireLoop(World &world, const Model &model, unsigned wanted, unsigned unwanted) {
@@ -281,7 +281,7 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
       for (size_t chunk = first; chunk < last; ++chunk) {
         for (size_t i = 0; i < perChunk; ++i) {
-          created[chunk * perChunk + i] = world.create();
+          created[(chunk * perChunk) + i] = world.create();
         }
       }
     });
@@ -310,8 +310,8 @@ TEST_CASE("World Entities", "[ecs2][world]") {
           while (!go.load(std::memory_order_acquire)) {
           }
           for (size_t i = 0; i < perThread; ++i) {
-            created[t * perThread + i] = world.create();
-            createdRare[t * perThread + i] = world.create(sc::ecs2::rare);
+            created[(t * perThread) + i] = world.create();
+            createdRare[(t * perThread) + i] = world.create(sc::ecs2::rare);
           }
         });
       }
@@ -347,17 +347,19 @@ TEST_CASE("World Components", "[ecs2][world]") {
     }
 
     // Enough for the column to move to huge pages where it does that.
-    const size_t count = sc::ecs2::HUGE_PAGE_COLUMN_BYTES / sizeof(Position) + 3 * PAGE_SIZE + 17;
+    const size_t count =
+        (sc::ecs2::HUGE_PAGE_COLUMN_BYTES / sizeof(Position)) + (static_cast<unsigned long>(3 * PAGE_SIZE)) + 17;
     std::vector<Entity> entities(count);
-    world.create(entities, Position{1.0f, 2.0f}, Tag{}, Player{7});
+    world.create(entities, Position{.x = 1.0f, .y = 2.0f}, Tag{}, Player{7});
 
     std::vector<Entity> sorted = entities;
     std::ranges::sort(sorted);
     REQUIRE(std::ranges::adjacent_find(sorted) == sorted.end());
     size_t right = 0;
     for (const Entity entity: entities) {
-      right += world.valid(entity) && world.contains<Tag>(entity) && world.get<const Position>(entity).x == 1.0f &&
-               world.get<const Position>(entity).y == 2.0f && world.get<const Player>(entity).number == 7;
+      right += static_cast<size_t>(
+          world.valid(entity) && world.contains<Tag>(entity) && world.get<const Position>(entity).x == 1.0f &&
+          world.get<const Position>(entity).y == 2.0f && world.get<const Player>(entity).number == 7);
     }
     REQUIRE(right == count);
     for (size_t i = 0; i < gone.size(); ++i) {
@@ -366,7 +368,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
     size_t positions = 0;
     world.each<const Position>([&](const Position &) { ++positions; });
-    REQUIRE(positions == count + gone.size() - (gone.size() + 2) / 3);
+    REQUIRE(positions == count + gone.size() - ((gone.size() + 2) / 3));
     size_t tagged = 0;
     world.each<const Tag, const Player>([&](const Player &) { ++tagged; });
     REQUIRE(tagged == count);
@@ -382,7 +384,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
   SECTION("A Column Moves To Huge Pages Once It Is Large") {
     // As many entities as it takes, and their components are still there.
-    const size_t count = sc::ecs2::HUGE_PAGE_COLUMN_BYTES / sizeof(Position) + PAGE_SIZE;
+    const size_t count = (sc::ecs2::HUGE_PAGE_COLUMN_BYTES / sizeof(Position)) + PAGE_SIZE;
     std::vector<Entity> entities;
     const bool small = world.pages() == Pages::Small;
     for (size_t i = 0; i < count; ++i) {
@@ -395,7 +397,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(world.column<Position>().hugePages() == !small);
     size_t kept = 0;
     for (size_t i = 0; i < count; ++i) {
-      kept += world.get<const Position>(entities[i]).x == static_cast<float>(i);
+      kept += static_cast<size_t>(world.get<const Position>(entities[i]).x == static_cast<float>(i));
     }
     REQUIRE(kept == count);
     // A rare component stays with small pages.
@@ -621,7 +623,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
       std::atomic<size_t> found = 0;
       owning.parallelEach<const Named>([&](const Named &named) { found += named.name.size() >= 100; }, 1);
-      REQUIRE(found == entities.size() / 2 + 1 + batch.size());
+      REQUIRE(found == (entities.size() / 2) + 1 + batch.size());
     }
     // Whatever was left went with the world.
     REQUIRE(alive.use_count() == 1);
@@ -652,7 +654,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
   SECTION("Added, Read, Changed And Removed") {
     const Entity entity = world.create();
     REQUIRE_FALSE(world.contains<Position>(entity));
-    Position &position = world.emplace<Position>(entity, 1.0f, 2.0f);
+    auto &position = world.emplace<Position>(entity, 1.0f, 2.0f);
     REQUIRE(world.contains<Position>(entity));
     REQUIRE(&world.get<Position>(entity) == &position);
     world.get<Position>(entity).x = 5.0f;
@@ -695,7 +697,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
   SECTION("A Component Stays Where It Is") {
     std::vector<Entity> entities;
-    for (size_t i = 0; i < 3 * PAGE_SIZE; ++i) {
+    for (size_t i = 0; i < 3 * size_t{PAGE_SIZE}; ++i) {
       entities.push_back(world.create());
       world.emplace<Position>(entities.back(), static_cast<float>(i), 0.0f);
     }
@@ -711,7 +713,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
   SECTION("A Page Has Memory Only While It Holds A Component Or Is A Spare") {
     std::vector<Entity> entities;
-    for (size_t i = 0; i < 4 * PAGE_SIZE; ++i) {
+    for (size_t i = 0; i < 4 * size_t{PAGE_SIZE}; ++i) {
       entities.push_back(world.create());
     }
     auto &positions = world.column<Position>();
@@ -719,7 +721,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(positions.pages() == 0);
 
     // One entity of the third page.
-    world.emplace<Position>(entities[2 * PAGE_SIZE + 5]);
+    world.emplace<Position>(entities[(2 * PAGE_SIZE) + 5]);
     REQUIRE(positions.pages() == 1);
     for (const Entity entity: entities) {
       if (!world.contains<Position>(entity)) {
@@ -729,7 +731,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(positions.pages() == 4);
 
     // A hole as large as a page.
-    for (size_t i = PAGE_SIZE; i < 2 * PAGE_SIZE; ++i) {
+    for (size_t i = PAGE_SIZE; i < 2 * size_t{PAGE_SIZE}; ++i) {
       world.erase<Position>(entities[i]);
     }
     // It keeps its memory as a spare, but is not gone through.
@@ -882,14 +884,14 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
   SECTION("A Page Emptied And Filled Again Has The New Components") {
     std::vector<Entity> entities;
-    for (size_t i = 0; i < 3 * PAGE_SIZE; ++i) {
+    for (size_t i = 0; i < 3 * size_t{PAGE_SIZE}; ++i) {
       entities.push_back(world.create());
       world.emplace<Position>(entities.back(), static_cast<float>(i), 0.0f);
       world.emplace<Named>(entities.back(), "a name too long for the string itself " + std::to_string(i), nullptr);
     }
     for (int round = 1; round <= 2; ++round) {
       // The middle page, all of it.
-      for (size_t i = PAGE_SIZE; i < 2 * PAGE_SIZE; ++i) {
+      for (size_t i = PAGE_SIZE; i < 2 * size_t{PAGE_SIZE}; ++i) {
         world.erase<Position>(entities[i]);
         world.erase<Named>(entities[i]);
       }
@@ -902,7 +904,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
         REQUIRE(world.column<Position>().pages() == 2);
         REQUIRE(world.column<Named>().pages() == 2);
       }
-      for (size_t i = PAGE_SIZE; i < 2 * PAGE_SIZE; ++i) {
+      for (size_t i = PAGE_SIZE; i < 2 * size_t{PAGE_SIZE}; ++i) {
         world.emplace<Position>(entities[i], static_cast<float>(i), static_cast<float>(round));
         world.emplace<Named>(entities[i], "filled again in round " + std::to_string(round) + " " + std::to_string(i),
                              nullptr);
@@ -910,11 +912,12 @@ TEST_CASE("World Components", "[ecs2][world]") {
       REQUIRE(world.column<Position>().pages() == 3);
       size_t right = 0;
       for (size_t i = 0; i < entities.size(); ++i) {
-        const bool refilled = i >= PAGE_SIZE && i < 2 * PAGE_SIZE;
-        const Position &pos = world.get<const Position>(entities[i]);
+        const bool refilled = i >= PAGE_SIZE && i < 2 * size_t{PAGE_SIZE};
+        const auto &pos = world.get<const Position>(entities[i]);
         const std::string &name = world.get<const Named>(entities[i]).name;
-        right += pos.x == static_cast<float>(i) && pos.y == (refilled ? static_cast<float>(round) : 0.0f) &&
-                 name.ends_with(" " + std::to_string(i)) && name.contains("round") == refilled;
+        right += static_cast<size_t>(pos.x == static_cast<float>(i) &&
+                                     pos.y == (refilled ? static_cast<float>(round) : 0.0f) &&
+                                     name.ends_with(" " + std::to_string(i)) && name.contains("round") == refilled);
       }
       REQUIRE(right == entities.size());
     }
@@ -926,7 +929,7 @@ TEST_CASE("World Loops", "[ecs2][world][threading]") {
   World world{GENERATE(Pages::Auto, Pages::Huge, Pages::Small)};
 
   std::vector<Entity> entities;
-  for (size_t i = 0; i < 3 * PAGE_SIZE + 200; ++i) {
+  for (size_t i = 0; i < (3 * PAGE_SIZE) + 200; ++i) {
     entities.push_back(world.create());
     world.emplace<Position>(entities.back(), static_cast<float>(i), 0.0f);
     if (i % 3 != 0) {
@@ -966,7 +969,7 @@ TEST_CASE("World Loops", "[ecs2][world][threading]") {
     const World &read = world;
     size_t moving = 0;
     read.each<const Position, const Velocity>([&](const Position &, const Velocity &vel) { moving += vel.dy == 2.0f; });
-    REQUIRE(moving == entities.size() - (entities.size() + 2) / 3);
+    REQUIRE(moving == entities.size() - ((entities.size() + 2) / 3));
 
     std::atomic<size_t> still = 0;
     read.parallelEach<const Position, Exclude<Velocity>>([&](Entity entity, const Position &pos) {
@@ -1106,7 +1109,7 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
   };
 
   // Full pages to begin with.
-  for (size_t i = 0; i < 4 * PAGE_SIZE + 300; ++i) {
+  for (size_t i = 0; i < (4 * PAGE_SIZE) + 300; ++i) {
     const Entity entity = spawn(true);
     world.emplace<Alpha>(entity, entity);
     world.emplace<Beta>(entity, entity);
@@ -1145,7 +1148,7 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
       const uint32_t from = static_cast<uint32_t>(below(3)) * PAGE_SIZE;
       for (size_t i = 0; i < alive.size();) {
         const uint32_t index = sc::ecs2::indexOf(alive[i]);
-        if (index >= from && index < from + 2 * PAGE_SIZE) {
+        if (index >= from && index < from + (2 * PAGE_SIZE)) {
           world.destroy(alive[i]);
           model.erase(static_cast<uint64_t>(alive[i]));
           alive[i] = alive.back();

@@ -44,7 +44,7 @@ namespace sc::ecs::internal {
     } else {
       constexpr size_t SIZE =
           entt::component_traits<typename Storage::element_type, typename Storage::entity_type>::page_size;
-      return SIZE - position % SIZE;
+      return SIZE - (position % SIZE);
     }
   }
 
@@ -57,7 +57,7 @@ namespace sc::ecs::internal {
     } else {
       constexpr size_t SIZE =
           entt::component_traits<typename Storage::element_type, typename Storage::entity_type>::page_size;
-      return storage.raw()[position / SIZE] + position % SIZE;
+      return storage.raw()[position / SIZE] + (position % SIZE);
     }
   }
 
@@ -458,7 +458,7 @@ namespace sc::ecs::internal {
   };
   template<HasSignature F>
   struct EachCommands<F> {
-    using type = typename EachSignature<typename SystemSignature<F>::Params>::CommandsType;
+    using type = EachSignature<typename SystemSignature<F>::Params>::CommandsType;
   };
 
   // The ParallelCommands for the same components as the given Commands.
@@ -542,14 +542,14 @@ namespace sc::ecs {
     template<typename Source, typename F>
     Scheduler &addParallel(F &&function, std::string name = {}, size_t grain = 512) {
       using Function = std::decay_t<F>;
-      using CommandsType = typename internal::EachCommands<Function>::type;
+      using CommandsType = internal::EachCommands<Function>::type;
 
       if constexpr (std::is_void_v<CommandsType>) {
         return addSystem([function = Function(std::forward<F>(function)),
                           grain](Source source) mutable { parallelEach(source, function, grain); },
                          std::move(name), entt::type_list<Source>{});
       } else {
-        using Parallel = typename internal::ParallelOf<CommandsType>::type;
+        using Parallel = internal::ParallelOf<CommandsType>::type;
         return addSystem(
             [function = Function(std::forward<F>(function)), grain](Source source, Parallel commands) mutable {
               threading::parallelFor(internal::extent(source), grain, [&](size_t first, size_t last) {
@@ -603,7 +603,7 @@ namespace sc::ecs {
     };
 
     template<typename F, typename... Params>
-    Scheduler &addSystem(F &&system, std::string name, entt::type_list<Params...>) {
+    Scheduler &addSystem(F &&system, const std::string &name, entt::type_list<Params...>) {
       // The buffer of a system has the type of its one Commands parameter.
       static_assert((size_t{internal::isCommands<std::remove_cvref_t<Params>>} + ... + 0) <= 1,
                     "a system takes at most one Commands parameter");

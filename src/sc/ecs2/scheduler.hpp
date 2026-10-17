@@ -280,16 +280,18 @@ namespace sc::ecs2 {
       return m_world->template emplace<Component>(entity, std::forward<Args>(args)...);
     }
 
-    // See World::tryEmplace.
+    // See World::tryEmplace. Not [[nodiscard]], as World::tryEmplace and
+    // World::erase are not: whether this thread was first is often of no
+    // interest.
     template<typename Component, typename... Args>
       requires named<Component>
-    bool tryEmplace(Entity entity, Args &&...args) const {
+    bool tryEmplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
       return m_world->template tryEmplace<Component>(entity, std::forward<Args>(args)...);
     }
 
     template<typename Component>
       requires named<Component>
-    bool erase(Entity entity) const {
+    bool erase(Entity entity) const { // NOLINT(modernize-use-nodiscard)
       return m_world->template erase<Component>(entity);
     }
 
@@ -730,7 +732,7 @@ namespace sc::ecs2 {
     }
 
     template<typename F, typename... Params>
-    Scheduler &addSystem(F &&system, std::string name, internal::List<Params...>) {
+    Scheduler &addSystem(F &&system, const std::string &name, internal::List<Params...>) {
       internal::SystemAccess access;
       (internal::SystemParamFor<Params>::declare(access), ...);
       if (sizeof...(Params) == 0) {
