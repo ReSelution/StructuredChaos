@@ -73,6 +73,7 @@ namespace sc::ecs2::internal {
 
   // One bit for every entity of a page.
   inline constexpr size_t PAGE_WORDS = PAGE_SIZE / 64;
+  static_assert(PAGE_WORDS <= 64, "the summary of a page has one bit for every word of its mask");
   // How many pages the indices are cut into.
   inline constexpr size_t PAGE_COUNT = INDEX_LIMIT >> PAGE_BITS;
 
@@ -148,6 +149,11 @@ namespace sc::ecs2::internal {
       // Also set while erase destroys a component, so that the next one is
       // not made in its place before it is gone.
       std::array<std::atomic<uint64_t>, PAGE_WORDS> making;
+      // Which words of the mask may have a bit set: a loop only looks at
+      // these. Set with the first bit of a word, but only cleared when the
+      // page is empty, so a word may be empty all the same; clearing it with
+      // every word that becomes empty made destroy up to 11 % slower.
+      std::atomic<uint64_t> summary;
       std::atomic<uint32_t> count;
       // Whether the values have memory. Only changed by the thread that has
       // busy set.
@@ -190,6 +196,8 @@ namespace sc::ecs2::internal {
     struct Page {
       // Which entities of the page have the component. Null for no page.
       const std::atomic<uint64_t> *mask = nullptr;
+      // Which words of the mask may have a bit set, see Header::summary.
+      uint64_t summary = 0;
       uint32_t count = 0;
       // Null for a component without members.
       T *values = nullptr;
@@ -254,7 +262,10 @@ namespace sc::ecs2::internal {
       if (count == 0) {
         return {};
       }
-      return {.mask = header->mask.data(), .count = count, .values = valuesOf(number)};
+      return {.mask = header->mask.data(),
+              .summary = header->summary.load(std::memory_order_relaxed),
+              .count = count,
+              .values = valuesOf(number)};
     }
 
     [[nodiscard]] bool contains(uint32_t index) const noexcept {
@@ -294,9 +305,11 @@ namespace sc::ecs2::internal {
         }
         // Only now: an index that has the component has one that was made.
         header.mask[slot / 64].fetch_or(uint64_t{1} << (slot % 64), std::memory_order_relaxed);
+        markWord(header, slot / 64);
         return *made;
       } else {
         header.mask[slot / 64].fetch_or(uint64_t{1} << (slot % 64), std::memory_order_relaxed);
+        markWord(header, slot / 64);
       }
     }
 
@@ -342,6 +355,7 @@ namespace sc::ecs2::internal {
       // There for everybody from here on, and so before the next thread may
       // try.
       header.mask[slot / 64].fetch_or(bit, std::memory_order_acq_rel);
+      markWord(header, slot / 64);
       making.fetch_and(~bit, std::memory_order_release);
       return true;
     }
@@ -383,6 +397,7 @@ namespace sc::ecs2::internal {
           const uint64_t bits = (width == 64 ? ~uint64_t{0} : (uint64_t{1} << width) - 1) << (bit % 64);
           [[maybe_unused]] const uint64_t before = header.mask[bit / 64].fetch_or(bits, std::memory_order_relaxed);
           assert((before & bits) == 0);
+          markWord(header, bit / 64);
           bit += width;
         }
         index += here;
@@ -515,6 +530,17 @@ namespace sc::ecs2::internal {
       return ((header.mask[slot / 64].load(std::memory_order_relaxed) >> (slot % 64)) & 1u) != 0;
     }
 
+    // Notes in the summary that a word of the mask has a bit now. Only
+    // after the bit: a loop that finds the word in the summary also finds
+    // the bit. Most components go into a word that has others already, and
+    // for these the load is all.
+    static void markWord(Header &header, uint32_t word) noexcept {
+      const uint64_t bit = uint64_t{1} << word;
+      if ((header.summary.load(std::memory_order_relaxed) & bit) == 0) {
+        header.summary.fetch_or(bit, std::memory_order_acq_rel);
+      }
+    }
+
     // The header of a page, null as long as no page of its block was used.
     [[nodiscard]] Header *findHeader(uint32_t number) const noexcept {
       const uint64_t blocks = m_headerBlocks.load(std::memory_order_acquire);
@@ -642,6 +668,18 @@ namespace sc::ecs2::internal {
     // Counts so many components less in a page, which are gone already.
     void forsake(Header &header, uint32_t number, uint32_t count) noexcept {
       if (header.count.fetch_sub(count, std::memory_order_seq_cst) == count) [[unlikely]] {
+        // No word has a bit any more. A thread that gave the page a
+        // component meanwhile may have found its word still in the summary
+        // and left it as it was: the summary is made anew from the mask
+        // then.
+        header.summary.store(0, std::memory_order_seq_cst);
+        if (header.count.load(std::memory_order_seq_cst) != 0) {
+          for (uint32_t word = 0; word < PAGE_WORDS; ++word) {
+            if (header.mask[word].load(std::memory_order_seq_cst) != 0) {
+              header.summary.fetch_or(uint64_t{1} << word, std::memory_order_seq_cst);
+            }
+          }
+        }
         if constexpr (HAS_VALUE) {
           park(header, number);
         } else {
