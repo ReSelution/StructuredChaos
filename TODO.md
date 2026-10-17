@@ -90,26 +90,65 @@ hero/monster data differed per framework). Small counts with the page summary (`
 - **Dense data, level:** `ComplexSystemsUpdate` 16K: sc 265 µs, mustache 258 µs, flecs 246 µs, EnTT 599 µs; 262K:
   4.51 / 4.50 / 4.39 ms.
 - [ ] **Sparse data at medium counts, behind:** `ComplexSystemsUpdateMixedEntities` 16K: sc 175 µs, mustache 143 µs,
-  flecs 145 µs (about 20 %); at 1M nearly level (14.4 / 13.8 / 13.3 ms). Cause not measured. Guess: exactly the even
-  entities have the hero/monster components, so their masks are `0x5555…`; neither the full-page nor the full-word
-  path applies and the loop goes bit by bit, while an archetype ECS runs over a dense array. Check with perf before
-  changing anything.
+  flecs 145 µs (about 20 %); at 1M nearly level (14.4 / 13.8 / 13.3 ms). Exactly the even entities have the
+  hero/monster components, so their masks are `0x5555…` and the loop goes bit by bit. Measured per frame (16K) against
+  flecs: +350k cycles, +500k instructions (the `tzcnt` loop and the address of every component), +18k L1 misses
+  (half of every cache line of Health/Damage/Sprite/Player is a gap), +3k–6k branch misses. The extra misses are in
+  the `if`s of the benchmark's Health/Damage logic, not in the loop of ecs2, and they are not the bottleneck: with
+  clang 3k fewer, same time. Tried without gain: a linear loop with a bit test for words at least half full (+6 to
+  +17 %), pointers moved on by the gap instead of `values + slot` (+6 % instructions, same cycles). What is left is
+  the layout; see "Entity locality" below.
 
-Entity benchmarks from the full run (`reports/*-entities.json`), ns per entity, rank among 7–8 frameworks (mustache has
-no destroy/remove-add results). Bulk create of sc was still running.
+Entity benchmarks, ns per entity, rank among 7–8 frameworks (mustache has no destroy/remove-add results). Create and
+destroy from the reworked benchmarks of ecs_benchmark (`c00a2d1`: one registry for all iterations, so indices are
+reused; 1, 64, 1024 and 262K entities, 0.3 s each), the rest from the full run. Before the rework every create and
+destroy result held the teardown of a registry per iteration (sc::ecs2 15 µs, flecs 470 µs), which made sc look
+twice as slow at 1024 as it is.
 
-- **`get`, one component, ahead:** `BM_UnpackOneComponent` 0.7 at 1024 and 262K (Ginseng 1.2, EnTT 2.0, flecs 10.7).
+- **`get`, ahead:** one component 0.7 at 1024 and 262K (Ginseng 1.2, EnTT 2.0, flecs 10.7). Two components 1.3,
+  three 1.75 (Ginseng 2.1, pico_ecs 2.3, EntityX 2.5, gaia 2.7) since `componentIndex` inlines (`a077ca1`; before
+  2.4 and 2.85, rank 5).
 - **Remove + add, ahead:** 7.0 / 7.3 (pico_ecs 9.0, Ginseng 10.6, EnTT 20, flecs 130).
-- **Create at large counts, ahead:** 262K: 9.8 with three components (Ginseng 15.3, EnTT 19.0), 1.6 empty (pico_ecs
-  5.1, EnTT 13.2).
-- **Destroy, second:** 23.8 at 1024, 11.4 at 262K; pico_ecs is about twice as fast (7.0 / 5.9), all others slower
-  (EnTT 34.1 / 31.1).
-- [ ] **Create at small counts, behind:** 1024 with three components 38.9, rank 4 (EnTT 20.5, Ginseng 20.6, pico_ecs
-  21.4), nearly twice EnTT; empty 6.7, rank 3 (Ginseng 4.3). Guess, not measured: fixed costs of new columns and
-  pages (`makeHeader`, `startPage`, committing memory) that only spread out over many entities.
-- [ ] **`get` of three components, middle:** `BM_UnpackThreeComponents` 3.0, rank 5 (Ginseng 2.1, pico_ecs 2.3,
-  EntityX 2.5, gaia 2.7). Odd next to 0.7 for one component: three times that would be 2.1. Cause not looked at.
+- **Create with two components, ahead at 1024:** 10.2 (pico_ecs 11.5, Ginseng 12.6, EnTT 18.4, mustache 113, flecs
+  112). At 262K third: 15.0 (pico_ecs 11.2, Ginseng 12.4, EnTT 18.4).
+- **Create empty, third:** 2.6 / 2.1 at 1024 / 262K (Ginseng 2.1 / 1.6, pico_ecs 2.4 / 1.9, EnTT 6.8 / 9.8).
+- **An empty world:** `BM_CreateNoEntities` 4.3 µs for making and tearing it down (Ginseng 1.7 ns, EnTT 46 ns,
+  mustache 0.7 µs, gaia 8.4 µs, flecs 1.4 ms).
+- [ ] **Destroy, second:** 10.2 / 10.3 at 1024 / 262K; pico_ecs is about twice as fast (6.0 / 5.5), all others slower
+  (EntityX 22, EnTT 28, flecs 31). pico_ecs only tests a bitset that lies with the entity and leaves the components
+  where they are. `World::destroy` calls `erase` through a virtual call on every column of the world, not only on
+  those the entity has, each with `findHeader` and a mask load; for a component the entity has, a `fetch_and` and a
+  `fetch_sub` (seq_cst) on top, then `vector::resize` and `push_back` in `FreeList::give`. A game with 100 component
+  types makes 100 virtual calls per destroy. A per-entity record of its columns would let `eraseAll` visit only
+  those; the atomics are the price of thread safety.
+- [ ] **Bulk create only fast with fresh indices:** 262K: 1.3 into a fresh world (`fill` writes one contiguous index
+  range), 14.5 with reused indices from the free list (flecs 3.5, EnTT 13.0). At 1024 10.1 (flecs 4.0, EnTT 12.5).
 - `BM_AddComponent` says nothing: it pauses the timer per entity, every framework lands at ~540 ns.
+
+## Entity locality: say at create which components an entity will get
+
+Idea, not decided. Entities with the same set of components get their indices from the same pages, so their masks
+are full and their components lie without gaps: the full-page/full-word loops apply and every loaded cache line is
+used. Archetype locality at create, without the move on every later change. `create(rare)` is the small version of
+it already (own pages at the top of the index space).
+
+- [ ] **API:** something like `world.create(Layout<Position, Velocity, Health>{})`, or a handle made once
+  (`auto heroes = world.layout<...>(); world.create(heroes);`) so that the lookup is not done per create.
+- [ ] **Only a hint at create:** components added later do not move the entity, the index stays. In ecs_benchmark the
+  mixed entities get their hero components only after create; there it helps only if the factory gives the layout
+  at create. Legitimate use of the API, but the benchmark notes should say that sc gets a hint the others do not
+  need.
+- [ ] **Open pages per layout:** every layout keeps its own partly filled page. Many layouts with few entities give
+  many half empty pages: more memory, and `each()` touches more pages (the summary softens it, the page loop and
+  `page()` calls stay). A limit, or a fallback group for small layouts.
+- [ ] **Reused indices:** today one free list for common and one for rare entities. For a destroyed hero to make room
+  for a hero again, every layout needs its own free list; otherwise the index space mixes again over time (the state
+  the reworked create benchmark of ecs_benchmark measures, with reused indices).
+- [ ] **Threads:** `EntityAllocator::withShare` gives every thread ranges of its own; with layouts every thread needs
+  a range per layout, or threads compete for the open page of a layout.
+- [ ] **Measure the upper bound first:** a variant of the mixed update in which the hero entities get one contiguous
+  index range (e.g. with `create(rare)` or bulk create). It shows how close sc gets to mustache/flecs with perfect
+  locality; only if that pays off does the API.
 
 ## Show the parallel advantage in numbers
 
