@@ -39,6 +39,18 @@ namespace sc::ecs2::internal {
 
   inline std::atomic<size_t> nextComponentIndex{0};
 
+  // The first use of componentIndex for a type. Out of line and cold: with
+  // this inside it, componentIndex was not inlined, and every get called it
+  // (three gets per entity took 38 % longer, the unpack benchmarks of
+  // ecs_benchmark with gcc).
+  [[gnu::noinline, gnu::cold]] inline size_t makeComponentIndex() {
+    const size_t next = nextComponentIndex.fetch_add(1, std::memory_order_relaxed);
+    if (next >= MAX_COMPONENT_TYPES) [[unlikely]] {
+      throw std::length_error("sc::ecs2: more component types than MAX_COMPONENT_TYPES");
+    }
+    return next;
+  }
+
   // A number for every component type of the program, the same in all worlds:
   // where a world keeps the column of the type, found without a search, and
   // what the scheduler tells the components of two systems apart by. Throws
@@ -46,13 +58,7 @@ namespace sc::ecs2::internal {
   // it is used and every time after.
   template<typename Component>
   size_t componentIndex() {
-    static const size_t index = [] {
-      const size_t next = nextComponentIndex.fetch_add(1, std::memory_order_relaxed);
-      if (next >= MAX_COMPONENT_TYPES) [[unlikely]] {
-        throw std::length_error("sc::ecs2: more component types than MAX_COMPONENT_TYPES");
-      }
-      return next;
-    }();
+    static const size_t index = makeComponentIndex();
     return index;
   }
 
