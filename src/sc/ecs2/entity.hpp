@@ -117,11 +117,19 @@ namespace sc::ecs2::internal {
 
       // Must have nothing running next to it.
       void give(uint32_t index) {
+        open();
+        add(index);
+        close();
+      }
+
+      // give for many indices: open, add each, close. Must have nothing
+      // running next to it from open to close.
+      void open() {
         // What take took since the last time.
         indices.resize(static_cast<size_t>(std::max<int64_t>(left.load(std::memory_order_relaxed), 0)));
-        indices.push_back(index);
-        left.store(static_cast<int64_t>(indices.size()), std::memory_order_release);
       }
+      void add(uint32_t index) { indices.push_back(index); }
+      void close() { left.store(static_cast<int64_t>(indices.size()), std::memory_order_release); }
     };
 
   public:
@@ -221,6 +229,31 @@ namespace sc::ecs2::internal {
       ++*generation(index);
       // Back to where it came from.
       (index >= pages().rareBegin() ? m_rareFree : m_free).give(index);
+    }
+
+    // destroy for every entity that exists: one given twice or no longer
+    // there is left out. Calls the function with the index of each one it
+    // destroys and returns how many those were. The indices go back to their
+    // lists in one step each.
+    template<typename Function>
+    size_t destroyMany(std::span<const Entity> entities, Function &&function) {
+      const uint32_t rareBegin = pages().rareBegin();
+      m_free.open();
+      m_rareFree.open();
+      size_t destroyed = 0;
+      for (const Entity entity: entities) {
+        if (!valid(entity)) {
+          continue;
+        }
+        const uint32_t index = indexOf(entity);
+        ++*generation(index);
+        (index >= rareBegin ? m_rareFree : m_free).add(index);
+        function(index);
+        ++destroyed;
+      }
+      m_free.close();
+      m_rareFree.close();
+      return destroyed;
     }
 
     // Which pages have entities: the first so many, and the last so many for

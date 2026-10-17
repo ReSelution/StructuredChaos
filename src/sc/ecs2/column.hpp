@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <span>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -90,6 +91,15 @@ namespace sc::ecs2::internal {
     return bits;
   }
 
+  // The entities of one page that a destroy of many takes away: a bit in
+  // words for every one of them, and a bit in touched for every word that
+  // has one.
+  struct KillPage {
+    uint32_t number = 0;
+    uint64_t touched = 0;
+    std::array<uint64_t, PAGE_WORDS> words{};
+  };
+
   // What the world needs of a column without knowing its component.
   struct ColumnBase {
     virtual ~ColumnBase() = default;
@@ -97,6 +107,8 @@ namespace sc::ecs2::internal {
     virtual bool erase(uint32_t index) noexcept = 0;
     // The same while no other thread uses the column.
     virtual bool eraseAlone(uint32_t index) noexcept = 0;
+    // eraseAlone for the entities of the pages, a word at a time.
+    virtual void eraseAlone(std::span<const KillPage> pages) noexcept = 0;
   };
 
   // The components of one type, each at the index of its entity.
@@ -477,6 +489,54 @@ namespace sc::ecs2::internal {
         }
       }
       return true;
+    }
+
+    // Per page one header, per word of it one change of the mask for up to 64
+    // entities, and the count once: what eraseAlone does per entity. Only the
+    // words that may have a bit in the column are looked at, and a word that
+    // is empty afterwards leaves the summary, which is exact here.
+    void eraseAlone(std::span<const KillPage> pages) noexcept override {
+      for (const KillPage &kill: pages) {
+        Header *const header = findHeader(kill.number);
+        if (header == nullptr) {
+          continue;
+        }
+        uint64_t summary = header->summary.load(std::memory_order_relaxed);
+        uint32_t removed = 0;
+        for (uint64_t touched = kill.touched & summary; touched != 0; touched &= touched - 1) {
+          const auto word = static_cast<uint32_t>(std::countr_zero(touched));
+          const uint64_t mask = header->mask[word].load(std::memory_order_relaxed);
+          const uint64_t gone = mask & kill.words[word];
+          if (gone == 0) {
+            continue;
+          }
+          header->mask[word].store(mask & ~gone, std::memory_order_relaxed);
+          if constexpr (DESTROYS) {
+            const uint32_t first = (kill.number << PAGE_BITS) + (word * 64);
+            for (uint64_t bits = gone; bits != 0; bits &= bits - 1) {
+              std::destroy_at(valueAt(first + static_cast<uint32_t>(std::countr_zero(bits))));
+            }
+          }
+          if (gone == mask) {
+            summary &= ~(uint64_t{1} << word);
+          }
+          removed += static_cast<uint32_t>(std::popcount(gone));
+        }
+        if (removed == 0) {
+          continue;
+        }
+        header->summary.store(summary, std::memory_order_relaxed);
+        const uint32_t left = header->count.load(std::memory_order_relaxed) - removed;
+        header->count.store(left, std::memory_order_relaxed);
+        if (left == 0) {
+          header->summary.store(0, std::memory_order_relaxed);
+          if constexpr (HAS_VALUE) {
+            park(*header, kill.number);
+          } else {
+            vacate(*header, kill.number);
+          }
+        }
+      }
     }
 
     // Whether the OS may hand the values out in huge pages.

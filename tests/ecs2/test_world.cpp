@@ -621,6 +621,17 @@ TEST_CASE("World Components", "[ecs2][world]") {
       REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size() / 2) + 1 + static_cast<long>(batch.size()));
       REQUIRE(owning.get<Named>(batch.back()).name == name);
 
+      // Many destroyed at once give theirs back as well; one given twice and
+      // one destroyed before are left out.
+      std::vector<Entity> gone(batch.begin(), batch.begin() + (PAGE_SIZE / 2));
+      gone.push_back(gone.front());
+      gone.push_back(first);
+      REQUIRE(owning.destroy(std::span<const Entity>{gone}) == PAGE_SIZE / 2);
+      batch.erase(batch.begin(), batch.begin() + (PAGE_SIZE / 2));
+      REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size() / 2) + 1 + static_cast<long>(batch.size()));
+      REQUIRE_FALSE(owning.valid(gone.front()));
+      REQUIRE(owning.get<Named>(batch.front()).name == name);
+
       std::atomic<size_t> found = 0;
       owning.parallelEach<const Named>([&](const Named &named) { found += named.name.size() >= 100; }, 1);
       REQUIRE(found == (entities.size() / 2) + 1 + batch.size());
@@ -1143,18 +1154,47 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
           break;
       }
     }
-    // Now and then a hole of several pages.
-    if (round % 10 == 9) {
-      const uint32_t from = static_cast<uint32_t>(below(3)) * PAGE_SIZE;
+    // Now and then many destroyed at once, all over the pages; one of them
+    // given twice and one destroyed before.
+    if (round % 10 == 4) {
+      std::vector<Entity> gone;
       for (size_t i = 0; i < alive.size();) {
-        const uint32_t index = sc::ecs2::indexOf(alive[i]);
-        if (index >= from && index < from + (2 * PAGE_SIZE)) {
-          world.destroy(alive[i]);
+        if (below(6) == 0) {
+          gone.push_back(alive[i]);
           model.erase(static_cast<uint64_t>(alive[i]));
           alive[i] = alive.back();
           alive.pop_back();
         } else {
           ++i;
+        }
+      }
+      const size_t count = gone.size();
+      if (!gone.empty()) {
+        gone.push_back(gone.front());
+      }
+      REQUIRE(world.destroy(std::span<const Entity>{gone}) == count);
+      REQUIRE(world.destroy(std::span<const Entity>{gone}) == 0);
+    }
+    // Now and then a hole of several pages, one by one or all at once.
+    if (round % 10 == 9) {
+      const uint32_t from = static_cast<uint32_t>(below(3)) * PAGE_SIZE;
+      std::vector<Entity> hole;
+      for (size_t i = 0; i < alive.size();) {
+        const uint32_t index = sc::ecs2::indexOf(alive[i]);
+        if (index >= from && index < from + (2 * PAGE_SIZE)) {
+          hole.push_back(alive[i]);
+          model.erase(static_cast<uint64_t>(alive[i]));
+          alive[i] = alive.back();
+          alive.pop_back();
+        } else {
+          ++i;
+        }
+      }
+      if (round % 20 == 19) {
+        REQUIRE(world.destroy(std::span<const Entity>{hole}) == hole.size());
+      } else {
+        for (const Entity entity: hole) {
+          REQUIRE(world.destroy(entity));
         }
       }
     }
