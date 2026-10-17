@@ -152,10 +152,26 @@ twice as slow at 1024 as it is.
   `create(span)` hands every row of them that follow one another to the columns in one call. With two components
   2.1 instead of 10.3 ns per entity at 1024 (flecs 4.0, EnTT 12.5), 6.3 instead of 14.5 at 262K (flecs 3.5, EnTT
   13.0).
-- [ ] **Bulk create at 262K still behind flecs (6.3 against 3.5):** not measured. Guess: once all entities are gone,
-  every page but the few spares gives its memory back (`park`/`vacate`), and the next create faults it in again
-  (`clear_highpages`, `do_anonymous_page`, `asm_exc_page_fault` in the profile, 2–3 %); flecs keeps its memory. If
-  so, a trade-off of ecs2 and not a fault; check with perf before changing anything.
+- [ ] **Knee in create between 16K and 32K entities:** create with two components 10.1 → 12.3 ns per entity (13.4
+  at 65K, 14.9 at 262K), bulk create 1.6 → 3.9 (5.0, 6.4; flecs 3.3 to 4.7), create without components flat at 2.1;
+  pico_ecs flat at 11. Measured: it is the end of the L2 (512 KB per core). The benchmark makes and (paused)
+  destroys the whole world every iteration; up to 16K all that sc touches fits in L2, from 32K not. L2 misses per
+  entity 0.07 at 16K, 0.31 at 32K (×~40 cycles of L3 ≈ the 2 ns); L1 misses per entity only 1.1 → 1.75. Not page
+  faults (2.7 per iteration at 65K: `offer` leaves the memory where it is) and not the TLB (dTLB misses rise, but
+  ~0.4 µs per iteration). That disproves the earlier guess of memory given back and faulted in again.
+  - IBS (`perf mem`) sees almost no loads from L3 (43 of 136k samples), so the extra L2 misses are presumably stores:
+    write-allocate for the value, mask word and count per create, and mask/count again in destroy. IBS gives stores
+    no source; a conclusion from the counters, not shown per instruction.
+  - pico_ecs has about half the L2 misses per entity. Part of it: its entity is an id without a generation, so no
+    array of 4 bytes per entity that create and destroy touch (and no detection of stale handles).
+  - Unexplained: small hot variables come from L2 instead of L1 in IBS: `FreeList::left` 95 % of its loads (read and
+    `lock xadd` on every create), the `componentIndex` statics of Position/Velocity 60–78 %, `started` in the page
+    header 52 %. `left` alone is about one L1 miss per entity, about the whole L1 miss rate. Maybe set conflicts in
+    L1 (the big arrays at addresses with the same offset), maybe how IBS reports atomics. Not a problem, not
+    understood.
+  - Mostly a property of the benchmark (the whole world churned per iteration); a game that makes a few hundred
+    entities per frame works elsewhere. No fault in ecs2 seen; only the bytes per entity could shrink, and the
+    generation is the part that buys safety.
 - `BM_AddComponent` says nothing: it pauses the timer per entity, every framework lands at ~540 ns.
 
 ## Entity locality: say at create which components an entity will get
