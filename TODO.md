@@ -1,7 +1,7 @@
 # TODO
 
 Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeimler/ecs_benchmark)
-(`src/structured-chaos`, pinned to commit `872ede0`).
+(`src/structured-chaos`, pinned to commit `bfd4be4`).
 
 ## Decisions of the benchmark integration to review
 
@@ -21,8 +21,8 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
 
 - [ ] **No `emplace_or_replace`:** the benchmark's `addComponents` checks with `contains` and otherwise assigns `T{}`,
   like EnTT.
-- [ ] **No bulk destroy:** `destroyBulk` is a loop, as for gaia and flecs, so `BM_DestroyEntitiesInBulk` measures the
-  same as `BM_DestroyEntities`.
+- [x] **No bulk destroy:** `World::destroy(std::span<const Entity>)` since `fa865dc`; the factory of ecs_benchmark
+  uses it since its commit `9bf8775`.
 - [ ] **No entity count:** the benchmark tests check with `valid()` instead.
 
 ## Events with immediate delivery
@@ -132,23 +132,30 @@ twice as slow at 1024 as it is.
   `FreeList::give`.
 - [ ] **Small costs of destroy:** `valid` and `EntityAllocator::destroy` both look up `generation` and `pages()`;
   `FreeList::give` calls `resize` on every destroy, needed only if `take` took something since.
-- [ ] **Bulk destroy with kill masks:** `destroyBulk` is a loop over `destroy` today. Instead: (1) for every entity
-  `valid`, `++generation`, set its bit in a kill mask per page (64 words, local, not atomic; duplicates drop out at
-  `valid`), give all indices to the free list at once; (2) per column one virtual call, per touched page one header
-  lookup, per touched word `removed = mask & kill; mask &= ~kill` (up to 64 entities at once), destroy the values of
-  `removed` if `DESTROYS`, clear the summary bit if the word became empty (exact here), `count -= popcount` once per
-  page, park at 0. No `lock` (exclusive). For contiguous entities (the benchmark) 2 × 16 word updates instead of
-  2 × 1024 erases at 1024 entities. Pages are independent, so step 2 can be split over threads by page, without
-  atomics if every page belongs to one thread; only worth it for many pages (waking threads costs microseconds).
-  Scattered entities need a small page → kill mask map (sorted array or flat table of the touched pages).
+- [x] **Bulk destroy with kill masks (`fa865dc`):** `World::destroy(span)` sets a bit per entity in a kill mask of
+  its page (`EntityAllocator::destroyMany`: `valid`, so duplicates and gone ones drop out, `++generation`, the
+  indices back to the free lists in one step each); then per column one call, `Column::eraseAlone(span<KillPage>)`:
+  per page one header, per word one change of the mask for up to 64 entities, the count once per page, the summary
+  bit of a word that became empty cleared. No `lock`. 4.2 instead of 8.4 ns per entity at 1024, 5.3 instead of 9.2
+  at 262K (against a loop over `destroy`); below the single destroy of pico_ecs (6.0 / 5.5).
+- [ ] **Bulk destroy over threads:** pages are independent, so the second step could be split over threads by
+  page, without atomics if every page belongs to one thread. Only worth it for many pages (waking threads costs
+  microseconds); not tried.
 - [ ] **`World::destroy` must not run next to other threads, assert it:** the comment says so since `86d3592`
   (like `CommandList::apply`). Before, nothing said so and `eraseAll` even said "Safe next to threads that keep to
   other entities", while `FreeList::give` (`resize`, `push_back`) runs against `take` from `create` without a lock:
   thread A in `create` reads `indices[before - 1]` while thread B in `destroy` pushes back, the vector reallocates,
   A reads freed memory. Now also the components go without locked instructions. Left: a debug assert if ecs2 can
   tell that a loop or stage is running.
-- [ ] **Bulk create only fast with fresh indices:** 262K: 1.3 into a fresh world (`fill` writes one contiguous index
-  range), 14.5 with reused indices from the free list (flecs 3.5, EnTT 13.0). At 1024 10.1 (flecs 4.0, EnTT 12.5).
+- [x] **Bulk create only fast with fresh indices (`bfd4be4`):** every reused index went to the columns on its own
+  (`run(index, 1)`: count, mask and summary per entity). `FreeList::takeMany` takes them with one `fetch_sub`, and
+  `create(span)` hands every row of them that follow one another to the columns in one call. With two components
+  2.1 instead of 10.3 ns per entity at 1024 (flecs 4.0, EnTT 12.5), 6.3 instead of 14.5 at 262K (flecs 3.5, EnTT
+  13.0).
+- [ ] **Bulk create at 262K still behind flecs (6.3 against 3.5):** not measured. Guess: once all entities are gone,
+  every page but the few spares gives its memory back (`park`/`vacate`), and the next create faults it in again
+  (`clear_highpages`, `do_anonymous_page`, `asm_exc_page_fault` in the profile, 2–3 %); flecs keeps its memory. If
+  so, a trade-off of ecs2 and not a fault; check with perf before changing anything.
 - `BM_AddComponent` says nothing: it pauses the timer per entity, every framework lands at ~540 ns.
 
 ## Entity locality: say at create which components an entity will get
