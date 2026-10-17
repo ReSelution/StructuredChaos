@@ -95,6 +95,8 @@ namespace sc::ecs2::internal {
     virtual ~ColumnBase() = default;
     // False if there was no component at the index.
     virtual bool erase(uint32_t index) noexcept = 0;
+    // The same while no other thread uses the column.
+    virtual bool eraseAlone(uint32_t index) noexcept = 0;
   };
 
   // The components of one type, each at the index of its entity.
@@ -437,6 +439,43 @@ namespace sc::ecs2::internal {
         return false;
       }
       forsake(header, number, 1);
+      return true;
+    }
+
+    // The same as erase while no other thread uses the column, for
+    // World::destroy: no making bit to wait for, and the mask and the count
+    // each with a relaxed load and store, which on x86 are plain
+    // instructions, instead of a locked one: a destroy of an entity with two
+    // components took 10 % less (BM_DestroyEntities of ecs_benchmark, gcc,
+    // 9.4 instead of 10.4 ns at 262144 entities).
+    bool eraseAlone(uint32_t index) noexcept override {
+      if (index >= INDEX_LIMIT) {
+        return false;
+      }
+      const uint32_t number = index >> PAGE_BITS;
+      Header *const found = findHeader(number);
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      if (found == nullptr || !has(*found, slot)) {
+        return false;
+      }
+      Header &header = *found;
+      std::atomic<uint64_t> &word = header.mask[slot / 64];
+      word.store(word.load(std::memory_order_relaxed) & ~(uint64_t{1} << (slot % 64)), std::memory_order_relaxed);
+      if constexpr (DESTROYS) {
+        // Before the page may give its memory back.
+        std::destroy_at(valueAt(index));
+      }
+      const uint32_t left = header.count.load(std::memory_order_relaxed) - 1;
+      header.count.store(left, std::memory_order_relaxed);
+      if (left == 0) [[unlikely]] {
+        // Nobody adds a component meanwhile: no word has a bit any more.
+        header.summary.store(0, std::memory_order_relaxed);
+        if constexpr (HAS_VALUE) {
+          park(header, number);
+        } else {
+          vacate(header, number);
+        }
+      }
       return true;
     }
 

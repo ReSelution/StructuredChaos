@@ -184,18 +184,25 @@ namespace sc::ecs2 {
     [[nodiscard]] bool valid(Entity entity) const noexcept { return m_entities.valid(entity); }
 
     // Removes the entity with all of its components. False if it does not
-    // exist (any more).
+    // exist (any more). Nothing may run next to it, as next to
+    // CommandList::apply, which calls it for Commands::destroy: it takes the
+    // components away without locked instructions (Column::eraseAlone), and
+    // gives the index back to a list that create takes from without a lock.
+    // From a system, Commands::destroy records it for later.
     bool destroy(Entity entity) {
       if (!valid(entity)) {
         return false;
       }
-      eraseAll(entity);
+      const size_t count = m_columnCount.load(std::memory_order_relaxed);
+      for (size_t i = 0; i < count; ++i) {
+        m_columnList[i]->eraseAlone(indexOf(entity));
+      }
       m_entities.destroy(entity);
       return true;
     }
 
-    // The first half of destroy: removes the components and leaves the entity.
-    // Safe next to threads that keep to other entities.
+    // Removes the components and leaves the entity, as destroy does, but
+    // safe next to threads that keep to other entities.
     void eraseAll(Entity entity) noexcept {
       assert(valid(entity));
       const size_t count = m_columnCount.load(std::memory_order_acquire);
