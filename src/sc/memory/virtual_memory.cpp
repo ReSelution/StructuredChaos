@@ -95,12 +95,11 @@ namespace sc::memory {
       return;
     }
 #ifdef _WIN32
-    // Marks the pages as of no interest, for Windows to take when it needs
-    // them, as MADV_FREE does; DiscardVirtualMemory throws them away at once.
-    // Wine throws them away with either: 11.8 ms instead of 1.35 ms to create
-    // 100 000 entities with 320 bytes of components each in the columns of a
-    // world before, as without memory::rangeCache.
-    VirtualAlloc(startOf(address, pieces), pieces.bytes, MEM_RESET, PAGE_READWRITE);
+    // The memory just stays. Windows has no MADV_FREE: DiscardVirtualMemory
+    // throws the pages away at once, and so does Wine with MEM_RESET, which
+    // is meant to leave them until they are needed. Either took 11.8 instead
+    // of 1.35 ms to create 100 000 entities with 320 bytes of components each
+    // in the columns of a world before, as without memory::rangeCache.
 #elifdef MADV_FREE
     // Before Linux 4.5 there is no MADV_FREE, and the memory just stays.
     madvise(startOf(address, pieces), pieces.bytes, MADV_FREE);

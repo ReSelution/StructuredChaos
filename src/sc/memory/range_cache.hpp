@@ -12,7 +12,8 @@ namespace sc::memory {
   // Keeps reserved ranges that were given back, together with the memory
   // they have, for the next reservation of the same size. The memory is
   // offered to the OS meanwhile, see memory::offer: it takes it if it needs
-  // it elsewhere, and leaves it in the range otherwise.
+  // it elsewhere, and leaves it in the range otherwise. On Windows it stays
+  // in full, up to the limit.
   //
   // Memory fresh from the OS is cleared by it on the first access, which
   // costs about as much as writing it: a world of sc::ecs2 that was made

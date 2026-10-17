@@ -94,11 +94,11 @@ namespace sc::memory {
   // Lets the OS take the memory of a part whenever it needs it, and leaves it
   // where it is until then. The part stays usable: a piece the OS did not
   // take still has what was in it and costs nothing to use again, one it took
-  // comes back as after discard. Where the OS cannot do it later, it does it
-  // now, as discard. Only the pieces of the OS that lie in the part as a whole
-  // are offered, as with discard. The memory still counts as the process'
-  // until it is taken: Rss on Linux, with LazyFree telling how much of it
-  // may go.
+  // comes back as after discard. On Windows, which cannot do it later, the
+  // memory just stays. Only the pieces of the OS that lie in the part as a
+  // whole are offered, as with discard. The memory still counts as the
+  // process' until it is taken: Rss on Linux, with LazyFree telling how much
+  // of it may go.
   void offer(void *address, size_t bytes) noexcept;
 
   // Takes the memory of a part back from the OS and with it the promise of
