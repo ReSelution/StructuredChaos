@@ -25,13 +25,13 @@ namespace {
 
     // The components are known before anything is measured.
     World() {
-      (void)world.add<Position>();
-      (void)world.add<Velocity>();
-      (void)world.add<Health>();
-      (void)world.add<Timer>();
-      (void)world.add<Energy>();
-      (void)world.add<Score>();
-      (void)world.add<Target>();
+      (void) world.add<Position>();
+      (void) world.add<Velocity>();
+      (void) world.add<Health>();
+      (void) world.add<Timer>();
+      (void) world.add<Energy>();
+      (void) world.add<Score>();
+      (void) world.add<Target>();
     }
 
     explicit World(size_t count) : World() {
@@ -50,7 +50,7 @@ namespace {
 
     void fill() {
       fill_moving();
-      for (const ecs::Entity entity : entities) {
+      for (const ecs::Entity entity: entities) {
         world.add<Health>(entity, {50.0f});
         world.add<Timer>(entity, {0.0f});
         world.add<Energy>(entity, {0.0f});
@@ -90,7 +90,7 @@ namespace {
 
   // One entity with the components and all others as copies of it, in one
   // call.
-  template <typename First, typename Second>
+  template<typename First, typename Second>
   void create_all(ecs::World &world, size_t count, const First &first, const Second &second) {
     const ecs::Entity entity = world.add();
     world.add<First>(entity, first);
@@ -166,12 +166,12 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
 
   BENCHMARK_ADVANCED(name::serial(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
     auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
-    for (auto &world : worlds) {
+    for (auto &world: worlds) {
       world->fill_moving();
     }
     meter.measure([&](int run) {
       World &world = *worlds[static_cast<size_t>(run)];
-      for (const ecs::Entity entity : world.entities) {
+      for (const ecs::Entity entity: world.entities) {
         world.world.del(entity);
       }
     });
@@ -196,7 +196,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     }
     BENCHMARK_ADVANCED(name::parallel(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
       auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
-      for (auto &world : worlds) {
+      for (auto &world: worlds) {
         world->fill_moving();
       }
       meter.measure([&](int run) { reap(worlds[static_cast<size_t>(run)]->world); });
@@ -207,10 +207,10 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     World world{ENTITY_COUNT};
     world.fill_moving();
     BENCHMARK(name::serial(name::ADD_REMOVE)) {
-      for (const ecs::Entity entity : world.entities) {
+      for (const ecs::Entity entity: world.entities) {
         world.world.add<Health>(entity, {50.0f});
       }
-      for (const ecs::Entity entity : world.entities) {
+      for (const ecs::Entity entity: world.entities) {
         world.world.del<Health>(entity);
       }
     };
@@ -253,7 +253,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     world.fill();
     BENCHMARK(name::serial(name::GET)) {
       float sum = 0.0f;
-      for (const size_t i : order) {
+      for (const size_t i: order) {
         sum += world.world.get<Position>(world.entities[i]).x;
       }
       return sum;
@@ -263,7 +263,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     ecs::Query one = world.world.query().all<Position &>();
     ecs::Query two = world.world.query().all<Position &>().all<Velocity>();
     ecs::Query three = world.world.query().all<Score &>().all<Position>().all<Health>();
-    for (const auto mode : {ecs::QueryExecType::Default, ecs::QueryExecType::Parallel}) {
+    for (const auto mode: {ecs::QueryExecType::Default, ecs::QueryExecType::Parallel}) {
       const auto named = [mode](const char *benchmark) {
         return mode == ecs::QueryExecType::Default ? name::serial(benchmark) : name::parallel(benchmark);
       };
@@ -399,7 +399,7 @@ namespace {
     ecs::Query both = world.query().all<Transform &>().all<Body>();
 
     // The components are known before anything is measured.
-    Heavy() { (void)world.add<Health>(); }
+    Heavy() { (void) world.add<Health>(); }
 
     Handle spawn() {
       const ecs::Entity entity = world.add();

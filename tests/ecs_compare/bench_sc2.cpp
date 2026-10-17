@@ -5,10 +5,11 @@
 #include <utility>
 #include <vector>
 
-#include "common.hpp"
 #include "sc/ecs2/scheduler.hpp"
 #include "sc/ecs2/world.hpp"
 #include "sc/threading/threading.hpp"
+
+#include "common.hpp"
 
 using namespace compare;
 
@@ -40,7 +41,7 @@ namespace {
     std::vector<Entity> entities;
 
     explicit World(size_t count) : entities(count) {
-      for (Entity &entity : entities) {
+      for (Entity &entity: entities) {
         entity = world.create();
       }
     }
@@ -54,7 +55,7 @@ namespace {
 
     void fill() {
       fill_moving();
-      for (const Entity entity : entities) {
+      for (const Entity entity: entities) {
         world.emplace<Health>(entity, 50.0f);
         world.emplace<Timer>(entity, 0.0f);
         world.emplace<Energy>(entity, 0.0f);
@@ -79,7 +80,7 @@ namespace {
   };
 
   // All entities and their components in one call.
-  template <typename First, typename Second>
+  template<typename First, typename Second>
   void create_all(sc::ecs2::World &world, size_t count, const First &first, const Second &second) {
     std::vector<Entity> entities(count);
     world.create(entities, first, second);
@@ -150,12 +151,12 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
 
   BENCHMARK_ADVANCED(name::serial(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
     auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
-    for (auto &world : worlds) {
+    for (auto &world: worlds) {
       world->fill_moving();
     }
     meter.measure([&](int run) {
       World &world = *worlds[static_cast<size_t>(run)];
-      for (const Entity entity : world.entities) {
+      for (const Entity entity: world.entities) {
         world.world.destroy(entity);
       }
     });
@@ -174,7 +175,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     }
     BENCHMARK_ADVANCED(name::parallel(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
       auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
-      for (auto &world : worlds) {
+      for (auto &world: worlds) {
         world->fill_moving();
       }
       meter.measure([&](int run) { reaper.run(worlds[static_cast<size_t>(run)]->world); });
@@ -185,10 +186,10 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     World world{ENTITY_COUNT};
     world.fill_moving();
     BENCHMARK(name::serial(name::ADD_REMOVE)) {
-      for (const Entity entity : world.entities) {
+      for (const Entity entity: world.entities) {
         world.world.emplace<Health>(entity, 50.0f);
       }
-      for (const Entity entity : world.entities) {
+      for (const Entity entity: world.entities) {
         world.world.erase<Health>(entity);
       }
     };
@@ -214,7 +215,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     world.fill();
     BENCHMARK(name::serial(name::GET)) {
       float sum = 0.0f;
-      for (const size_t i : order) {
+      for (const size_t i: order) {
         sum += world.world.get<const Position>(world.entities[i]).x;
       }
       return sum;
@@ -253,7 +254,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     BENCHMARK(name::parallel(name::ITERATE_FRAGMENTED)) { parallel.run(world.world); };
   }
 
-  for (const auto &[every, benchmark] :
+  for (const auto &[every, benchmark]:
        {std::pair{size_t{2}, name::ITERATE_EVERY_2}, std::pair{size_t{10}, name::ITERATE_EVERY_10},
         std::pair{size_t{100}, name::ITERATE_EVERY_100}}) {
     World world{ENTITY_COUNT};

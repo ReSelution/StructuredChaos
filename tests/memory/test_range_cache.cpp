@@ -70,7 +70,7 @@ TEST_CASE("Range Cache", "[memory][virtual]") {
     for (int i = 0; i < 4; ++i) {
       ranges.push_back(cache.reserve(SIZE));
     }
-    for (void *const range : ranges) {
+    for (void *const range: ranges) {
       cache.release(range, SIZE);
     }
     // The first one made room for the last.
@@ -108,7 +108,7 @@ TEST_CASE("Range Cache", "[memory][virtual]") {
     for (size_t i = 0; i < RangeCache::MAX_RANGES + 3; ++i) {
       ranges.push_back(cache.reserve(sc::memory::OS_PAGE_SIZE));
     }
-    for (void *const range : ranges) {
+    for (void *const range: ranges) {
       cache.release(range, sc::memory::OS_PAGE_SIZE);
     }
     REQUIRE(cache.ranges() == RangeCache::MAX_RANGES);
@@ -130,7 +130,7 @@ TEST_CASE("Range Cache", "[memory][virtual]") {
         }
       });
     }
-    for (std::thread &thread : threads) {
+    for (std::thread &thread: threads) {
       thread.join();
     }
     REQUIRE(cache.bytes() <= 8 * SIZE);

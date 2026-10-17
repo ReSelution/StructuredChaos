@@ -42,7 +42,7 @@ namespace {
 
     void fill() {
       fill_moving();
-      for (const mustache::Entity entity : entities) {
+      for (const mustache::Entity entity: entities) {
         world.entities().assign<Health>(entity, 50.0f);
         world.entities().assign<Timer>(entity, 0.0f);
         world.entities().assign<Energy>(entity, 0.0f);
@@ -82,7 +82,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     meter.measure([&](int run) {
       mustache::EntityManager &entities = worlds[static_cast<size_t>(run)]->world.entities();
       for (size_t i = 0; i < ENTITY_COUNT; ++i) {
-        (void)entities.begin().assign<Position>(static_cast<float>(i), 1.0f).assign<Velocity>(1.0f, 2.0f).end();
+        (void) entities.begin().assign<Position>(static_cast<float>(i), 1.0f).assign<Velocity>(1.0f, 2.0f).end();
       }
     });
   };
@@ -102,7 +102,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
       entities.forEach(
           [&entities](const Spawner &spawner) {
             for (uint32_t i = spawner.first; i < spawner.last; ++i) {
-              (void)entities.create<Position, Velocity>();
+              (void) entities.create<Position, Velocity>();
             }
           },
           PARALLEL);
@@ -120,7 +120,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     }
     BENCHMARK_ADVANCED(name::parallel(name::CREATE))(Catch::Benchmark::Chronometer meter) {
       auto worlds = make_worlds<World>(meter.runs(), size_t{0}, context);
-      for (auto &world : worlds) {
+      for (auto &world: worlds) {
         prepare(*world);
       }
       meter.measure([&](int run) { spawn(*worlds[static_cast<size_t>(run)]); });
@@ -129,12 +129,12 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
 
   BENCHMARK_ADVANCED(name::serial(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
     auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
-    for (auto &world : worlds) {
+    for (auto &world: worlds) {
       world->fill_moving();
     }
     meter.measure([&](int run) {
       World &world = *worlds[static_cast<size_t>(run)];
-      for (const mustache::Entity entity : world.entities) {
+      for (const mustache::Entity entity: world.entities) {
         world.world.entities().destroyNow(entity);
       }
     });
@@ -157,7 +157,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     }
     BENCHMARK_ADVANCED(name::parallel(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
       auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT, context);
-      for (auto &world : worlds) {
+      for (auto &world: worlds) {
         world->fill_moving();
       }
       meter.measure([&](int run) { reap(*worlds[static_cast<size_t>(run)]); });
@@ -169,10 +169,10 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     world.fill_moving();
     mustache::EntityManager &entities = world.world.entities();
     BENCHMARK(name::serial(name::ADD_REMOVE)) {
-      for (const mustache::Entity entity : world.entities) {
+      for (const mustache::Entity entity: world.entities) {
         entities.assign<Health>(entity, 50.0f);
       }
-      for (const mustache::Entity entity : world.entities) {
+      for (const mustache::Entity entity: world.entities) {
         entities.removeComponent<Health>(entity);
       }
     };
@@ -208,12 +208,12 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     mustache::EntityManager &entities = world.world.entities();
     BENCHMARK(name::serial(name::GET)) {
       float sum = 0.0f;
-      for (const size_t i : order) {
+      for (const size_t i: order) {
         sum += entities.getComponent<const Position>(world.entities[i])->x;
       }
       return sum;
     };
-    for (const auto mode : {SERIAL, PARALLEL}) {
+    for (const auto mode: {SERIAL, PARALLEL}) {
       const auto named = [mode](const char *benchmark) {
         return mode == SERIAL ? name::serial(benchmark) : name::parallel(benchmark);
       };
@@ -233,7 +233,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
   {
     World world{ENTITY_COUNT, context};
     world.fill_fragmented();
-    for (const auto mode : {SERIAL, PARALLEL}) {
+    for (const auto mode: {SERIAL, PARALLEL}) {
       BENCHMARK(mode == SERIAL ? name::serial(name::ITERATE_FRAGMENTED) : name::parallel(name::ITERATE_FRAGMENTED)) {
         world.world.entities().forEach([](Position &pos, const Velocity &vel) { integrate(pos, vel); }, mode);
       };
@@ -250,7 +250,7 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
   world.fill();
   mustache::EntityManager &entities = world.world.entities();
 
-  for (const auto mode : {SERIAL, PARALLEL}) {
+  for (const auto mode: {SERIAL, PARALLEL}) {
     const auto named = [mode](const char *benchmark) {
       return mode == SERIAL ? name::serial(benchmark) : name::parallel(benchmark);
     };
@@ -276,7 +276,7 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
   // Only now, so that the benchmarks above run on the world they always had.
   const std::vector<size_t> order = shuffled_indices(PARALLEL_ENTITY_COUNT);
   world.fill_targets(order);
-  for (const auto mode : {SERIAL, PARALLEL}) {
+  for (const auto mode: {SERIAL, PARALLEL}) {
     BENCHMARK(mode == SERIAL ? name::serial(name::LOOP_LOOKUP) : name::parallel(name::LOOP_LOOKUP)) {
       entities.forEach(
           [&](Velocity &vel, const Position &pos, const Target &target) {

@@ -17,8 +17,9 @@
 #include <utility>
 #include <vector>
 
-#include "entity.hpp"
 #include "sc/threading/threading.hpp"
+
+#include "entity.hpp"
 #include "world.hpp"
 
 namespace sc::ecs2::internal {
@@ -78,7 +79,8 @@ namespace sc::ecs2::internal {
   // one, or only drops the value. The value is gone afterwards either way,
   // also if making the component throws. Null for a component without
   // members.
-  template <typename T> void finishEmplace(ColumnBase &column, uint32_t index, void *value, bool give) {
+  template<typename T>
+  void finishEmplace(ColumnBase &column, uint32_t index, void *value, bool give) {
     auto &typed = static_cast<Column<T> &>(column);
     if constexpr (Column<T>::HAS_VALUE) {
       const auto drop = [](T *made) { std::destroy_at(made); };
@@ -105,7 +107,8 @@ namespace sc::ecs2::internal {
       m_changes.push_back({.entity = entity, .column = &column, .emplace = nullptr, .value = nullptr});
     }
 
-    template <typename T, typename... Args> void emplace(Entity entity, Column<T> &column, Args &&...args) {
+    template<typename T, typename... Args>
+    void emplace(Entity entity, Column<T> &column, Args &&...args) {
       // First, so that a value that was made is always one of a change.
       m_changes.push_back({.entity = entity, .column = &column, .emplace = &finishEmplace<T>, .value = nullptr});
       if constexpr (Column<T>::HAS_VALUE) {
@@ -141,7 +144,7 @@ namespace sc::ecs2::internal {
           change.column->erase(indexOf(change.entity));
         }
       }
-      for (const Entity entity : m_destroyed) {
+      for (const Entity entity: m_destroyed) {
         world.destroy(entity);
       }
       clear();
@@ -194,30 +197,36 @@ namespace sc::ecs2 {
   // A const component is only read, Exclude names components the entities must
   // not have. This is what tells the scheduler which systems may run at the
   // same time.
-  template <typename... Terms> class Query {
-    template <typename Component> static constexpr bool named = (std::same_as<Component, Terms> || ...);
+  template<typename... Terms>
+  class Query {
+    template<typename Component>
+    static constexpr bool named = (std::same_as<Component, Terms> || ...);
 
   public:
     explicit Query(World &world) : m_world(&world), m_columns(columnsOf(world, typename Lists::GetList{})) {}
 
     // See World::each.
-    template <typename Function> void each(Function &&function) const { m_world->template each<Terms...>(function); }
+    template<typename Function>
+    void each(Function &&function) const {
+      m_world->template each<Terms...>(function);
+    }
 
     // See World::parallelEach.
-    template <typename Function> void parallelEach(Function &&function, size_t grain = 1) const {
+    template<typename Function>
+    void parallelEach(Function &&function, size_t grain = 1) const {
       m_world->template parallelEach<Terms...>(function, grain);
     }
 
     // The component of any entity that exists and has it, named the way the
     // query names it.
-    template <typename Component>
+    template<typename Component>
       requires named<Component>
     [[nodiscard]] Component &get(Entity entity) const {
       assert(m_world->valid(entity));
       return std::get<World::ColumnOf<Component> *>(m_columns)->get(indexOf(entity));
     }
 
-    template <typename Component>
+    template<typename Component>
       requires named<Component> || named<const Component>
     [[nodiscard]] bool contains(Entity entity) const {
       return m_world->template contains<Component>(entity);
@@ -226,7 +235,8 @@ namespace sc::ecs2 {
   private:
     using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
 
-    template <typename... Get> static auto columnsOf(World &world, internal::List<Get...>) {
+    template<typename... Get>
+    static auto columnsOf(World &world, internal::List<Get...>) {
       return std::tuple<World::ColumnOf<Get> *...>{&world.column<Get>()...};
     }
 
@@ -252,8 +262,10 @@ namespace sc::ecs2 {
   //    tryEmplace, as several threads may be doing at the same time, and
   //    takes it away with Commands::erase: erase would take it away from
   //    under a thread that is using it.
-  template <typename... Components> class Change {
-    template <typename Component> static constexpr bool named = (std::same_as<Component, Components> || ...);
+  template<typename... Components>
+  class Change {
+    template<typename Component>
+    static constexpr bool named = (std::same_as<Component, Components> || ...);
 
   public:
     explicit Change(World &world) : m_world(&world) {}
@@ -262,26 +274,26 @@ namespace sc::ecs2 {
     // function of a parallel loop, like World::create.
     [[nodiscard]] Entity create() const { return m_world->create(); }
 
-    template <typename Component, typename... Args>
+    template<typename Component, typename... Args>
       requires named<Component>
     decltype(auto) emplace(Entity entity, Args &&...args) const {
       return m_world->template emplace<Component>(entity, std::forward<Args>(args)...);
     }
 
     // See World::tryEmplace.
-    template <typename Component, typename... Args>
+    template<typename Component, typename... Args>
       requires named<Component>
     bool tryEmplace(Entity entity, Args &&...args) const {
       return m_world->template tryEmplace<Component>(entity, std::forward<Args>(args)...);
     }
 
-    template <typename Component>
+    template<typename Component>
       requires named<Component>
     bool erase(Entity entity) const {
       return m_world->template erase<Component>(entity);
     }
 
-    template <typename Component>
+    template<typename Component>
       requires named<Component>
     [[nodiscard]] bool contains(Entity entity) const {
       return m_world->template contains<Component>(entity);
@@ -324,7 +336,8 @@ namespace sc::ecs2 {
     // later. Does nothing if the entity does not exist any more by then or
     // has the component already: the one that was made is dropped. Like
     // erase, this does not count as writing the component.
-    template <typename Component, typename... Args> void emplace(Entity entity, Args &&...args) const {
+    template<typename Component, typename... Args>
+    void emplace(Entity entity, Args &&...args) const {
       auto &column = m_world->template column<Component>();
       withList([&](internal::CommandList &list) { list.emplace(entity, column, std::forward<Args>(args)...); });
     }
@@ -333,7 +346,8 @@ namespace sc::ecs2 {
     // have the component. A system that does this does not count as writing
     // the component: the systems that use it run at the same time and still
     // find it.
-    template <typename Component> void erase(Entity entity) const {
+    template<typename Component>
+    void erase(Entity entity) const {
       auto &column = m_world->template column<Component>();
       withList([&](internal::CommandList &list) { list.erase(entity, column); });
     }
@@ -341,7 +355,8 @@ namespace sc::ecs2 {
   private:
     // Calls the function with the list of the calling thread. The last list
     // is shared by the threads outside the pool, which lock it for the call.
-    template <typename Function> void withList(Function &&function) const {
+    template<typename Function>
+    void withList(Function &&function) const {
       const uint32_t thread = threading::threadId();
       if (thread < m_lists.size() - 1) [[likely]] {
         function(m_lists[thread]);
@@ -376,7 +391,7 @@ namespace sc::ecs2::internal {
 
     // Several parameters may name the same component; writing wins.
     void add(size_t index, bool write) {
-      for (Component &component : components) {
+      for (Component &component: components) {
         if (component.index == index) {
           component.write = component.write || write;
           return;
@@ -390,8 +405,8 @@ namespace sc::ecs2::internal {
       if (exclusive || other.exclusive) {
         return true;
       }
-      for (const Component &mine : components) {
-        for (const Component &theirs : other.components) {
+      for (const Component &mine: components) {
+        for (const Component &theirs: other.components) {
           if (mine.index == theirs.index && (mine.write || theirs.write)) {
             return true;
           }
@@ -409,9 +424,11 @@ namespace sc::ecs2::internal {
 
   // How one kind of system parameter is declared to the scheduler and how its
   // value is made when the system runs.
-  template <typename Param> struct SystemParam;
+  template<typename Param>
+  struct SystemParam;
 
-  template <typename... Terms> struct SystemParam<Query<Terms...>> {
+  template<typename... Terms>
+  struct SystemParam<Query<Terms...>> {
     static void declare(SystemAccess &access) {
       using Lists = Split<List<>, List<>, Terms...>;
       declare(access, typename Lists::GetList{}, typename Lists::ExcludedList{});
@@ -420,7 +437,7 @@ namespace sc::ecs2::internal {
     static Query<Terms...> fetch(const SystemContext &context) { return Query<Terms...>{context.world}; }
 
   private:
-    template <typename... Get, typename... Excluded>
+    template<typename... Get, typename... Excluded>
     static void declare(SystemAccess &access, List<Get...>, List<Excluded...>) {
       (access.add(componentIndex<std::remove_const_t<Get>>(), !std::is_const_v<Get>), ...);
       // An excluded component is only looked up, never changed.
@@ -428,19 +445,22 @@ namespace sc::ecs2::internal {
     }
   };
 
-  template <typename... Components> struct SystemParam<Change<Components...>> {
+  template<typename... Components>
+  struct SystemParam<Change<Components...>> {
     static void declare(SystemAccess &access) { (access.add(componentIndex<Components>(), true), ...); }
 
     static Change<Components...> fetch(const SystemContext &context) { return Change<Components...>{context.world}; }
   };
 
-  template <> struct SystemParam<Commands> {
+  template<>
+  struct SystemParam<Commands> {
     static void declare(SystemAccess &access) { access.commands = true; }
 
     static Commands fetch(const SystemContext &context) { return Commands{context.world, context.commands}; }
   };
 
-  template <> struct SystemParam<World &> {
+  template<>
+  struct SystemParam<World &> {
     static void declare(SystemAccess &access) { access.exclusive = true; }
 
     static World &fetch(const SystemContext &context) { return context.world; }
@@ -448,65 +468,76 @@ namespace sc::ecs2::internal {
 
   // Queries, Change and Commands are taken by value or by const reference, the
   // world only by reference.
-  template <typename Param>
+  template<typename Param>
   using SystemParamFor =
       SystemParam<std::conditional_t<std::is_same_v<Param, World &>, World &, std::remove_cvref_t<Param>>>;
 
   // The parameter types of a system: a function pointer or an object with a
   // single, non-template operator().
-  template <typename F> struct SystemSignature : SystemSignature<decltype(&F::operator())> {};
+  template<typename F>
+  struct SystemSignature : SystemSignature<decltype(&F::operator())> {};
 
-  template <typename R, typename... Args> struct SystemSignature<R (*)(Args...)> {
+  template<typename R, typename... Args>
+  struct SystemSignature<R (*)(Args...)> {
     using Params = List<Args...>;
   };
-  template <typename R, typename... Args>
+  template<typename R, typename... Args>
   struct SystemSignature<R (*)(Args...) noexcept> : SystemSignature<R (*)(Args...)> {};
-  template <typename C, typename R, typename... Args>
+  template<typename C, typename R, typename... Args>
   struct SystemSignature<R (C::*)(Args...)> : SystemSignature<R (*)(Args...)> {};
-  template <typename C, typename R, typename... Args>
+  template<typename C, typename R, typename... Args>
   struct SystemSignature<R (C::*)(Args...) const> : SystemSignature<R (*)(Args...)> {};
-  template <typename C, typename R, typename... Args>
+  template<typename C, typename R, typename... Args>
   struct SystemSignature<R (C::*)(Args...) noexcept> : SystemSignature<R (*)(Args...)> {};
-  template <typename C, typename R, typename... Args>
+  template<typename C, typename R, typename... Args>
   struct SystemSignature<R (C::*)(Args...) const noexcept> : SystemSignature<R (*)(Args...)> {};
 
   // A parameter of a loop function that is neither the entity nor a component.
-  template <typename Param> inline constexpr bool isLoopExtra = false;
-  template <typename... Components> inline constexpr bool isLoopExtra<Change<Components...>> = true;
-  template <> inline constexpr bool isLoopExtra<Commands> = true;
-  template <typename... Terms> inline constexpr bool isLoopExtra<Query<Terms...>> = true;
+  template<typename Param>
+  inline constexpr bool isLoopExtra = false;
+  template<typename... Components>
+  inline constexpr bool isLoopExtra<Change<Components...>> = true;
+  template<>
+  inline constexpr bool isLoopExtra<Commands> = true;
+  template<typename... Terms>
+  inline constexpr bool isLoopExtra<Query<Terms...>> = true;
 
   // The parameters of a function for Scheduler::addParallel: the entity, then
   // Change, Commands and queries, all of them optional, and then the
   // components.
-  template <bool WithEntity, typename Extras, typename... Rest> struct LoopRest;
+  template<bool WithEntity, typename Extras, typename... Rest>
+  struct LoopRest;
 
-  template <bool WithEntity, typename... Extras, typename... Components>
+  template<bool WithEntity, typename... Extras, typename... Components>
   struct LoopRest<WithEntity, List<Extras...>, Components...> {
     static constexpr bool ENTITY = WithEntity;
     using ExtraList = List<Extras...>;
     using ComponentList = List<Components...>;
   };
 
-  template <bool WithEntity, typename... Extras, typename First, typename... Rest>
+  template<bool WithEntity, typename... Extras, typename First, typename... Rest>
     requires isLoopExtra<std::remove_cvref_t<First>>
   struct LoopRest<WithEntity, List<Extras...>, First, Rest...>
       : LoopRest<WithEntity, List<Extras..., std::remove_cvref_t<First>>, Rest...> {};
 
-  template <typename Params> struct LoopSignature;
-  template <typename... Params> struct LoopSignature<List<Params...>> : LoopRest<false, List<>, Params...> {};
-  template <typename... Params> struct LoopSignature<List<Entity, Params...>> : LoopRest<true, List<>, Params...> {};
+  template<typename Params>
+  struct LoopSignature;
+  template<typename... Params>
+  struct LoopSignature<List<Params...>> : LoopRest<false, List<>, Params...> {};
+  template<typename... Params>
+  struct LoopSignature<List<Entity, Params...>> : LoopRest<true, List<>, Params...> {};
 
   // The term of a query for a component a loop function takes: only a
   // reference to non-const lets the function write it.
-  template <typename Param>
+  template<typename Param>
   using TermOf =
       std::conditional_t<std::is_lvalue_reference_v<Param> && !std::is_const_v<std::remove_reference_t<Param>>,
                          std::remove_reference_t<Param>, const std::remove_cvref_t<Param>>;
 
   // Calls the function for every item, for more than one item on the thread
   // pool, and returns once all calls are done. Rethrows the first exception.
-  template <typename Items, typename Function> void runAll(const Items &items, Function &&function) {
+  template<typename Items, typename Function>
+  void runAll(const Items &items, Function &&function) {
     if (items.empty()) [[unlikely]] {
       return;
     }
@@ -556,7 +587,8 @@ namespace sc::ecs2 {
   // and therefore runs alone, like one that takes the world.
   class Scheduler {
   public:
-    template <typename F> Scheduler &add(F &&system, std::string name = {}) {
+    template<typename F>
+    Scheduler &add(F &&system, std::string name = {}) {
       using Function = std::decay_t<F>;
       return addSystem(std::forward<F>(system), std::move(name),
                        typename internal::SystemSignature<Function>::Params{});
@@ -577,7 +609,8 @@ namespace sc::ecs2 {
     //   scheduler.addParallel([](Query<const Health> others, const Target &target) { ... });
     //
     // grain is the number of pages a thread takes at a time.
-    template <typename F> Scheduler &addParallel(F &&function, std::string name = {}, size_t grain = 1) {
+    template<typename F>
+    Scheduler &addParallel(F &&function, std::string name = {}, size_t grain = 1) {
       using Signature = internal::LoopSignature<typename internal::SystemSignature<std::decay_t<F>>::Params>;
       return addLoop(std::forward<F>(function), std::move(name), grain, typename Signature::ExtraList{},
                      typename Signature::ComponentList{});
@@ -592,7 +625,7 @@ namespace sc::ecs2 {
     //
     // The function takes the components in the order the query names them,
     // without the ones that have no members.
-    template <typename QueryType, typename F>
+    template<typename QueryType, typename F>
     Scheduler &addParallel(F &&function, std::string name = {}, size_t grain = 1) {
       using Signature = internal::LoopSignature<typename internal::SystemSignature<std::decay_t<F>>::Params>;
       return addLoopOver(std::type_identity<QueryType>{}, std::forward<F>(function), std::move(name), grain,
@@ -614,14 +647,14 @@ namespace sc::ecs2 {
 
       // Here and not when the system is added: the pool may be set up later.
       const size_t threads = threading::threadSlots();
-      for (System &system : m_systems) {
+      for (System &system: m_systems) {
         // One more for the threads outside the pool, see Commands::withList.
         if (system.access.commands && system.commands.size() < threads + 1) {
           system.commands = std::vector<internal::CommandList>(threads + 1);
         }
       }
 
-      for (const std::vector<size_t> &stage : stages) {
+      for (const std::vector<size_t> &stage: stages) {
         try {
           internal::runAll(stage, [this, &world](size_t index) {
             System &system = m_systems[index];
@@ -634,8 +667,8 @@ namespace sc::ecs2 {
 
         // Now that nothing is running: nobody is using what goes away.
         try {
-          for (const size_t index : stage) {
-            for (internal::CommandList &list : m_systems[index].commands) {
+          for (const size_t index: stage) {
+            for (internal::CommandList &list: m_systems[index].commands) {
               list.apply(world);
             }
           }
@@ -689,14 +722,14 @@ namespace sc::ecs2 {
 
     // Drops what the systems of a stage recorded through Commands.
     void clearCommands(const std::vector<size_t> &stage) noexcept {
-      for (const size_t index : stage) {
-        for (internal::CommandList &list : m_systems[index].commands) {
+      for (const size_t index: stage) {
+        for (internal::CommandList &list: m_systems[index].commands) {
           list.clear();
         }
       }
     }
 
-    template <typename F, typename... Params>
+    template<typename F, typename... Params>
     Scheduler &addSystem(F &&system, std::string name, internal::List<Params...>) {
       internal::SystemAccess access;
       (internal::SystemParamFor<Params>::declare(access), ...);
@@ -718,7 +751,7 @@ namespace sc::ecs2 {
     }
 
     // addParallel for the query of the components the function is called with.
-    template <typename F, typename... Extras, typename... Components>
+    template<typename F, typename... Extras, typename... Components>
     Scheduler &addLoop(F &&function, std::string name, size_t grain, internal::List<Extras...> extras,
                        internal::List<Components...>) {
       static_assert(sizeof...(Components) != 0, "the function takes the components of an entity");
@@ -729,7 +762,7 @@ namespace sc::ecs2 {
                          std::move(name), grain, extras);
     }
 
-    template <typename... Terms, typename F, typename... Extras>
+    template<typename... Terms, typename F, typename... Extras>
     Scheduler &addLoopOver(std::type_identity<Query<Terms...>>, F &&function, std::string name, size_t grain,
                            internal::List<Extras...>) {
       using Function = std::decay_t<F>;

@@ -76,7 +76,7 @@ TEST_CASE("Registry Groups", "[ecs][registry][group]") {
   SECTION("Owning Group Over Existing Components") {
     auto group = registry.group<Position, Velocity>();
     REQUIRE(group.size() == 50);
-    for (auto [entity, pos, vel] : group.each()) {
+    for (auto [entity, pos, vel]: group.each()) {
       REQUIRE(static_cast<size_t>(pos.x) % 2 == 0);
       REQUIRE(vel.dy == 2.0f);
     }
@@ -99,7 +99,7 @@ TEST_CASE("Registry Groups", "[ecs][registry][group]") {
 
   SECTION("Const Components Are Read Only") {
     auto group = registry.group<Position, const Velocity>();
-    for (auto [entity, pos, vel] : group.each()) {
+    for (auto [entity, pos, vel]: group.each()) {
       STATIC_REQUIRE(!std::is_const_v<std::remove_reference_t<decltype(pos)>>);
       STATIC_REQUIRE(std::is_const_v<std::remove_reference_t<decltype(vel)>>);
       pos.y = vel.dy;
@@ -184,13 +184,13 @@ TEST_CASE("Scheduler Systems With Groups", "[ecs][scheduler][group]") {
     size_t grouped = 0;
     scheduler.add([&velocities](View<const Velocity> view) { velocities = view.size(); });
     scheduler.add([](View<Health> view) {
-      for (auto [entity, health] : view.each()) {
+      for (auto [entity, health]: view.each()) {
         health.value -= 1;
       }
     });
     scheduler.add([&grouped](Moving group) {
       grouped = group.size();
-      for (auto [entity, pos, vel] : group.each()) {
+      for (auto [entity, pos, vel]: group.each()) {
         pos.x += vel.dx;
         pos.y += vel.dy;
       }
@@ -227,17 +227,17 @@ TEST_CASE("Commands On The Components Of A Group", "[ecs][commands][group][threa
   // the group changes with each of them, next to a component outside of it.
   Scheduler scheduler;
   scheduler.add([](View<const Health> view, Commands<Position> commands) {
-    for (auto [entity, health] : view.each()) {
+    for (auto [entity, health]: view.each()) {
       commands.emplace<Position>(entity, static_cast<float>(health.value), 0.0f);
     }
   });
   scheduler.add([](View<const Health> view, Commands<Velocity> commands) {
-    for (auto [entity, health] : view.each()) {
+    for (auto [entity, health]: view.each()) {
       commands.emplace<Velocity>(entity, static_cast<float>(health.value), 1.0f);
     }
   });
   scheduler.add([](View<const Health> view, Commands<Mass, Frozen> commands) {
-    for (auto [entity, health] : view.each()) {
+    for (auto [entity, health]: view.each()) {
       commands.emplace<Mass>(entity, static_cast<float>(health.value));
       if (health.value % 4 == 0) {
         commands.emplace<Frozen>(entity);
@@ -245,7 +245,7 @@ TEST_CASE("Commands On The Components Of A Group", "[ecs][commands][group][threa
     }
   });
   scheduler.add([](View<const Health> view, Commands<Marker> commands) {
-    for (auto [entity, health] : view.each()) {
+    for (auto [entity, health]: view.each()) {
       commands.emplace<Marker>(commands.create(), health.value);
     }
   });
@@ -255,7 +255,7 @@ TEST_CASE("Commands On The Components Of A Group", "[ecs][commands][group][threa
 
   auto group = registry.group<Position, Velocity>(entt::get<Mass>, entt::exclude<Frozen>);
   REQUIRE(group.size() == per_system - per_system / 4);
-  for (auto [entity, pos, vel, mass] : group.each()) {
+  for (auto [entity, pos, vel, mass]: group.each()) {
     const int id = registry.get<Health>(entity).value;
     REQUIRE(id % 4 != 0);
     REQUIRE(pos.x == static_cast<float>(id));
@@ -267,12 +267,12 @@ TEST_CASE("Commands On The Components Of A Group", "[ecs][commands][group][threa
   // And out of the group again.
   Scheduler cleanup;
   cleanup.add([](View<const Frozen> view, Commands<Frozen> commands) {
-    for (auto entity : view) {
+    for (auto entity: view) {
       commands.remove<Frozen>(entity);
     }
   });
   cleanup.add([](View<const Health> view, Commands<Mass> commands) {
-    for (auto [entity, health] : view.each()) {
+    for (auto [entity, health]: view.each()) {
       if (health.value % 2 == 1) {
         commands.remove<Mass>(entity);
       }
@@ -284,7 +284,7 @@ TEST_CASE("Commands On The Components Of A Group", "[ecs][commands][group][threa
   cleanup.run(registry);
 
   REQUIRE(group.size() == per_system / 2 - per_system / 8);
-  for (auto [entity, pos, vel, mass] : group.each()) {
+  for (auto [entity, pos, vel, mass]: group.each()) {
     const int id = registry.get<Health>(entity).value;
     REQUIRE(id % 2 == 0);
     REQUIRE(id % 8 != 0);

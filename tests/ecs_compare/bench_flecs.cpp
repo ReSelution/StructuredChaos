@@ -47,7 +47,7 @@ namespace {
 
     void fill() {
       fill_moving();
-      for (const auto &entity : entities) {
+      for (const auto &entity: entities) {
         entity.set<Health>({50.0f}).set<Timer>({0.0f}).set<Energy>({0.0f}).set<Score>({0.0f});
       }
     }
@@ -69,7 +69,8 @@ namespace {
 
   // ecs_bulk_init wants the values of all entities in an array. It is built
   // with the first call, which Catch2 makes before it measures.
-  template <typename Component> void *repeated(const Component &value, size_t count) {
+  template<typename Component>
+  void *repeated(const Component &value, size_t count) {
     static std::vector<Component> values;
     if (values.size() != count) {
       values.assign(count, value);
@@ -78,7 +79,7 @@ namespace {
   }
 
   // All entities and their components in one call.
-  template <typename First, typename Second>
+  template<typename First, typename Second>
   void create_all(flecs::world &world, size_t count, const First &first, const Second &second) {
     void *data[] = {repeated(first, count), repeated(second, count)};
     ecs_bulk_desc_t desc = {};
@@ -129,12 +130,12 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
 
   BENCHMARK_ADVANCED(name::serial(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
     auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
-    for (auto &world : worlds) {
+    for (auto &world: worlds) {
       world->fill_moving();
     }
     meter.measure([&](int run) {
       World &world = *worlds[static_cast<size_t>(run)];
-      for (const auto &entity : world.entities) {
+      for (const auto &entity: world.entities) {
         entity.destruct();
       }
     });
@@ -156,7 +157,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     }
     BENCHMARK_ADVANCED(name::parallel(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
       auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
-      for (auto &world : worlds) {
+      for (auto &world: worlds) {
         prepare(*world);
       }
       meter.measure([&](int run) { worlds[static_cast<size_t>(run)]->world.progress(DT); });
@@ -167,10 +168,10 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     World world{ENTITY_COUNT};
     world.fill_moving();
     BENCHMARK(name::serial(name::ADD_REMOVE)) {
-      for (const auto &entity : world.entities) {
+      for (const auto &entity: world.entities) {
         entity.set<Health>({50.0f});
       }
-      for (const auto &entity : world.entities) {
+      for (const auto &entity: world.entities) {
         entity.remove<Health>();
       }
     };
@@ -201,7 +202,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     world.fill();
     BENCHMARK(name::serial(name::GET)) {
       float sum = 0.0f;
-      for (const size_t i : order) {
+      for (const size_t i: order) {
         sum += world.entities[i].get<Position>().x;
       }
       return sum;
@@ -298,7 +299,7 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     with_light ? light.enable() : light.disable();
     with_heavy ? heavy.enable() : heavy.disable();
     with_lookup ? lookup.enable() : lookup.disable();
-    for (const flecs::system &system : frame) {
+    for (const flecs::system &system: frame) {
       with_frame ? system.enable() : system.disable();
     }
   };

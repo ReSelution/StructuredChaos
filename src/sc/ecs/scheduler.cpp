@@ -14,7 +14,8 @@ namespace {
 
   // Calls the function for every item, for more than one item on the thread
   // pool, and returns once all calls are done. Rethrows the first exception.
-  template <typename Items, typename Function> void runAll(const Items &items, Function &&function) {
+  template<typename Items, typename Function>
+  void runAll(const Items &items, Function &&function) {
     if (items.empty()) [[unlikely]] {
       return;
     }
@@ -67,7 +68,7 @@ namespace sc::ecs {
       const internal::SystemAccess &access = m_systems[i].access;
       flow.bind(static_cast<entt::id_type>(i));
       flow.set(registryResource, access.exclusive);
-      for (const auto &component : access.components) {
+      for (const auto &component: access.components) {
         flow.set(component.id, component.write);
       }
     }
@@ -78,7 +79,7 @@ namespace sc::ecs {
     std::vector<size_t> stageOf(m_systems.size(), 0);
     size_t stageCount = 0;
     for (size_t i = 0; i < m_systems.size(); ++i) {
-      for (const auto [from, to] : graph.in_edges(i)) {
+      for (const auto [from, to]: graph.in_edges(i)) {
         // Systems only wait for ones added before them.
         assert(from < to);
         stageOf[i] = std::max(stageOf[i], stageOf[from] + 1);
@@ -99,8 +100,8 @@ namespace sc::ecs {
     m_plans.assign(m_stages.size(), {});
     for (size_t stage = 0; stage < m_stages.size(); ++stage) {
       CommandPlan &plan = m_plans[stage];
-      for (const size_t system : m_stages[stage]) {
-        for (const auto &commands : m_systems[system].commands) {
+      for (const size_t system: m_stages[stage]) {
+        for (const auto &commands: m_systems[system].commands) {
           plan.queues.insert(plan.queues.end(), commands->queues().begin(), commands->queues().end());
         }
       }
@@ -131,7 +132,7 @@ namespace sc::ecs {
   void Scheduler::run(Registry &registry) {
     // Creating a group reorders storages, so it has to happen before anything
     // runs. For a group that exists already this is only a lookup.
-    for (const System &system : m_systems) {
+    for (const System &system: m_systems) {
       if (system.prepare != nullptr) {
         system.prepare(registry);
       }
@@ -141,7 +142,7 @@ namespace sc::ecs {
 
     // Here and not when the system is added: the pool may be set up later.
     const size_t threads = threading::threadSlots();
-    for (System &system : m_systems) {
+    for (System &system: m_systems) {
       // One more for the threads outside the pool, see ParallelCommands::local.
       if (system.access.commandsPerThread && system.commands.size() < threads + 1) {
         while (system.commands.size() < threads + 1) {
@@ -176,21 +177,21 @@ namespace sc::ecs {
     // Different families do not touch each other, so their tasks run at the
     // same time.
     m_pending.clear();
-    for (const std::span<internal::CommandQueueBase *const> family : m_plans[stage].families) {
+    for (const std::span<internal::CommandQueueBase *const> family: m_plans[stage].families) {
       if (!std::ranges::all_of(family, &internal::CommandQueueBase::empty)) {
         m_pending.push_back(family);
       }
     }
     runAll(m_pending, [&registry](std::span<internal::CommandQueueBase *const> queues) {
-      for (internal::CommandQueueBase *queue : queues) {
+      for (internal::CommandQueueBase *queue: queues) {
         queue->apply(registry);
       }
     });
 
     // Destroying an entity writes every component, so it comes after and has
     // nothing running next to it.
-    for (const size_t system : m_stages[stage]) {
-      for (const auto &commands : m_systems[system].commands) {
+    for (const size_t system: m_stages[stage]) {
+      for (const auto &commands: m_systems[system].commands) {
         if (!commands->destroyed.empty()) {
           registry.destroy(commands->destroyed.begin(), commands->destroyed.end());
           commands->destroyed.clear();
@@ -200,8 +201,8 @@ namespace sc::ecs {
   }
 
   void Scheduler::dropCommands(const std::vector<size_t> &stage) noexcept {
-    for (const size_t system : stage) {
-      for (const auto &commands : m_systems[system].commands) {
+    for (const size_t system: stage) {
+      for (const auto &commands: m_systems[system].commands) {
         commands->clear();
       }
     }

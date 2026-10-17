@@ -19,15 +19,16 @@
 #include <mimalloc.h>
 #include <pfr.hpp>
 
+#include "sc/stats/stats.hpp"
+#include "sc/stats/throughput.hpp"
+
 #include "anchor.hpp"
 #include "entity.hpp"
 #include "resource.hpp"
-#include "sc/stats/stats.hpp"
-#include "sc/stats/throughput.hpp"
 #include "view.hpp"
 
 namespace sc::ecs::internal {
-  template <typename It>
+  template<typename It>
     requires IsEntity<typename std::iterator_traits<It>::value_type>
   struct EntityOutputIterator {
     It current;
@@ -64,7 +65,8 @@ namespace sc::ecs::internal {
   // Index of a component type, the same in every registry. Assigned on first
   // use, counted over all component types of the program. Not stable across
   // shared library boundaries, where every module would count on its own.
-  template <typename Component> size_t componentIndex() {
+  template<typename Component>
+  size_t componentIndex() {
     static const size_t index = [] {
       const size_t next = nextComponentIndex.fetch_add(1, std::memory_order_relaxed);
       if (next >= MAX_COMPONENT_TYPES) {
@@ -81,7 +83,8 @@ namespace sc::ecs::internal {
   inline std::atomic<size_t> nextGroupIndex{0};
 
   // Index of a group type, assigned like componentIndex.
-  template <typename Group> size_t groupIndex() {
+  template<typename Group>
+  size_t groupIndex() {
     static const size_t index = [] {
       const size_t next = nextGroupIndex.fetch_add(1, std::memory_order_relaxed);
       if (next >= MAX_GROUP_TYPES) {
@@ -139,11 +142,12 @@ namespace sc::ecs {
   // (storage, view, group), as long as what is returned is then used according
   // to the rules above.
   class Registry {
-    template <typename Component> using StorageFor = entt::storage_for_t<std::remove_const_t<Component>>;
+    template<typename Component>
+    using StorageFor = entt::storage_for_t<std::remove_const_t<Component>>;
 
     // Whether a component has Resource fields, which own memory outside of the
     // component storage.
-    template <typename Component>
+    template<typename Component>
     static constexpr bool hasResource = []() {
       if constexpr (!pfr::is_implicitly_reflectable_v<Component, void>) {
         return false;
@@ -159,7 +163,8 @@ namespace sc::ecs {
       }
     }();
 
-    template <typename Component> struct ComponentAccess : internal::ComponentAccessBase {
+    template<typename Component>
+    struct ComponentAccess : internal::ComponentAccessBase {
       // Heap the Resource fields of the component allocate from, null for a
       // component without any. Components are trivially destructible, so their
       // buffers are not freed one by one: destroying the heap frees them all.
@@ -188,24 +193,28 @@ namespace sc::ecs {
 
     Entity create();
 
-    template <typename It>
+    template<typename It>
       requires IsEntity<typename std::iterator_traits<It>::value_type>
     void create(It begin, It end);
 
     // Takes back entities that were created and never used: they have no
     // components and nobody else knows them. Safe to call from any thread at
     // any time, like create.
-    template <typename It> void release(It first, It last);
+    template<typename It>
+    void release(It first, It last);
 
     // The same for the registry with the given id, and nothing if that one
     // does not exist any more.
-    template <typename It> static void release(uint64_t id, It first, It last);
+    template<typename It>
+    static void release(uint64_t id, It first, It last);
 
-    template <typename Component> void reserve(size_t count) {
+    template<typename Component>
+    void reserve(size_t count) {
       getComponentAccess<Component>()->storage->reserve(count);
     }
 
-    template <typename Component, typename... Args> decltype(auto) emplace(const entt::entity e, Args &&...args) {
+    template<typename Component, typename... Args>
+    decltype(auto) emplace(const entt::entity e, Args &&...args) {
       [[maybe_unused]] const auto scope = anchor<Component>();
       return getComponentAccess<Component>()->storage->emplace(e, std::forward<Args>(args)...);
     }
@@ -213,13 +222,15 @@ namespace sc::ecs {
     // Makes Resource fields constructed on this thread allocate from the heap
     // of the component, for components that are built before they are handed
     // to insert.
-    template <typename Component> void setStorageAnchor() {
+    template<typename Component>
+    void setStorageAnchor() {
       HeapAnchor::current = getComponentAccess<Component>()->heap;
     }
 
     // The same for as long as the returned object lives. Does nothing for a
     // component without Resource fields, which has no heap.
-    template <typename Component> auto anchor() {
+    template<typename Component>
+    auto anchor() {
       if constexpr (hasResource<std::remove_const_t<Component>>) {
         return internal::AnchorScope{getComponentAccess<Component>()->heap};
       } else {
@@ -227,12 +238,16 @@ namespace sc::ecs {
       }
     }
 
-    template <typename Component, typename It, typename DataIt> void insert(It first, It last, DataIt dataBegin) {
+    template<typename Component, typename It, typename DataIt>
+    void insert(It first, It last, DataIt dataBegin) {
       [[maybe_unused]] const auto scope = anchor<Component>();
       getComponentAccess<Component>()->storage->insert(first, last, dataBegin);
     }
 
-    template <typename Component> void erase(entt::entity e) { getComponentAccess<Component>()->storage->erase(e); }
+    template<typename Component>
+    void erase(entt::entity e) {
+      getComponentAccess<Component>()->storage->erase(e);
+    }
 
     // Whether the entity exists, that is, was created and not destroyed since.
     bool valid(entt::entity e) const;
@@ -247,18 +262,22 @@ namespace sc::ecs {
     bool destroy(entt::entity e);
 
     // The same for a range of entities.
-    template <typename It> void destroy(It first, It last);
+    template<typename It>
+    void destroy(It first, It last);
 
     // The component of an entity, or a tuple of references for several ones.
-    template <typename... Components> decltype(auto) get(entt::entity e);
+    template<typename... Components>
+    decltype(auto) get(entt::entity e);
 
     // The storage of a component, const for a const component.
-    template <typename Component> entt::storage_for_t<Component> &storage() {
+    template<typename Component>
+    entt::storage_for_t<Component> &storage() {
       return *getComponentAccess<Component>()->storage;
     }
 
     // The components may name excluded ones, see View.
-    template <typename... Components> View<Components...> view() {
+    template<typename... Components>
+    View<Components...> view() {
       return []<typename... Get, typename... Excluded>(
                  Registry &registry,
                  std::type_identity<entt::basic_view<entt::get_t<Get...>, entt::exclude_t<Excluded...>>>) {
@@ -269,7 +288,8 @@ namespace sc::ecs {
     }
 
     // A view over the entities that have none of the excluded components.
-    template <typename... Components, typename... Excluded> auto view(entt::exclude_t<Excluded...>) {
+    template<typename... Components, typename... Excluded>
+    auto view(entt::exclude_t<Excluded...>) {
       using ViewType = entt::basic_view<entt::get_t<entt::storage_for_t<Components>...>,
                                         entt::exclude_t<entt::storage_for_t<Excluded>...>>;
       return ViewType{storage<Components>()..., storage<Excluded>()...};
@@ -280,7 +300,7 @@ namespace sc::ecs {
     // The first call for a group creates it, which reorders the storages of
     // its components: nothing else may use the registry in the meantime. The
     // Scheduler does that for the groups its systems take before it runs them.
-    template <typename... Owned, typename... Get, typename... Exclude>
+    template<typename... Owned, typename... Get, typename... Exclude>
     auto group(entt::get_t<Get...> = entt::get_t{}, entt::exclude_t<Exclude...> = entt::exclude_t{});
 
     // The family of the component with the given index, see
@@ -297,18 +317,21 @@ namespace sc::ecs {
   private:
     void refillEntities();
 
-    template <typename GroupType> struct GroupAccess {
+    template<typename GroupType>
+    struct GroupAccess {
       GroupType group;
     };
 
-    template <typename... Owned, typename... Get, typename... Exclude>
+    template<typename... Owned, typename... Get, typename... Exclude>
     auto *createGroup(entt::get_t<Get...>, entt::exclude_t<Exclude...>);
 
-    template <typename Component> ComponentAccess<std::remove_const_t<Component>> *getComponentAccess();
+    template<typename Component>
+    ComponentAccess<std::remove_const_t<Component>> *getComponentAccess();
 
-    template <typename Component> ComponentAccess<Component> *findOrCreateComponentAccess();
+    template<typename Component>
+    ComponentAccess<Component> *findOrCreateComponentAccess();
 
-    template <typename Component>
+    template<typename Component>
     static void cleanupResources(StorageFor<Component> &storage, entt::registry &reg, entt::entity e);
 
     // The access object of every component type used with this registry, at
@@ -351,7 +374,7 @@ namespace sc::ecs {
     entt::registry m_reg;
   };
 
-  template <typename It>
+  template<typename It>
     requires IsEntity<typename std::iterator_traits<It>::value_type>
   void Registry::create(It begin, It end) {
 
@@ -363,7 +386,8 @@ namespace sc::ecs {
     Entities::record(std::distance(begin, end));
   }
 
-  template <typename It> void Registry::release(It first, It last) {
+  template<typename It>
+  void Registry::release(It first, It last) {
     std::scoped_lock lock{m_entityMutex};
     auto &entities = m_reg.storage<entt::entity>();
     for (; first != last; ++first) {
@@ -371,10 +395,11 @@ namespace sc::ecs {
     }
   }
 
-  template <typename It> void Registry::release(uint64_t id, It first, It last) {
+  template<typename It>
+  void Registry::release(uint64_t id, It first, It last) {
     // Held all the way, so that the registry is not destroyed in the meantime.
     std::scoped_lock lock{liveMutex};
-    for (Registry *registry : live) {
+    for (Registry *registry: live) {
       if (registry->m_id == id) {
         registry->release(first, last);
         return;
@@ -382,7 +407,8 @@ namespace sc::ecs {
     }
   }
 
-  template <typename It> void Registry::destroy(It first, It last) {
+  template<typename It>
+  void Registry::destroy(It first, It last) {
     // Held all the way: a create that refills its buffer in between would
     // reorder the entities the iterators below point to.
     std::scoped_lock lock{m_entityMutex};
@@ -417,13 +443,14 @@ namespace sc::ecs {
 
     // Not through m_reg.destroy: that walks the pool table, which is only
     // touched under the context lock.
-    for (internal::ComponentAccessBase *access : m_allAccesses) {
+    for (internal::ComponentAccessBase *access: m_allAccesses) {
       access->storageBase->remove(from, to);
     }
     entities.erase(from, to);
   }
 
-  template <typename... Components> decltype(auto) Registry::get(entt::entity e) {
+  template<typename... Components>
+  decltype(auto) Registry::get(entt::entity e) {
     if constexpr (sizeof...(Components) == 1) {
       return (storage<Components>().get(e), ...);
     } else {
@@ -431,7 +458,7 @@ namespace sc::ecs {
     }
   }
 
-  template <typename... Owned, typename... Get, typename... Exclude>
+  template<typename... Owned, typename... Get, typename... Exclude>
   auto Registry::group(entt::get_t<Get...> get, entt::exclude_t<Exclude...> exclude) {
     using GroupType = decltype(m_reg.group<Owned...>(get, exclude));
 
@@ -441,7 +468,7 @@ namespace sc::ecs {
     return createGroup<Owned...>(get, exclude)->group;
   }
 
-  template <typename... Owned, typename... Get, typename... Exclude>
+  template<typename... Owned, typename... Get, typename... Exclude>
   auto *Registry::createGroup(entt::get_t<Get...> get, entt::exclude_t<Exclude...> exclude) {
     using GroupType = decltype(m_reg.group<Owned...>(get, exclude));
     constexpr size_t COUNT = sizeof...(Owned) + sizeof...(Get) + sizeof...(Exclude);
@@ -466,15 +493,15 @@ namespace sc::ecs {
     // they all become one family. That takes along the components of earlier
     // groups that overlap with this one.
     size_t family = members[0]->family;
-    for (const internal::ComponentAccessBase *member : members) {
+    for (const internal::ComponentAccessBase *member: members) {
       family = std::min(family, member->family);
     }
-    for (const internal::ComponentAccessBase *member : members) {
+    for (const internal::ComponentAccessBase *member: members) {
       const size_t merged = member->family;
       if (merged == family) {
         continue;
       }
-      for (internal::ComponentAccessBase *component : m_allAccesses) {
+      for (internal::ComponentAccessBase *component: m_allAccesses) {
         if (component->family == merged) {
           component->family = family;
         }
@@ -486,7 +513,7 @@ namespace sc::ecs {
     return access;
   }
 
-  template <typename Component>
+  template<typename Component>
   auto Registry::getComponentAccess() -> ComponentAccess<std::remove_const_t<Component>> * {
     using Type = std::remove_const_t<Component>;
 
@@ -497,7 +524,8 @@ namespace sc::ecs {
     return findOrCreateComponentAccess<Type>();
   }
 
-  template <typename Component> auto Registry::findOrCreateComponentAccess() -> ComponentAccess<Component> * {
+  template<typename Component>
+  auto Registry::findOrCreateComponentAccess() -> ComponentAccess<Component> * {
     static_assert(std::is_move_constructible_v<Component>, "Component must be moveable");
     static_assert(std::is_nothrow_move_constructible_v<Component>, "Move must be no-throw for EnTT performance");
     static_assert(std::is_trivially_destructible_v<Component>);
@@ -533,7 +561,7 @@ namespace sc::ecs {
     return ptr;
   }
 
-  template <typename Component>
+  template<typename Component>
   void Registry::cleanupResources(StorageFor<Component> &storage, entt::registry &, entt::entity e) {
     auto &comp = storage.get(e);
     pfr::for_each_field(comp, [](auto &field) {
@@ -544,9 +572,13 @@ namespace sc::ecs {
     });
   }
 
-  template <typename T, typename... Args> decltype(auto) Entity::add(Args &&...args) {
+  template<typename T, typename... Args>
+  decltype(auto) Entity::add(Args &&...args) {
     return registry->emplace<T>(entity, std::forward<Args>(args)...);
   }
 
-  template <typename T> decltype(auto) sc::ecs::Entity::get() const { return registry->get<T>(entity); }
+  template<typename T>
+  decltype(auto) sc::ecs::Entity::get() const {
+    return registry->get<T>(entity);
+  }
 } // namespace sc::ecs

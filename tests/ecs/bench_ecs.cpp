@@ -81,7 +81,8 @@ namespace {
   }
 
   // One of several components that entities have in varying combinations.
-  template <size_t Index> struct Extra {
+  template<size_t Index>
+  struct Extra {
     float value{0.0f};
   };
   constexpr size_t EXTRA_COUNT = 12;
@@ -93,7 +94,8 @@ namespace {
   }
 
   // Calls the function with every Extra component of the combination.
-  template <typename Function> void for_each_extra(uint32_t combination, Function &&function) {
+  template<typename Function>
+  void for_each_extra(uint32_t combination, Function &&function) {
     [&]<size_t... Index>(std::index_sequence<Index...>) {
       ((((combination >> Index) & 1u) != 0 ? function(Extra<Index>{}) : void()), ...);
     }(std::make_index_sequence<EXTRA_COUNT>{});
@@ -101,7 +103,7 @@ namespace {
 
   // Position and Velocity for every entity, plus its combination of Extra
   // components. Works for sc::ecs::Registry and entt::registry.
-  template <typename Registry, typename Entities>
+  template<typename Registry, typename Entities>
   void fill_fragmented(Registry &registry, const Entities &entities, unsigned bits) {
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
       registry.template emplace<Position>(entities[i], static_cast<float>(i), 1.0f);
@@ -122,7 +124,8 @@ namespace {
   }
 
   // One fresh world per run of a sample, built outside the timing.
-  template <typename World> std::vector<std::unique_ptr<World>> make_worlds(int count) {
+  template<typename World>
+  std::vector<std::unique_ptr<World>> make_worlds(int count) {
     std::vector<std::unique_ptr<World>> worlds;
     worlds.reserve(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
@@ -204,10 +207,10 @@ TEST_CASE("ECS Benchmarks: Components", "[ecs][!benchmark]") {
     ScWorld sc;
     sc.registry.reserve<Position>(ENTITY_COUNT);
     BENCHMARK("sc: emplace + erase") {
-      for (const auto &e : sc.entities) {
+      for (const auto &e: sc.entities) {
         sc.registry.emplace<Position>(e, 1.0f, 2.0f);
       }
-      for (const auto &e : sc.entities) {
+      for (const auto &e: sc.entities) {
         sc.registry.erase<Position>(e);
       }
     };
@@ -215,14 +218,14 @@ TEST_CASE("ECS Benchmarks: Components", "[ecs][!benchmark]") {
     sc.fill();
     BENCHMARK("sc: get 1 component") {
       float sum = 0.0f;
-      for (const size_t i : order) {
+      for (const size_t i: order) {
         sum += sc.registry.get<const Position>(sc.entities[i]).x;
       }
       return sum;
     };
     BENCHMARK("sc: get 2 components") {
       float sum = 0.0f;
-      for (const size_t i : order) {
+      for (const size_t i: order) {
         auto [pos, vel] = sc.registry.get<const Position, const Velocity>(sc.entities[i]);
         sum += pos.x + vel.dx;
       }
@@ -234,10 +237,10 @@ TEST_CASE("ECS Benchmarks: Components", "[ecs][!benchmark]") {
     EnttWorld entt;
     entt.registry.storage<Position>().reserve(ENTITY_COUNT);
     BENCHMARK("entt: emplace + erase") {
-      for (const auto e : entt.entities) {
+      for (const auto e: entt.entities) {
         entt.registry.emplace<Position>(e, 1.0f, 2.0f);
       }
-      for (const auto e : entt.entities) {
+      for (const auto e: entt.entities) {
         entt.registry.erase<Position>(e);
       }
     };
@@ -245,14 +248,14 @@ TEST_CASE("ECS Benchmarks: Components", "[ecs][!benchmark]") {
     entt.fill();
     BENCHMARK("entt: get 1 component") {
       float sum = 0.0f;
-      for (const size_t i : order) {
+      for (const size_t i: order) {
         sum += entt.registry.get<const Position>(entt.entities[i]).x;
       }
       return sum;
     };
     BENCHMARK("entt: get 2 components") {
       float sum = 0.0f;
-      for (const size_t i : order) {
+      for (const size_t i: order) {
         auto [pos, vel] = entt.registry.get<const Position, const Velocity>(entt.entities[i]);
         sum += pos.x + vel.dx;
       }
@@ -266,19 +269,19 @@ TEST_CASE("ECS Benchmarks: Iteration", "[ecs][!benchmark]") {
     ScWorld sc;
     sc.fill();
     BENCHMARK("sc: view, 2 components") {
-      for (auto [entity, pos, vel] : sc.registry.view<Position, const Velocity>().each()) {
+      for (auto [entity, pos, vel]: sc.registry.view<Position, const Velocity>().each()) {
         integrate(pos, vel);
       }
     };
     BENCHMARK("sc: view, 3 components") {
-      for (auto [entity, score, pos, health] : sc.registry.view<Score, const Position, const Health>().each()) {
+      for (auto [entity, score, pos, health]: sc.registry.view<Score, const Position, const Health>().each()) {
         rate(score, pos, health);
       }
     };
     // Last: the group reorders the storages the views above went through.
     auto group = sc.registry.group<Position, Velocity>();
     BENCHMARK("sc: group, 2 components") {
-      for (auto [entity, pos, vel] : group.each()) {
+      for (auto [entity, pos, vel]: group.each()) {
         integrate(pos, vel);
       }
     };
@@ -288,18 +291,18 @@ TEST_CASE("ECS Benchmarks: Iteration", "[ecs][!benchmark]") {
     EnttWorld entt;
     entt.fill();
     BENCHMARK("entt: view, 2 components") {
-      for (auto [entity, pos, vel] : entt.registry.view<Position, const Velocity>().each()) {
+      for (auto [entity, pos, vel]: entt.registry.view<Position, const Velocity>().each()) {
         integrate(pos, vel);
       }
     };
     BENCHMARK("entt: view, 3 components") {
-      for (auto [entity, score, pos, health] : entt.registry.view<Score, const Position, const Health>().each()) {
+      for (auto [entity, score, pos, health]: entt.registry.view<Score, const Position, const Health>().each()) {
         rate(score, pos, health);
       }
     };
     auto group = entt.registry.group<Position, Velocity>();
     BENCHMARK("entt: group, 2 components") {
-      for (auto [entity, pos, vel] : group.each()) {
+      for (auto [entity, pos, vel]: group.each()) {
         integrate(pos, vel);
       }
     };
@@ -413,7 +416,7 @@ TEST_CASE("ECS Benchmarks: Frame With Structural Changes", "[ecs][threading][!be
     sc::ecs::Registry registry;
     sc::ecs::Scheduler scheduler;
     scheduler.add([](sc::ecs::View<const Lifetime> view, sc::ecs::Commands<> commands) {
-      for (auto entity : view) {
+      for (auto entity: view) {
         commands.destroy(entity);
       }
     });
@@ -477,20 +480,20 @@ TEST_CASE("ECS Benchmarks: Frame With Structural Changes", "[ecs][threading][!be
 // Every entity has Position and Velocity, and on top of that one of many
 // combinations of other components. The loop only uses the two.
 TEST_CASE("ECS Benchmarks: Fragmentation", "[ecs][!benchmark]") {
-  for (const unsigned bits : {5u, 8u, 12u}) {
+  for (const unsigned bits: {5u, 8u, 12u}) {
     const std::string suffix = ", " + std::to_string(1u << bits) + " combinations";
 
     {
       ScWorld sc;
       fill_fragmented(sc.registry, sc.entities, bits);
       BENCHMARK("sc: view" + suffix) {
-        for (auto [entity, pos, vel] : sc.registry.view<Position, const Velocity>().each()) {
+        for (auto [entity, pos, vel]: sc.registry.view<Position, const Velocity>().each()) {
           integrate(pos, vel);
         }
       };
       auto group = sc.registry.group<Position, Velocity>();
       BENCHMARK("sc: group" + suffix) {
-        for (auto [entity, pos, vel] : group.each()) {
+        for (auto [entity, pos, vel]: group.each()) {
           integrate(pos, vel);
         }
       };
@@ -500,13 +503,13 @@ TEST_CASE("ECS Benchmarks: Fragmentation", "[ecs][!benchmark]") {
       EnttWorld entt;
       fill_fragmented(entt.registry, entt.entities, bits);
       BENCHMARK("entt: view" + suffix) {
-        for (auto [entity, pos, vel] : entt.registry.view<Position, const Velocity>().each()) {
+        for (auto [entity, pos, vel]: entt.registry.view<Position, const Velocity>().each()) {
           integrate(pos, vel);
         }
       };
       auto group = entt.registry.group<Position, Velocity>();
       BENCHMARK("entt: group" + suffix) {
-        for (auto [entity, pos, vel] : group.each()) {
+        for (auto [entity, pos, vel]: group.each()) {
           integrate(pos, vel);
         }
       };
@@ -523,13 +526,13 @@ TEST_CASE("ECS Benchmarks: Fragmentation", "[ecs][!benchmark]") {
       entt.registry.emplace<Velocity>(entt.entities[order[i]], 1.0f, 2.0f);
     }
     BENCHMARK("entt: view, storages in different order") {
-      for (auto [entity, pos, vel] : entt.registry.view<Position, const Velocity>().each()) {
+      for (auto [entity, pos, vel]: entt.registry.view<Position, const Velocity>().each()) {
         integrate(pos, vel);
       }
     };
     auto group = entt.registry.group<Position, Velocity>();
     BENCHMARK("entt: group, storages in different order") {
-      for (auto [entity, pos, vel] : group.each()) {
+      for (auto [entity, pos, vel]: group.each()) {
         integrate(pos, vel);
       }
     };

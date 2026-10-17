@@ -14,15 +14,17 @@
 #include <type_traits>
 #include <utility>
 
+#include "sc/threading/threading.hpp"
+
 #include "column.hpp"
 #include "entity.hpp"
-#include "sc/threading/threading.hpp"
 
 namespace sc::ecs2 {
 
   // Names components the entities of a loop must not have:
   // world.each<Position, Exclude<Frozen>>(...).
-  template <typename... Components> struct Exclude {};
+  template<typename... Components>
+  struct Exclude {};
 
 } // namespace sc::ecs2
 
@@ -42,7 +44,8 @@ namespace sc::ecs2::internal {
   // what the scheduler tells the components of two systems apart by. Throws
   // std::length_error for a type beyond MAX_COMPONENT_TYPES, the first time
   // it is used and every time after.
-  template <typename Component> size_t componentIndex() {
+  template<typename Component>
+  size_t componentIndex() {
     static const size_t index = [] {
       const size_t next = nextComponentIndex.fetch_add(1, std::memory_order_relaxed);
       if (next >= MAX_COMPONENT_TYPES) [[unlikely]] {
@@ -53,28 +56,32 @@ namespace sc::ecs2::internal {
     return index;
   }
 
-  template <typename... Types> struct List {};
+  template<typename... Types>
+  struct List {};
 
   // Sorts the parameters of a loop into the components to get and the
   // excluded ones.
-  template <typename Get, typename Excluded, typename... Terms> struct Split;
+  template<typename Get, typename Excluded, typename... Terms>
+  struct Split;
 
-  template <typename... Get, typename... Excluded> struct Split<List<Get...>, List<Excluded...>> {
+  template<typename... Get, typename... Excluded>
+  struct Split<List<Get...>, List<Excluded...>> {
     using GetList = List<Get...>;
     using ExcludedList = List<Excluded...>;
   };
 
-  template <typename... Get, typename... Excluded, typename Term, typename... Rest>
+  template<typename... Get, typename... Excluded, typename Term, typename... Rest>
   struct Split<List<Get...>, List<Excluded...>, Term, Rest...> : Split<List<Get..., Term>, List<Excluded...>, Rest...> {
   };
 
-  template <typename... Get, typename... Excluded, typename... More, typename... Rest>
+  template<typename... Get, typename... Excluded, typename... More, typename... Rest>
   struct Split<List<Get...>, List<Excluded...>, Exclude<More...>, Rest...>
       : Split<List<Get...>, List<Excluded..., More...>, Rest...> {};
 
   // The component at a slot of a page's values, nothing for a component
   // without members.
-  template <typename Values> auto componentOn(Values values, uint32_t slot) {
+  template<typename Values>
+  auto componentOn(Values values, uint32_t slot) {
     if constexpr (std::is_null_pointer_v<Values>) {
       return std::tuple<>{};
     } else {
@@ -83,8 +90,9 @@ namespace sc::ecs2::internal {
   }
 
   // Whether a function takes the entity before the components of a tuple.
-  template <typename Function, typename Components> inline constexpr bool takesEntity = false;
-  template <typename Function, typename... Components>
+  template<typename Function, typename Components>
+  inline constexpr bool takesEntity = false;
+  template<typename Function, typename... Components>
   inline constexpr bool takesEntity<Function, std::tuple<Components...>> =
       std::is_invocable_v<Function &, Entity, Components...>;
 
@@ -113,7 +121,8 @@ namespace sc::ecs2 {
   // had.
   class World {
   public:
-    template <typename Component> using ColumnOf = internal::Column<std::remove_const_t<Component>>;
+    template<typename Component>
+    using ColumnOf = internal::Column<std::remove_const_t<Component>>;
 
     // The pages are those of every column of the world, see Pages.
     explicit World(Pages pages = Pages::Auto) : m_pages(pages), m_table(memory::reserve(TABLE_BYTES)) {
@@ -154,7 +163,8 @@ namespace sc::ecs2 {
     // The same as create and emplace for each of them, only faster: the
     // columns are told how many components are coming and take them a page at
     // a time. As safe from several threads as those two are.
-    template <typename... Components> void create(std::span<Entity> entities, const Components &...components) {
+    template<typename... Components>
+    void create(std::span<Entity> entities, const Components &...components) {
       (column<Components>().expect(entities.size()), ...);
       m_entities.create(entities, [&]([[maybe_unused]] uint32_t first, [[maybe_unused]] uint32_t count) {
         (column<Components>().fill(first, count, components), ...);
@@ -197,7 +207,8 @@ namespace sc::ecs2 {
     // The entity must exist and not have the component yet. An entity that
     // was destroyed has its index no longer: the component would be that of
     // whichever entity gets the index next.
-    template <typename Component, typename... Args> decltype(auto) emplace(Entity entity, Args &&...args) {
+    template<typename Component, typename... Args>
+    decltype(auto) emplace(Entity entity, Args &&...args) {
       assert(valid(entity));
       return column<Component>().emplace(indexOf(entity), std::forward<Args>(args)...);
     }
@@ -206,33 +217,38 @@ namespace sc::ecs2 {
     // did. Several threads may do this for the same entity at the same time,
     // also next to threads that erase it: the component is made once, by the
     // first of them, and the entity has it only when it is made in full.
-    template <typename Component, typename... Args> bool tryEmplace(Entity entity, Args &&...args) {
+    template<typename Component, typename... Args>
+    bool tryEmplace(Entity entity, Args &&...args) {
       assert(valid(entity));
       return column<Component>().tryEmplace(indexOf(entity), std::forward<Args>(args)...);
     }
 
     // The entity must exist. False if it did not have the component, or if
     // another thread removed it at the same time.
-    template <typename Component> bool erase(Entity entity) {
+    template<typename Component>
+    bool erase(Entity entity) {
       assert(valid(entity));
       return column<Component>().erase(indexOf(entity));
     }
 
     // Any entity may be asked for: one that does not exist (any more) has no
     // components, whatever the entity has that got its index.
-    template <typename Component> [[nodiscard]] bool contains(Entity entity) const {
+    template<typename Component>
+    [[nodiscard]] bool contains(Entity entity) const {
       const ColumnOf<Component> *const found = findColumn<Component>();
       // In this order: mostly the answer is no, without a look at the entity.
       return found != nullptr && found->contains(indexOf(entity)) && valid(entity);
     }
 
     // The entity must exist and have the component.
-    template <typename Component> [[nodiscard]] Component &get(Entity entity) {
+    template<typename Component>
+    [[nodiscard]] Component &get(Entity entity) {
       assert(valid(entity));
       return column<Component>().get(indexOf(entity));
     }
 
-    template <typename Component> [[nodiscard]] const std::remove_const_t<Component> &get(Entity entity) const {
+    template<typename Component>
+    [[nodiscard]] const std::remove_const_t<Component> &get(Entity entity) const {
       assert(valid(entity));
       const ColumnOf<Component> *const found = findColumn<Component>();
       assert(found != nullptr);
@@ -240,7 +256,8 @@ namespace sc::ecs2 {
     }
 
     // The column of a component, which is made on first use.
-    template <typename Component> [[nodiscard]] ColumnOf<Component> &column() {
+    template<typename Component>
+    [[nodiscard]] ColumnOf<Component> &column() {
       using Type = std::remove_const_t<Component>;
       const size_t index = internal::componentIndex<Type>();
       std::atomic<internal::ColumnBase *> &slot = index < internal::NEAR_COMPONENT_TYPES
@@ -254,7 +271,8 @@ namespace sc::ecs2 {
 
     // The column of a component, null as long as nothing made it: no entity
     // of the world ever had the component then.
-    template <typename Component> [[nodiscard]] const ColumnOf<Component> *findColumn() const {
+    template<typename Component>
+    [[nodiscard]] const ColumnOf<Component> *findColumn() const {
       const size_t index = internal::componentIndex<std::remove_const_t<Component>>();
       const std::atomic<internal::ColumnBase *> &slot = index < internal::NEAR_COMPONENT_TYPES
                                                             ? m_columns[index]
@@ -276,7 +294,8 @@ namespace sc::ecs2 {
     // creates may have the index of one that was destroyed, in a page the loop
     // is yet to go through: with a component the loop names it would be found
     // there.
-    template <typename... Terms, typename Function> void each(Function &&function) {
+    template<typename... Terms, typename Function>
+    void each(Function &&function) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
       const PageRange pages = pageRange();
       eachInRange(typename Lists::GetList{}, typename Lists::ExcludedList{}, columnsOf(typename Lists::GetList{}),
@@ -284,7 +303,8 @@ namespace sc::ecs2 {
     }
 
     // The same for a world that is only read: every component is a const one.
-    template <typename... Terms, typename Function> void each(Function &&function) const {
+    template<typename... Terms, typename Function>
+    void each(Function &&function) const {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
       assertOnlyRead(typename Lists::GetList{});
       const auto columns = findColumns(typename Lists::GetList{});
@@ -304,14 +324,16 @@ namespace sc::ecs2 {
     // gives a component with tryEmplace. Taking one away with erase is safe
     // as far as the world goes, but not for a thread that is using the
     // component just then: see Commands::erase of the scheduler.
-    template <typename... Terms, typename Function> void parallelEach(Function &&function, size_t grain = 1) {
+    template<typename... Terms, typename Function>
+    void parallelEach(Function &&function, size_t grain = 1) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
       parallelEachOf(typename Lists::GetList{}, typename Lists::ExcludedList{}, columnsOf(typename Lists::GetList{}),
                      findColumns(typename Lists::ExcludedList{}), function, grain);
     }
 
     // The same for a world that is only read: every component is a const one.
-    template <typename... Terms, typename Function> void parallelEach(Function &&function, size_t grain = 1) const {
+    template<typename... Terms, typename Function>
+    void parallelEach(Function &&function, size_t grain = 1) const {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
       assertOnlyRead(typename Lists::GetList{});
       const auto columns = findColumns(typename Lists::GetList{});
@@ -351,30 +373,33 @@ namespace sc::ecs2 {
 
     // The columns of the components a loop names, as it uses them: a loop
     // only looks into a column, what it writes are the components.
-    template <typename... Components> using Columns = std::tuple<const ColumnOf<Components> *...>;
+    template<typename... Components>
+    using Columns = std::tuple<const ColumnOf<Components> *...>;
 
-    template <typename... Components> [[nodiscard]] Columns<Components...> columnsOf(internal::List<Components...>) {
+    template<typename... Components>
+    [[nodiscard]] Columns<Components...> columnsOf(internal::List<Components...>) {
       return Columns<Components...>{&column<Components>()...};
     }
 
     // Null for the ones nothing made yet.
-    template <typename... Components>
+    template<typename... Components>
     [[nodiscard]] Columns<Components...> findColumns(internal::List<Components...>) const {
       return Columns<Components...>{findColumn<Components>()...};
     }
 
-    template <typename... Each> [[nodiscard]] static bool allFound(const std::tuple<Each...> &columns) {
+    template<typename... Each>
+    [[nodiscard]] static bool allFound(const std::tuple<Each...> &columns) {
       return std::apply([](const auto *...each) { return ((each != nullptr) && ...); }, columns);
     }
 
-    template <typename... Get> static void assertOnlyRead(internal::List<Get...>) {
+    template<typename... Get>
+    static void assertOnlyRead(internal::List<Get...>) {
       static_assert((std::is_const_v<Get> && ...), "a const world is only read: its loops name const components");
     }
 
-    template <typename... Get, typename... Excluded, typename Function>
-    void parallelEachOf(internal::List<Get...> get, internal::List<Excluded...> without,
-                        const Columns<Get...> &columns, const Columns<Excluded...> &excluded, Function &function,
-                        size_t grain) const {
+    template<typename... Get, typename... Excluded, typename Function>
+    void parallelEachOf(internal::List<Get...> get, internal::List<Excluded...> without, const Columns<Get...> &columns,
+                        const Columns<Excluded...> &excluded, Function &function, size_t grain) const {
       const PageRange pages = pageRange();
       // A thread for every so many entities: a page with few entities in it
       // is not worth waking one up.
@@ -387,7 +412,7 @@ namespace sc::ecs2 {
     }
 
     // eachInPages for a part of the row of pages.
-    template <typename... Get, typename... Excluded, typename Function>
+    template<typename... Get, typename... Excluded, typename Function>
     void eachInRange(internal::List<Get...> get, internal::List<Excluded...> without, const Columns<Get...> &columns,
                      const Columns<Excluded...> &excluded, PageRange pages, uint32_t first, uint32_t last,
                      Function &function) const {
@@ -402,7 +427,7 @@ namespace sc::ecs2 {
 
     // How many entities of the pages have all of the components, at most.
     // Stops counting at the limit.
-    template <typename... Each>
+    template<typename... Each>
     static size_t countUpTo(const std::tuple<Each...> &columns, PageRange pages, size_t limit) {
       size_t count = 0;
       for (uint32_t place = 0; place < pages.count() && count < limit; ++place) {
@@ -419,7 +444,7 @@ namespace sc::ecs2 {
     // Out of line: column is called wherever a component is looked up, and
     // with this inlined into a loop of get the loop took 16 % longer (clang,
     // the get benchmark of tests/ecs_compare).
-    template <typename Type>
+    template<typename Type>
     [[gnu::noinline]] internal::Column<Type> &makeColumn(std::atomic<internal::ColumnBase *> &slot) {
       std::scoped_lock lock{m_columnMutex};
       if (internal::ColumnBase *found = slot.load(std::memory_order_relaxed)) {
@@ -435,7 +460,8 @@ namespace sc::ecs2 {
 
     // The values of a page as the function gets them: const for a component
     // that is only read, null for one without members.
-    template <typename Component> static auto valuesOf(const typename ColumnOf<Component>::Page &page) noexcept {
+    template<typename Component>
+    static auto valuesOf(const typename ColumnOf<Component>::Page &page) noexcept {
       if constexpr (!ColumnOf<Component>::HAS_VALUE) {
         return nullptr;
       } else {
@@ -444,7 +470,7 @@ namespace sc::ecs2 {
     }
 
     // An excluded component the world never had is one no entity has.
-    template <typename... Get, typename... Excluded, typename Function>
+    template<typename... Get, typename... Excluded, typename Function>
     void eachInPages(internal::List<Get...>, internal::List<Excluded...>, const Columns<Get...> &columns,
                      const Columns<Excluded...> &excluded, uint32_t firstPage, uint32_t lastPage,
                      Function &function) const {
@@ -485,8 +511,8 @@ namespace sc::ecs2 {
 
           for (uint32_t word = 0; word < internal::PAGE_WORDS; ++word) {
             uint64_t mask = (std::get<G>(pages).mask[word].load(std::memory_order_relaxed) & ...);
-            ((mask &= std::get<X>(without) ? ~std::get<X>(without).mask[word].load(std::memory_order_relaxed)
-                                           : ~uint64_t{0}),
+            ((mask &=
+              std::get<X>(without) ? ~std::get<X>(without).mask[word].load(std::memory_order_relaxed) : ~uint64_t{0}),
              ...);
             const uint32_t first = word * 64;
             if (mask == ~uint64_t{0}) {

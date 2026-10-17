@@ -20,10 +20,11 @@
 #include <entt/entity/entity.hpp>
 #include <entt/entity/fwd.hpp>
 
+#include "sc/threading/threading.hpp"
+
 #include "commands.hpp"
 #include "group.hpp"
 #include "registry.hpp"
-#include "sc/threading/threading.hpp"
 #include "view.hpp"
 
 namespace sc::ecs::internal {
@@ -35,7 +36,8 @@ namespace sc::ecs::internal {
 
   // How many components are left on the page of a storage from the given
   // position on.
-  template <typename Storage> size_t leftOnPage(size_t position) {
+  template<typename Storage>
+  size_t leftOnPage(size_t position) {
     // EnTT keeps no instances of a component without members.
     if constexpr (std::is_void_v<typename Storage::value_type>) {
       return std::numeric_limits<size_t>::max();
@@ -48,7 +50,8 @@ namespace sc::ecs::internal {
 
   // The component a storage has at the given position, followed by the rest of
   // its page. Null for a component without members.
-  template <typename Storage> auto pageAt(Storage &storage, size_t position) {
+  template<typename Storage>
+  auto pageAt(Storage &storage, size_t position) {
     if constexpr (std::is_void_v<typename Storage::value_type>) {
       return nullptr;
     } else {
@@ -59,7 +62,8 @@ namespace sc::ecs::internal {
   }
 
   // The component at an index of what pageAt returned.
-  template <typename Page> auto componentOn(Page page, size_t index) {
+  template<typename Page>
+  auto componentOn(Page page, size_t index) {
     if constexpr (std::is_null_pointer_v<Page>) {
       return std::tuple<>{};
     } else {
@@ -69,7 +73,7 @@ namespace sc::ecs::internal {
 
   // Whether a storage has the given entities at the same positions as the
   // storage they are from.
-  template <typename Storage>
+  template<typename Storage>
   bool sameEntities(const Storage &storage, const entt::entity *entities, size_t position, size_t count) {
     const typename Storage::base_type &set = storage;
     // Not std::equal, which compares enumerations one by one.
@@ -78,14 +82,15 @@ namespace sc::ecs::internal {
   }
 
   // Whether a function takes the entity before the components of a tuple.
-  template <typename Function, typename Components> inline constexpr bool takesEntity = false;
-  template <typename Function, typename... Components>
+  template<typename Function, typename Components>
+  inline constexpr bool takesEntity = false;
+  template<typename Function, typename... Components>
   inline constexpr bool takesEntity<Function, std::tuple<Components...>> =
       std::is_invocable_v<Function &, entt::entity, Components...>;
 
   // Calls the function with the components of an entity and, if it takes one,
   // with the entity before them.
-  template <typename Function, typename Components>
+  template<typename Function, typename Components>
   void callWith(Function &function, [[maybe_unused]] entt::entity entity, Components &&components) {
     if constexpr (takesEntity<Function, std::remove_cvref_t<Components>>) {
       std::apply(function, std::tuple_cat(std::tuple{entity}, std::forward<Components>(components)));
@@ -96,7 +101,7 @@ namespace sc::ecs::internal {
 
   // The components of an entity in the storage with the given index. Those of
   // the leading storage are at hand and need no lookup.
-  template <size_t Leading, size_t Index, typename View, typename Components>
+  template<size_t Leading, size_t Index, typename View, typename Components>
   decltype(auto) componentsOf(const View &view, entt::entity entity, const Components &leading) {
     if constexpr (Leading == Index) {
       return leading;
@@ -107,7 +112,7 @@ namespace sc::ecs::internal {
 
   // eachInRange for a view whose smallest storage is the one with the index
   // Leading.
-  template <size_t Leading, typename... Get, typename... Exclude, typename Function, size_t... Index>
+  template<size_t Leading, typename... Get, typename... Exclude, typename Function, size_t... Index>
   void eachOf(const entt::basic_view<entt::get_t<Get...>, entt::exclude_t<Exclude...>> &view, size_t first, size_t last,
               Function &function, std::index_sequence<Index...>) {
     const std::tuple storages{view.template storage<Index>()...};
@@ -165,7 +170,7 @@ namespace sc::ecs::internal {
   // before last, and with the entity before them if the function takes one. Like the each of the view that takes a
   // function, this walks that storage directly and only looks up the other components, and not even those where the
   // storages have the same entities at the same positions.
-  template <typename... Get, typename... Exclude, typename Function>
+  template<typename... Get, typename... Exclude, typename Function>
   void eachInRange(const entt::basic_view<entt::get_t<Get...>, entt::exclude_t<Exclude...>> &view, size_t first,
                    size_t last, Function &function) {
     [&]<size_t... Index>(std::index_sequence<Index...> all) {
@@ -177,7 +182,7 @@ namespace sc::ecs::internal {
   // The same for a group, whose entities are at the given positions of its
   // list. The owned components are at the same positions of their storages
   // and need no lookup, the other ones are looked up.
-  template <typename... Owned, typename... Get, typename... Exclude, typename Function>
+  template<typename... Owned, typename... Get, typename... Exclude, typename Function>
   void
   eachInRange(const entt::basic_group<entt::owned_t<Owned...>, entt::get_t<Get...>, entt::exclude_t<Exclude...>> &group,
               size_t first, size_t last, Function &function) {
@@ -203,13 +208,13 @@ namespace sc::ecs::internal {
 
   // How many positions eachInRange has to go through for all entities of a
   // view or group.
-  template <typename... Get, typename... Exclude>
+  template<typename... Get, typename... Exclude>
   size_t extent(const entt::basic_view<entt::get_t<Get...>, entt::exclude_t<Exclude...>> &view) {
     // Null for a view of a component the registry has no storage for.
     return view.handle() != nullptr ? view.handle()->size() : 0;
   }
 
-  template <typename... Owned, typename... Get, typename... Exclude>
+  template<typename... Owned, typename... Get, typename... Exclude>
   size_t
   extent(const entt::basic_group<entt::owned_t<Owned...>, entt::get_t<Get...>, entt::exclude_t<Exclude...>> &group) {
     return group.size();
@@ -230,7 +235,7 @@ namespace sc::ecs {
   // The function is called from several threads at once, each of them with
   // other entities, grain of them in a row. It gets the entity as well if it
   // takes an entt::entity before the components.
-  template <typename... Get, typename... Exclude, typename Function>
+  template<typename... Get, typename... Exclude, typename Function>
   void parallelEach(entt::basic_view<entt::get_t<Get...>, entt::exclude_t<Exclude...>> view, Function &&function,
                     size_t grain = 512) {
     threading::parallelFor(internal::extent(view), grain,
@@ -238,7 +243,7 @@ namespace sc::ecs {
   }
 
   // The same for the entities of a group.
-  template <typename... Owned, typename... Get, typename... Exclude, typename Function>
+  template<typename... Owned, typename... Get, typename... Exclude, typename Function>
   void parallelEach(entt::basic_group<entt::owned_t<Owned...>, entt::get_t<Get...>, entt::exclude_t<Exclude...>> group,
                     Function &&function, size_t grain = 512) {
     threading::parallelFor(internal::extent(group), grain,
@@ -250,12 +255,12 @@ namespace sc::ecs {
   // which is several times faster for a function that does little.
   //
   // The function must not add or remove components of the view or group.
-  template <typename... Get, typename... Exclude, typename Function>
+  template<typename... Get, typename... Exclude, typename Function>
   void each(entt::basic_view<entt::get_t<Get...>, entt::exclude_t<Exclude...>> view, Function &&function) {
     internal::eachInRange(view, 0, internal::extent(view), function);
   }
 
-  template <typename... Owned, typename... Get, typename... Exclude, typename Function>
+  template<typename... Owned, typename... Get, typename... Exclude, typename Function>
   void each(entt::basic_group<entt::owned_t<Owned...>, entt::get_t<Get...>, entt::exclude_t<Exclude...>> group,
             Function &&function) {
     internal::eachInRange(group, 0, internal::extent(group), function);
@@ -284,7 +289,7 @@ namespace sc::ecs::internal {
 
     // Several parameters may name the same component; writing wins.
     void add(entt::id_type id, bool write) {
-      for (Component &component : components) {
+      for (Component &component: components) {
         if (component.id == id) {
           component.write = component.write || write;
           return;
@@ -305,9 +310,10 @@ namespace sc::ecs::internal {
   // How one kind of system parameter is declared to the scheduler and how its
   // value is made when the system runs. Specialized for every kind of parameter
   // a system may have.
-  template <typename Param> struct SystemParam;
+  template<typename Param>
+  struct SystemParam;
 
-  template <typename... Get, typename... Exclude>
+  template<typename... Get, typename... Exclude>
   struct SystemParam<entt::basic_view<entt::get_t<Get...>, entt::exclude_t<Exclude...>>> {
     using ViewType = entt::basic_view<entt::get_t<Get...>, entt::exclude_t<Exclude...>>;
 
@@ -323,7 +329,7 @@ namespace sc::ecs::internal {
     }
   };
 
-  template <typename... Owned, typename... Get, typename... Exclude>
+  template<typename... Owned, typename... Get, typename... Exclude>
   struct SystemParam<entt::basic_group<entt::owned_t<Owned...>, entt::get_t<Get...>, entt::exclude_t<Exclude...>>> {
     using GroupType = entt::basic_group<entt::owned_t<Owned...>, entt::get_t<Get...>, entt::exclude_t<Exclude...>>;
 
@@ -346,13 +352,15 @@ namespace sc::ecs::internal {
     }
   };
 
-  template <> struct SystemParam<Registry &> {
+  template<>
+  struct SystemParam<Registry &> {
     static void declare(SystemAccess &access) { access.exclusive = true; }
 
     static Registry &fetch(const SystemContext &context) { return context.registry; }
   };
 
-  template <typename... Components> struct SystemParam<Commands<Components...>> {
+  template<typename... Components>
+  struct SystemParam<Commands<Components...>> {
     using Buffer = CommandBuffer<Components...>;
 
     static void declare(SystemAccess &access) {
@@ -364,7 +372,8 @@ namespace sc::ecs::internal {
     }
   };
 
-  template <typename... Components> struct SystemParam<ParallelCommands<Components...>> {
+  template<typename... Components>
+  struct SystemParam<ParallelCommands<Components...>> {
     static void declare(SystemAccess &access) {
       SystemParam<Commands<Components...>>::declare(access);
       access.commandsPerThread = true;
@@ -375,18 +384,22 @@ namespace sc::ecs::internal {
     }
   };
 
-  template <typename Param> inline constexpr bool isCommands = false;
-  template <typename... Components> inline constexpr bool isCommands<Commands<Components...>> = true;
-  template <typename... Components> inline constexpr bool isCommands<ParallelCommands<Components...>> = true;
+  template<typename Param>
+  inline constexpr bool isCommands = false;
+  template<typename... Components>
+  inline constexpr bool isCommands<Commands<Components...>> = true;
+  template<typename... Components>
+  inline constexpr bool isCommands<ParallelCommands<Components...>> = true;
 
   // Views, groups and Commands are taken by value or by const reference, the
   // registry only by reference.
-  template <typename Param>
+  template<typename Param>
   using SystemParamFor =
       SystemParam<std::conditional_t<std::is_same_v<Param, Registry &>, Registry &, std::remove_cvref_t<Param>>>;
 
   // Does what a parameter needs done on a registry before any system runs.
-  template <typename Param> void prepareSystemParam([[maybe_unused]] Registry &registry) {
+  template<typename Param>
+  void prepareSystemParam([[maybe_unused]] Registry &registry) {
     if constexpr (requires { SystemParamFor<Param>::prepare(registry); }) {
       SystemParamFor<Param>::prepare(registry);
     }
@@ -394,40 +407,44 @@ namespace sc::ecs::internal {
 
   // The parameter types of a system: a function pointer or an object with a
   // single, non-template operator().
-  template <typename F> struct SystemSignature : SystemSignature<decltype(&F::operator())> {};
+  template<typename F>
+  struct SystemSignature : SystemSignature<decltype(&F::operator())> {};
 
-  template <typename R, typename... Args> struct SystemSignature<R (*)(Args...)> {
+  template<typename R, typename... Args>
+  struct SystemSignature<R (*)(Args...)> {
     using Params = entt::type_list<Args...>;
   };
-  template <typename R, typename... Args>
+  template<typename R, typename... Args>
   struct SystemSignature<R (*)(Args...) noexcept> : SystemSignature<R (*)(Args...)> {};
-  template <typename C, typename R, typename... Args>
+  template<typename C, typename R, typename... Args>
   struct SystemSignature<R (C::*)(Args...)> : SystemSignature<R (*)(Args...)> {};
-  template <typename C, typename R, typename... Args>
+  template<typename C, typename R, typename... Args>
   struct SystemSignature<R (C::*)(Args...) const> : SystemSignature<R (*)(Args...)> {};
-  template <typename C, typename R, typename... Args>
+  template<typename C, typename R, typename... Args>
   struct SystemSignature<R (C::*)(Args...) noexcept> : SystemSignature<R (*)(Args...)> {};
-  template <typename C, typename R, typename... Args>
+  template<typename C, typename R, typename... Args>
   struct SystemSignature<R (C::*)(Args...) const noexcept> : SystemSignature<R (*)(Args...)> {};
 
   // Not a generic lambda, whose parameters depend on what it is called with.
-  template <typename F>
+  template<typename F>
   concept HasSignature = std::is_pointer_v<F> || requires { &F::operator(); };
 
   // The parameters of a function for Scheduler::addParallel: the entity and
   // Commands, both optional, and then the components.
-  template <typename Params> struct EachSignature;
+  template<typename Params>
+  struct EachSignature;
 
-  template <typename... Components> struct EachSignature<entt::type_list<Components...>> {
+  template<typename... Components>
+  struct EachSignature<entt::type_list<Components...>> {
     // Void for a function that does not take Commands.
     using CommandsType = void;
     using ComponentList = entt::type_list<Components...>;
   };
 
-  template <typename... Rest>
+  template<typename... Rest>
   struct EachSignature<entt::type_list<entt::entity, Rest...>> : EachSignature<entt::type_list<Rest...>> {};
 
-  template <typename First, typename... Components>
+  template<typename First, typename... Components>
     requires isCommands<std::remove_cvref_t<First>>
   struct EachSignature<entt::type_list<First, Components...>> {
     using CommandsType = std::remove_cvref_t<First>;
@@ -435,16 +452,20 @@ namespace sc::ecs::internal {
   };
 
   // The Commands a function for Scheduler::addParallel takes, or void.
-  template <typename F> struct EachCommands {
+  template<typename F>
+  struct EachCommands {
     using type = void;
   };
-  template <HasSignature F> struct EachCommands<F> {
+  template<HasSignature F>
+  struct EachCommands<F> {
     using type = typename EachSignature<typename SystemSignature<F>::Params>::CommandsType;
   };
 
   // The ParallelCommands for the same components as the given Commands.
-  template <typename CommandsType> struct ParallelOf;
-  template <typename... Components> struct ParallelOf<Commands<Components...>> {
+  template<typename CommandsType>
+  struct ParallelOf;
+  template<typename... Components>
+  struct ParallelOf<Commands<Components...>> {
     using type = ParallelCommands<Components...>;
   };
 
@@ -472,7 +493,8 @@ namespace sc::ecs {
   // it from running next to other systems, or takes the registry.
   class Scheduler {
   public:
-    template <typename F> Scheduler &add(F &&system, std::string name = {}) {
+    template<typename F>
+    Scheduler &add(F &&system, std::string name = {}) {
       using Function = std::decay_t<F>;
       return addSystem(std::forward<F>(system), std::move(name),
                        typename internal::SystemSignature<Function>::Params{});
@@ -499,7 +521,8 @@ namespace sc::ecs {
     // Every thread records into a buffer of its own. The changes of a thread
     // are made in the order it recorded them, those of different threads in no
     // particular order.
-    template <typename F> Scheduler &addParallel(F &&function, std::string name = {}, size_t grain = 512) {
+    template<typename F>
+    Scheduler &addParallel(F &&function, std::string name = {}, size_t grain = 512) {
       using Function = std::decay_t<F>;
       using Signature = internal::EachSignature<typename internal::SystemSignature<Function>::Params>;
       return addEach(std::forward<F>(function), std::move(name), grain, typename Signature::ComponentList{});
@@ -516,7 +539,7 @@ namespace sc::ecs {
     //
     // The function takes the components in the order the view or group names
     // them, without the ones that have no members.
-    template <typename Source, typename F>
+    template<typename Source, typename F>
     Scheduler &addParallel(F &&function, std::string name = {}, size_t grain = 512) {
       using Function = std::decay_t<F>;
       using CommandsType = typename internal::EachCommands<Function>::type;
@@ -579,7 +602,7 @@ namespace sc::ecs {
       void (*prepare)(Registry &) = nullptr;
     };
 
-    template <typename F, typename... Params>
+    template<typename F, typename... Params>
     Scheduler &addSystem(F &&system, std::string name, entt::type_list<Params...>) {
       // The buffer of a system has the type of its one Commands parameter.
       static_assert((size_t{internal::isCommands<std::remove_cvref_t<Params>>} + ... + 0) <= 1,
@@ -611,7 +634,7 @@ namespace sc::ecs {
     }
 
     // addParallel for the view of the components the function is called with.
-    template <typename F, typename... Components>
+    template<typename F, typename... Components>
     Scheduler &addEach(F &&function, std::string name, size_t grain, entt::type_list<Components...>) {
       static_assert(sizeof...(Components) != 0, "the function takes the components of an entity");
       static_assert((!std::is_rvalue_reference_v<Components> && ...), "a component is taken by value or reference");

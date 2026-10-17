@@ -49,9 +49,10 @@ namespace {
 
   using Stages = std::vector<std::vector<size_t>>;
 
-  template <typename View> size_t count(View view) {
+  template<typename View>
+  size_t count(View view) {
     size_t result = 0;
-    for ([[maybe_unused]] auto entity : view) {
+    for ([[maybe_unused]] auto entity: view) {
       ++result;
     }
     return result;
@@ -65,7 +66,7 @@ TEST_CASE("Commands Are Made After The Stage", "[ecs][commands]") {
   Registry registry;
   std::vector<sc::ecs::Entity> entities(100);
   registry.create(entities.begin(), entities.end());
-  for (const auto &e : entities) {
+  for (const auto &e: entities) {
     registry.emplace<Position>(e);
   }
 
@@ -76,7 +77,7 @@ TEST_CASE("Commands Are Made After The Stage", "[ecs][commands]") {
     size_t seenNextToIt = 0;
     size_t seenAfter = 0;
     scheduler.add([&](View<const Position> positions, Commands<Velocity> commands) {
-      for (auto entity : positions) {
+      for (auto entity: positions) {
         commands.emplace<Velocity>(entity, 1.0f, 2.0f);
       }
       seenWhileRecording = positions.size();
@@ -96,7 +97,7 @@ TEST_CASE("Commands Are Made After The Stage", "[ecs][commands]") {
   SECTION("A System In A Later Stage Sees Them") {
     size_t seen = 0;
     scheduler.add([](View<const Position> positions, Commands<Health> commands) {
-      for (auto entity : positions) {
+      for (auto entity: positions) {
         commands.emplace<Health>(entity, 5);
       }
     });
@@ -171,7 +172,7 @@ TEST_CASE("Commands Are Made After The Stage", "[ecs][commands]") {
   SECTION("Destroying Entities") {
     scheduler.add([](View<const Position> positions, Commands<Health> commands) {
       size_t i = 0;
-      for (auto entity : positions) {
+      for (auto entity: positions) {
         if (i++ % 2 == 0) {
           commands.emplace<Health>(entity, 1);
           commands.destroy(entity);
@@ -186,7 +187,7 @@ TEST_CASE("Commands Are Made After The Stage", "[ecs][commands]") {
     });
     // And one of them once more by another system.
     scheduler.add([](View<const Position> positions, Commands<> commands) {
-      for (auto entity : positions) {
+      for (auto entity: positions) {
         commands.destroy(entity);
         break;
       }
@@ -244,7 +245,7 @@ TEST_CASE("Commands Are Made After The Stage", "[ecs][commands]") {
     });
 
     Registry other;
-    for (Registry *target : {&registry, &other, &registry}) {
+    for (Registry *target: {&registry, &other, &registry}) {
       current = target;
       scheduler.run(*target);
     }
@@ -256,7 +257,7 @@ TEST_CASE("Commands Are Made After The Stage", "[ecs][commands]") {
     constexpr size_t vertex_count = 16;
     scheduler.add([](View<const Position> positions, Commands<MeshComponent> commands) {
       uint32_t id = 0;
-      for (auto entity : positions) {
+      for (auto entity: positions) {
         std::array<float, vertex_count> vertices{};
         vertices.fill(static_cast<float>(id));
         commands.emplace<MeshComponent>(entity, std::span<const float>(vertices), id);
@@ -266,7 +267,7 @@ TEST_CASE("Commands Are Made After The Stage", "[ecs][commands]") {
     scheduler.run(registry);
 
     size_t meshes = 0;
-    for (auto [entity, mesh] : registry.view<MeshComponent>().each()) {
+    for (auto [entity, mesh]: registry.view<MeshComponent>().each()) {
       REQUIRE(mesh.vertices.size() == vertex_count);
       REQUIRE(mesh.vertices[0] == static_cast<float>(mesh.meshId));
       REQUIRE(mesh.vertices[vertex_count - 1] == static_cast<float>(mesh.meshId));
@@ -277,7 +278,7 @@ TEST_CASE("Commands Are Made After The Stage", "[ecs][commands]") {
     // Removing releases the buffers, adding again works on the same heap.
     Scheduler cleanup;
     cleanup.add([](View<const MeshComponent> meshes, Commands<MeshComponent> commands) {
-      for (auto entity : meshes) {
+      for (auto entity: meshes) {
         commands.remove<MeshComponent>(entity);
       }
     });
@@ -347,13 +348,13 @@ TEST_CASE("Commands From Systems Running At The Same Time", "[ecs][commands][thr
   }
 
   std::vector<uint32_t> perSystem(system_count, 0);
-  for (auto [entity, owner, pos] : registry.view<const Owner, const Position>().each()) {
+  for (auto [entity, owner, pos]: registry.view<const Owner, const Position>().each()) {
     REQUIRE(pos.x == static_cast<float>(owner.system));
     REQUIRE(pos.y == static_cast<float>(owner.index));
     REQUIRE(owner.index % 5 != 0);
     ++perSystem[owner.system];
   }
-  for (const uint32_t n : perSystem) {
+  for (const uint32_t n: perSystem) {
     REQUIRE(n == 3 * (per_system - per_system / 5));
   }
 }
@@ -369,7 +370,7 @@ TEST_CASE("Commands Give Spare Entities Back", "[ecs][commands]") {
   const auto reused = [](Registry &registry) {
     std::vector<sc::ecs::Entity> entities(SPARE);
     registry.create(entities.begin(), entities.end());
-    for (const sc::ecs::Entity &entity : entities) {
+    for (const sc::ecs::Entity &entity: entities) {
       if (entt::to_version(entity.entity) == 0) {
         return false;
       }
@@ -445,7 +446,7 @@ TEST_CASE("Commands Emplace", "[ecs][commands][emplace]") {
     scheduler.run(registry);
 
     REQUIRE(count(registry.view<Position, Velocity, Health, Frozen>()) == 1);
-    for (auto [entity, pos, vel, health] : registry.view<Position, Velocity, Health, Frozen>().each()) {
+    for (auto [entity, pos, vel, health]: registry.view<Position, Velocity, Health, Frozen>().each()) {
       REQUIRE(registry.valid(entity));
       REQUIRE(pos.x == 1.0f);
       REQUIRE(pos.y == 2.0f);
@@ -470,7 +471,7 @@ TEST_CASE("Commands Emplace", "[ecs][commands][emplace]") {
     std::vector<bool> seen(2 * count_per_run, false);
     auto owners = registry.view<const Owner>();
     REQUIRE(owners.size() == 2 * count_per_run);
-    for (auto [entity, owner] : owners.each()) {
+    for (auto [entity, owner]: owners.each()) {
       REQUIRE(registry.valid(entity));
       REQUIRE(owner.index < seen.size());
       REQUIRE(!seen[owner.index]);
@@ -487,7 +488,7 @@ TEST_CASE("Commands Emplace", "[ecs][commands][emplace]") {
 
     // Finds nothing left to do in the runs after the first one.
     scheduler.add([](View<const Position, sc::ecs::Exclude<Health>> view, Commands<Health> commands) {
-      for (auto [entity, pos] : view.each()) {
+      for (auto [entity, pos]: view.each()) {
         commands.emplace<Health>(entity, static_cast<int>(pos.x));
       }
     });

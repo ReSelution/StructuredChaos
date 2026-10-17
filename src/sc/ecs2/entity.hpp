@@ -161,7 +161,8 @@ namespace sc::ecs2::internal {
     // count): what destroy gave back one by one, the rest in rows as long as
     // the pages of the thread allow. For a thread outside the pool the
     // function is called under the lock of withShare.
-    template <typename Function> void create(std::span<Entity> entities, Function &&run) {
+    template<typename Function>
+    void create(std::span<Entity> entities, Function &&run) {
       size_t made = 0;
       for (uint32_t index = 0; made < entities.size() && m_free.take(index); ++made) {
         entities[made] = makeEntity(index, *generation(index));
@@ -250,7 +251,8 @@ namespace sc::ecs2::internal {
     // Calls the function with the Share of the calling thread. The threads
     // without one of their own, those outside the pool (threading::NO_THREAD_ID)
     // and pool threads beyond MAX_THREADS, use one together, one at a time.
-    template <typename Function> std::invoke_result_t<Function &, Share &> withShare(Function &&function) {
+    template<typename Function>
+    std::invoke_result_t<Function &, Share &> withShare(Function &&function) {
       const uint32_t thread = threading::threadId();
       if (thread < MAX_THREADS) [[likely]] {
         return function(m_shares[thread]);

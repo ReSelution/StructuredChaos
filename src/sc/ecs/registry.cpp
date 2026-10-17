@@ -59,7 +59,7 @@ namespace sc::ecs {
 
     // Not through m_reg.destroy: that walks the pool table, which is only
     // touched under the context lock.
-    for (internal::ComponentAccessBase *access : m_allAccesses) {
+    for (internal::ComponentAccessBase *access: m_allAccesses) {
       access->storageBase->remove(e);
     }
 

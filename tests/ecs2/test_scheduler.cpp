@@ -320,7 +320,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     // A page for every thread at most, next to the first ones: after that
     // the indices of the destroyed entities do.
     REQUIRE(world.pageLimit() <= 3 + sc::threading::threadSlots());
-    for (const Entity entity : entities) {
+    for (const Entity entity: entities) {
       REQUIRE(world.valid(entity));
     }
   }
@@ -536,7 +536,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     REQUIRE(scheduler.stages() == Stages{{0, 1}});
     scheduler.run(world);
     REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size()));
-    for (const Entity entity : entities) {
+    for (const Entity entity: entities) {
       REQUIRE(world.get<Named>(entity).name == name);
     }
 
@@ -547,7 +547,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     }
 
     // Nor are the ones of a stage that failed.
-    for (const Entity entity : entities) {
+    for (const Entity entity: entities) {
       world.erase<Named>(entity);
     }
     REQUIRE(alive.use_count() == 1);
@@ -618,7 +618,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     // The systems next to it finished, the later one did not start, and what
     // was recorded is dropped.
     REQUIRE(ran == 2);
-    for (const Entity entity : entities) {
+    for (const Entity entity: entities) {
       REQUIRE(world.valid(entity));
     }
   }

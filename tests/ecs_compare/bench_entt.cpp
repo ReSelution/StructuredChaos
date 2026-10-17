@@ -35,7 +35,7 @@ namespace {
 
     void fill() {
       fill_moving();
-      for (const auto entity : entities) {
+      for (const auto entity: entities) {
         registry.emplace<Health>(entity, 50.0f);
         registry.emplace<Timer>(entity, 0.0f);
         registry.emplace<Energy>(entity, 0.0f);
@@ -60,7 +60,7 @@ namespace {
   };
 
   // The entities in one call and each component in another.
-  template <typename First, typename Second>
+  template<typename First, typename Second>
   void create_all(entt::registry &registry, size_t count, const First &first, const Second &second) {
     std::vector<entt::entity> entities(count);
     registry.create(entities.begin(), entities.end());
@@ -124,12 +124,12 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
 
   BENCHMARK_ADVANCED(name::serial(name::DESTROY))(Catch::Benchmark::Chronometer meter) {
     auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
-    for (auto &world : worlds) {
+    for (auto &world: worlds) {
       world->fill_moving();
     }
     meter.measure([&](int run) {
       World &world = *worlds[static_cast<size_t>(run)];
-      for (const auto entity : world.entities) {
+      for (const auto entity: world.entities) {
         world.registry.destroy(entity);
       }
     });
@@ -139,10 +139,10 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     World world{ENTITY_COUNT};
     world.fill_moving();
     BENCHMARK(name::serial(name::ADD_REMOVE)) {
-      for (const auto entity : world.entities) {
+      for (const auto entity: world.entities) {
         world.registry.emplace<Health>(entity, 50.0f);
       }
-      for (const auto entity : world.entities) {
+      for (const auto entity: world.entities) {
         world.registry.erase<Health>(entity);
       }
     };
@@ -154,7 +154,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     world.fill();
     BENCHMARK(name::serial(name::GET)) {
       float sum = 0.0f;
-      for (const size_t i : order) {
+      for (const size_t i: order) {
         sum += world.registry.get<const Position>(world.entities[i]).x;
       }
       return sum;

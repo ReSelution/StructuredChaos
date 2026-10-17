@@ -16,9 +16,10 @@
 #include <entt/entity/component.hpp>
 #include <entt/entity/fwd.hpp>
 
+#include "sc/threading/threading.hpp"
+
 #include "entity.hpp"
 #include "registry.hpp"
-#include "sc/threading/threading.hpp"
 
 namespace sc::ecs::internal {
 
@@ -60,7 +61,8 @@ namespace sc::ecs::internal {
     std::vector<Split> splits;
   };
 
-  template <typename Component> struct CommandQueue final : CommandQueueBase {
+  template<typename Component>
+  struct CommandQueue final : CommandQueueBase {
     // EnTT keeps no instances of such a component, so there is nothing to
     // record besides the entity.
     static constexpr bool HAS_VALUE = entt::component_traits<Component, entt::entity>::page_size != 0u;
@@ -84,7 +86,7 @@ namespace sc::ecs::internal {
         }
         done = to;
       };
-      for (const Split split : splits) {
+      for (const Split split: splits) {
         advance(split);
       }
       advance({.removed = removed.size(), .added = added.size()});
@@ -116,7 +118,7 @@ namespace sc::ecs::internal {
     [[nodiscard]] virtual std::span<CommandQueueBase *const> queues() noexcept = 0;
 
     void clear() noexcept {
-      for (CommandQueueBase *queue : queues()) {
+      for (CommandQueueBase *queue: queues()) {
         queue->clear();
       }
       destroyed.clear();
@@ -150,8 +152,10 @@ namespace sc::ecs::internal {
     std::recursive_mutex mutex;
   };
 
-  template <typename... Components> struct CommandBuffer final : CommandBufferBase {
-    template <typename Component> CommandQueue<Component> &queue() noexcept {
+  template<typename... Components>
+  struct CommandBuffer final : CommandBufferBase {
+    template<typename Component>
+    CommandQueue<Component> &queue() noexcept {
       return std::get<CommandQueue<Component>>(m_queues);
     }
 
@@ -183,16 +187,18 @@ namespace sc::ecs {
   // The components of different types are written at the same time, except
   // for the components of a group, which are written one after the other.
   // Belongs to one system and must not be used from several threads.
-  template <typename... Components> class Commands {
-    template <typename Component> static constexpr bool named = (std::same_as<Component, Components> || ...);
+  template<typename... Components>
+  class Commands {
+    template<typename Component>
+    static constexpr bool named = (std::same_as<Component, Components> || ...);
 
   public:
     using Buffer = internal::CommandBuffer<Components...>;
 
     // A Commands with a lock holds it until it is destroyed, and so does every
     // copy of it.
-    Commands(Registry &registry, Buffer &buffer, std::recursive_mutex *lock = nullptr)
-        : m_registry(&registry), m_buffer(&buffer), m_lock(lock) {
+    Commands(Registry &registry, Buffer &buffer, std::recursive_mutex *lock = nullptr) :
+        m_registry(&registry), m_buffer(&buffer), m_lock(lock) {
       if (m_lock != nullptr) {
         m_lock->lock();
       }
@@ -241,7 +247,7 @@ namespace sc::ecs {
     }
 
     // The same for a range of entities, which goes to the registry once.
-    template <typename It>
+    template<typename It>
       requires IsEntity<typename std::iterator_traits<It>::value_type>
     void create(It first, It last) {
       m_registry->create(first, last);
@@ -249,7 +255,7 @@ namespace sc::ecs {
 
     // The component is built now and moved into the registry later. The entity
     // must not have the component by then.
-    template <typename Component, typename... Args>
+    template<typename Component, typename... Args>
       requires named<Component>
     void emplace(entt::entity e, Args &&...args) {
       auto &queue = m_buffer->template queue<Component>();
@@ -261,7 +267,7 @@ namespace sc::ecs {
     }
 
     // Does nothing if the entity does not have the component by then.
-    template <typename Component>
+    template<typename Component>
       requires named<Component>
     void remove(entt::entity e) {
       m_buffer->template queue<Component>().remove(e);
@@ -294,7 +300,8 @@ namespace sc::ecs {
   // The changes of a thread are made in the order it recorded them, those of
   // different threads in no particular order: which thread gets which entities
   // differs from run to run.
-  template <typename... Components> class ParallelCommands {
+  template<typename... Components>
+  class ParallelCommands {
   public:
     using Buffer = internal::CommandBuffer<Components...>;
     using Buffers = std::span<const std::unique_ptr<internal::CommandBufferBase>>;

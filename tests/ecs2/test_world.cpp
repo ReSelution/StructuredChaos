@@ -90,9 +90,10 @@ namespace {
   // Room for the rare entities of a test.
   constexpr size_t RARE_PLACES = 2 * PAGE_SIZE;
 
-  template <typename... Terms> void requireLoop(World &world, const Model &model, unsigned wanted, unsigned unwanted) {
+  template<typename... Terms>
+  void requireLoop(World &world, const Model &model, unsigned wanted, unsigned unwanted) {
     std::vector<uint64_t> expected;
-    for (const auto &[entity, components] : model) {
+    for (const auto &[entity, components]: model) {
       if ((components & wanted) == wanted && (components & unwanted) == 0) {
         expected.push_back(entity);
       }
@@ -129,7 +130,7 @@ namespace {
     REQUIRE(calls == expected.size());
     REQUIRE(visits[places] == 0);
     size_t once = 0;
-    for (const uint64_t entity : expected) {
+    for (const uint64_t entity: expected) {
       once += visits[placeOf(Entity{entity})] == 1;
     }
     REQUIRE(once == expected.size());
@@ -152,13 +153,18 @@ namespace {
 #endif
 
   // The pages of a column that hold components, without the spares it keeps.
-  template <typename Column> size_t usedPages(const Column &column) { return column.pages() - column.spares(); }
+  template<typename Column>
+  size_t usedPages(const Column &column) {
+    return column.pages() - column.spares();
+  }
 
 } // namespace
 
 // Gamma as well, so that the loops below go through columns of both kinds.
-template <> inline constexpr bool sc::ecs2::rareComponent<Player> = true;
-template <> inline constexpr bool sc::ecs2::rareComponent<Gamma> = true;
+template<>
+inline constexpr bool sc::ecs2::rareComponent<Player> = true;
+template<>
+inline constexpr bool sc::ecs2::rareComponent<Gamma> = true;
 
 TEST_CASE("World Entities", "[ecs2][world]") {
   sc::threading::init();
@@ -268,7 +274,7 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     for (int i = 0; i < 5000; ++i) {
       earlier.push_back(world.create());
     }
-    for (const Entity entity : earlier) {
+    for (const Entity entity: earlier) {
       world.destroy(entity);
     }
 
@@ -281,12 +287,12 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     });
 
     std::unordered_set<uint32_t> indices;
-    for (const Entity entity : created) {
+    for (const Entity entity: created) {
       REQUIRE(world.valid(entity));
       indices.insert(sc::ecs2::indexOf(entity));
     }
     REQUIRE(indices.size() == created.size());
-    for (const Entity entity : earlier) {
+    for (const Entity entity: earlier) {
       REQUIRE_FALSE(world.valid(entity));
     }
   }
@@ -313,11 +319,11 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     }
 
     std::unordered_set<uint32_t> indices;
-    for (const Entity entity : created) {
+    for (const Entity entity: created) {
       REQUIRE(world.valid(entity));
       indices.insert(sc::ecs2::indexOf(entity));
     }
-    for (const Entity entity : createdRare) {
+    for (const Entity entity: createdRare) {
       REQUIRE(world.valid(entity));
       indices.insert(sc::ecs2::indexOf(entity));
     }
@@ -349,7 +355,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     std::ranges::sort(sorted);
     REQUIRE(std::ranges::adjacent_find(sorted) == sorted.end());
     size_t right = 0;
-    for (const Entity entity : entities) {
+    for (const Entity entity: entities) {
       right += world.valid(entity) && world.contains<Tag>(entity) && world.get<const Position>(entity).x == 1.0f &&
                world.get<const Position>(entity).y == 2.0f && world.get<const Player>(entity).number == 7;
     }
@@ -411,7 +417,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
   SECTION("Threads Add And Remove Components Of Entities In The Same Page") {
     std::vector<Entity> entities(PAGE_SIZE);
-    for (Entity &entity : entities) {
+    for (Entity &entity: entities) {
       entity = world.create();
     }
     // Every chunk has entities all over the page, next to those of the others.
@@ -446,7 +452,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     const auto alive = std::make_shared<int>(0);
     // In two pages, the second one with few of them.
     std::vector<Entity> entities(PAGE_SIZE + 50);
-    for (Entity &entity : entities) {
+    for (Entity &entity: entities) {
       entity = world.create();
     }
     // Some have it already.
@@ -462,7 +468,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
       for (size_t chunk = first; chunk < last; ++chunk) {
         // Every chunk goes for every entity.
-        for (const Entity entity : entities) {
+        for (const Entity entity: entities) {
           added += world.tryEmplace<Named>(entity, std::to_string(chunk), alive);
           tagged += world.tryEmplace<Tag>(entity);
         }
@@ -484,7 +490,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     std::atomic<size_t> removed = 0;
     sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
       for (size_t chunk = first; chunk < last; ++chunk) {
-        for (const Entity entity : entities) {
+        for (const Entity entity: entities) {
           removed += world.erase<Named>(entity);
           if (chunk % 2 == 0) {
             world.erase<Tag>(entity);
@@ -501,7 +507,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     size_t tags = 0;
     world.each<const Tag>([&](Entity) { ++tags; });
     REQUIRE(world.column<Tag>().page(0).count + world.column<Tag>().page(1).count == tags);
-    for (const Entity entity : entities) {
+    for (const Entity entity: entities) {
       world.erase<Tag>(entity);
     }
     REQUIRE(world.column<Tag>().pages() == 0);
@@ -513,7 +519,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
       for (size_t chunk = first; chunk < last; ++chunk) {
         for (int round = 0; round < 4; ++round) {
-          for (const Entity entity : entities) {
+          for (const Entity entity: entities) {
             if ((chunk + static_cast<size_t>(round)) % 2 == 0) {
               made += world.tryEmplace<Named>(entity, std::string(100, 'm'), alive);
             } else {
@@ -528,7 +534,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(made - gone == named);
     REQUIRE(alive.use_count() == 1 + static_cast<long>(named));
     REQUIRE(world.column<Named>().page(0).count + world.column<Named>().page(1).count == named);
-    for (const Entity entity : entities) {
+    for (const Entity entity: entities) {
       world.erase<Named>(entity);
     }
     REQUIRE(alive.use_count() == 1);
@@ -546,7 +552,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     // So few that the page gets its memory and gives it back all the time.
     constexpr size_t chunks = 8;
     std::vector<Entity> entities(chunks);
-    for (Entity &entity : entities) {
+    for (Entity &entity: entities) {
       entity = world.create();
     }
     std::atomic<size_t> wrong = 0;
@@ -715,7 +721,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     // One entity of the third page.
     world.emplace<Position>(entities[2 * PAGE_SIZE + 5]);
     REQUIRE(positions.pages() == 1);
-    for (const Entity entity : entities) {
+    for (const Entity entity: entities) {
       if (!world.contains<Position>(entity)) {
         world.emplace<Position>(entity);
       }
@@ -735,7 +741,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(visited == 3 * PAGE_SIZE);
 
     // All four are spares now, until they are trimmed.
-    for (const Entity entity : entities) {
+    for (const Entity entity: entities) {
       world.destroy(entity);
     }
     REQUIRE(positions.pages() == 4);
@@ -1020,7 +1026,7 @@ TEST_CASE("World Loops", "[ecs2][world][threading]") {
     REQUIRE(sum == 150 * 150);
     REQUIRE(wrong == 0);
 
-    for (const Entity player : players) {
+    for (const Entity player: players) {
       REQUIRE(world.destroy(player));
     }
     REQUIRE(usedPages(world.column<Player>()) == 0);
@@ -1067,22 +1073,22 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
   const auto toggle = [&](Entity entity) {
     unsigned &components = model.at(static_cast<uint64_t>(entity));
     switch (below(4)) {
-    case 0:
-      (components & ALPHA) != 0 ? void(world.erase<Alpha>(entity)) : void(world.emplace<Alpha>(entity, entity));
-      components ^= ALPHA;
-      break;
-    case 1:
-      (components & BETA) != 0 ? void(world.erase<Beta>(entity)) : void(world.emplace<Beta>(entity, entity));
-      components ^= BETA;
-      break;
-    case 2:
-      (components & GAMMA) != 0 ? void(world.erase<Gamma>(entity)) : void(world.emplace<Gamma>(entity, entity));
-      components ^= GAMMA;
-      break;
-    default:
-      (components & TAG) != 0 ? void(world.erase<Tag>(entity)) : void(world.emplace<Tag>(entity));
-      components ^= TAG;
-      break;
+      case 0:
+        (components & ALPHA) != 0 ? void(world.erase<Alpha>(entity)) : void(world.emplace<Alpha>(entity, entity));
+        components ^= ALPHA;
+        break;
+      case 1:
+        (components & BETA) != 0 ? void(world.erase<Beta>(entity)) : void(world.emplace<Beta>(entity, entity));
+        components ^= BETA;
+        break;
+      case 2:
+        (components & GAMMA) != 0 ? void(world.erase<Gamma>(entity)) : void(world.emplace<Gamma>(entity, entity));
+        components ^= GAMMA;
+        break;
+      default:
+        (components & TAG) != 0 ? void(world.erase<Tag>(entity)) : void(world.emplace<Tag>(entity));
+        components ^= TAG;
+        break;
     }
   };
   const auto check = [&] {
@@ -1092,7 +1098,7 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
     requireLoop<const Tag, Gamma>(world, model, TAG | GAMMA, 0);
     requireLoop<Alpha, Exclude<Beta>>(world, model, ALPHA, BETA);
     requireLoop<Gamma, const Beta, Exclude<Tag, Alpha>>(world, model, GAMMA | BETA, TAG | ALPHA);
-    for (const Entity entity : alive) {
+    for (const Entity entity: alive) {
       if (!world.valid(entity)) {
         FAIL("an entity of the model does not exist");
       }
@@ -1116,22 +1122,22 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
     for (size_t change = 0; change < changes; ++change) {
       const size_t index = below(alive.size());
       switch (below(8)) {
-      case 0:
-        REQUIRE(world.destroy(alive[index]));
-        model.erase(static_cast<uint64_t>(alive[index]));
-        alive[index] = alive.back();
-        alive.pop_back();
-        break;
-      case 1: {
-        const Entity entity = spawn();
-        for (int component = 0; component < 3; ++component) {
-          toggle(entity);
+        case 0:
+          REQUIRE(world.destroy(alive[index]));
+          model.erase(static_cast<uint64_t>(alive[index]));
+          alive[index] = alive.back();
+          alive.pop_back();
+          break;
+        case 1: {
+          const Entity entity = spawn();
+          for (int component = 0; component < 3; ++component) {
+            toggle(entity);
+          }
+          break;
         }
-        break;
-      }
-      default:
-        toggle(alive[index]);
-        break;
+        default:
+          toggle(alive[index]);
+          break;
       }
     }
     // Now and then a hole of several pages.

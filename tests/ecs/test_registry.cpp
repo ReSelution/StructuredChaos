@@ -132,7 +132,7 @@ TEST_CASE("Registry Views", "[ecs][registry][view]") {
   SECTION("Const Components Are Read Only") {
     auto view = registry.view<Position, const Velocity>();
     size_t visited = 0;
-    for (auto [entity, pos, vel] : view.each()) {
+    for (auto [entity, pos, vel]: view.each()) {
       STATIC_REQUIRE(!std::is_const_v<std::remove_reference_t<decltype(pos)>>);
       STATIC_REQUIRE(std::is_const_v<std::remove_reference_t<decltype(vel)>>);
       pos.y = vel.dy;
@@ -146,7 +146,7 @@ TEST_CASE("Registry Views", "[ecs][registry][view]") {
   SECTION("Excluded Components") {
     auto view = registry.view<Position, const Velocity>(entt::exclude<Frozen>);
     size_t visited = 0;
-    for (auto entity : view) {
+    for (auto entity: view) {
       REQUIRE(static_cast<size_t>(view.get<Position>(entity).x) % 4 == 2);
       ++visited;
     }
@@ -167,7 +167,7 @@ TEST_CASE("Registry Views", "[ecs][registry][view]") {
     const auto more = make_entities(registry, 5000);
     size_t next = 0;
     size_t visited = 0;
-    for (auto [entity, pos] : registry.view<Position>().each()) {
+    for (auto [entity, pos]: registry.view<Position>().each()) {
       const float before = pos.x;
       for (size_t i = 0; i < 50 && next < more.size(); ++i) {
         registry.emplace<Position>(more[next++], -1.0f, -1.0f);
@@ -184,7 +184,7 @@ TEST_CASE("Registry Views", "[ecs][registry][view]") {
 TEST_CASE("Registry Destroy", "[ecs][registry][destroy]") {
   sc::ecs::Registry registry;
   auto entities = make_entities(registry, 100);
-  for (const auto &e : entities) {
+  for (const auto &e: entities) {
     registry.emplace<Position>(e);
     registry.emplace<Velocity>(e);
   }
@@ -280,7 +280,7 @@ TEST_CASE("Registry Concurrent Entity Creation", "[ecs][registry][threading]") {
   }
 
   std::vector<entt::entity> all;
-  for (const auto &mine : created) {
+  for (const auto &mine: created) {
     all.insert(all.end(), mine.begin(), mine.end());
   }
   std::sort(all.begin(), all.end());
@@ -320,7 +320,7 @@ TEST_CASE("Registry Emplace", "[ecs][registry][emplace]") {
     REQUIRE(registry.view<Position>().size() == 100);
     REQUIRE(registry.view<Velocity>().size() == 25);
     size_t both = 0;
-    for (auto [entity, pos, vel] : registry.view<const Position, const Velocity>().each()) {
+    for (auto [entity, pos, vel]: registry.view<const Position, const Velocity>().each()) {
       REQUIRE(pos.x == vel.dx);
       ++both;
     }
@@ -354,7 +354,7 @@ TEST_CASE("Registry Emplace", "[ecs][registry][emplace]") {
 
     REQUIRE(registry.view<Frozen>().size() == 5);
     size_t frozen = 0;
-    for ([[maybe_unused]] const auto entity : registry.view<const Position, const Frozen>()) {
+    for ([[maybe_unused]] const auto entity: registry.view<const Position, const Frozen>()) {
       ++frozen;
     }
     REQUIRE(frozen == 5);
@@ -413,7 +413,7 @@ TEST_CASE("Registry Entity Validation", "[ecs][registry][valid]") {
     const sc::ecs::Entity single = registry.create();
     REQUIRE(single);
     REQUIRE(single.registry == &registry);
-    for (const sc::ecs::Entity &e : make_entities(registry, 10)) {
+    for (const sc::ecs::Entity &e: make_entities(registry, 10)) {
       REQUIRE(e);
       REQUIRE(e.registry == &registry);
       REQUIRE(registry.valid(e));

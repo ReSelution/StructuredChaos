@@ -82,11 +82,12 @@ namespace {
   // Goes through a view or group with each and parallelEach and requires that
   // both call the function once for exactly the entities EnTT goes through,
   // with the components of that entity.
-  template <typename Source> void requireSameAsEntt(Source source, size_t grain) {
+  template<typename Source>
+  void requireSameAsEntt(Source source, size_t grain) {
     INFO(entt::type_name<Source>::value());
     std::vector<entt::entity> expected;
     uint32_t highest = 0;
-    for (const entt::entity entity : source) {
+    for (const entt::entity entity: source) {
       expected.push_back(entity);
       highest = std::max(highest, static_cast<uint32_t>(entt::to_entity(entity)));
     }
@@ -119,7 +120,7 @@ namespace {
     REQUIRE(wrongOnThreads == 0);
     REQUIRE(calls == expected.size());
     size_t once = 0;
-    for (const entt::entity entity : expected) {
+    for (const entt::entity entity: expected) {
       once += visits[entt::to_entity(entity)] == 1;
     }
     REQUIRE(once == expected.size());
@@ -128,7 +129,7 @@ namespace {
   using Stages = std::vector<std::vector<size_t>>;
 
   void move(View<Position, const Velocity> view) {
-    for (auto [entity, pos, vel] : view.each()) {
+    for (auto [entity, pos, vel]: view.each()) {
       pos.x += vel.dx;
       pos.y += vel.dy;
     }
@@ -136,7 +137,7 @@ namespace {
 
   struct Doubler {
     void operator()(const View<Position> &view) const {
-      for (auto [entity, pos] : view.each()) {
+      for (auto [entity, pos]: view.each()) {
         pos.x *= 2.0f;
         pos.y *= 2.0f;
       }
@@ -252,7 +253,7 @@ TEST_CASE("Scheduler Runs Systems", "[ecs][scheduler]") {
     scheduler.add(&move, "move");
     scheduler.add(Doubler{}, "double");
     scheduler.add([](View<Health> view) {
-      for (auto [entity, health] : view.each()) {
+      for (auto [entity, health]: view.each()) {
         health.value -= 1;
       }
     });
@@ -280,13 +281,13 @@ TEST_CASE("Scheduler Runs Systems", "[ecs][scheduler]") {
 
   SECTION("A System That Takes The Registry May Change Its Structure") {
     scheduler.add([](View<Health> view) {
-      for (auto [entity, health] : view.each()) {
+      for (auto [entity, health]: view.each()) {
         health.value = 0;
       }
     });
     scheduler.add([](Registry &reg) {
       std::vector<entt::entity> dead;
-      for (auto [entity, health] : reg.view<const Health>().each()) {
+      for (auto [entity, health]: reg.view<const Health>().each()) {
         if (health.value == 0) {
           dead.push_back(entity);
         }
@@ -399,7 +400,7 @@ TEST_CASE("Scheduler Runs Systems", "[ecs][scheduler]") {
         std::is_same_v<Moving, entt::view<entt::get_t<Position, const Velocity>, entt::exclude_t<const Frozen>>>);
     // The registry makes the same view.
     size_t thawed = 0;
-    for ([[maybe_unused]] const auto entity : registry.view<const Position, sc::ecs::Exclude<Frozen>>()) {
+    for ([[maybe_unused]] const auto entity: registry.view<const Position, sc::ecs::Exclude<Frozen>>()) {
       ++thawed;
     }
     REQUIRE(thawed == entities.size() - (entities.size() + 4) / 5);
@@ -482,26 +483,26 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
     for (size_t i = 0; i < system_count; ++i) {
       std::atomic<int> &mine = calls[i];
       switch (i % 5) {
-      case 0:
-        scheduler.add([&mine](View<Position>) { mine.fetch_add(1); });
-        break;
-      case 1:
-        scheduler.add([&mine](View<const Position, const Velocity>) { mine.fetch_add(1); });
-        break;
-      case 2:
-        scheduler.add([&mine](View<Velocity>) { mine.fetch_add(1); });
-        break;
-      case 3:
-        scheduler.add([&mine](View<Health>) { mine.fetch_add(1); });
-        break;
-      default:
-        scheduler.add([&mine](Registry &) { mine.fetch_add(1); });
-        break;
+        case 0:
+          scheduler.add([&mine](View<Position>) { mine.fetch_add(1); });
+          break;
+        case 1:
+          scheduler.add([&mine](View<const Position, const Velocity>) { mine.fetch_add(1); });
+          break;
+        case 2:
+          scheduler.add([&mine](View<Velocity>) { mine.fetch_add(1); });
+          break;
+        case 3:
+          scheduler.add([&mine](View<Health>) { mine.fetch_add(1); });
+          break;
+        default:
+          scheduler.add([&mine](Registry &) { mine.fetch_add(1); });
+          break;
       }
     }
 
     size_t scheduled = 0;
-    for (const auto &stage : scheduler.stages()) {
+    for (const auto &stage: scheduler.stages()) {
       scheduled += stage.size();
     }
     REQUIRE(scheduled == system_count);
@@ -543,7 +544,7 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
     for (int reader = 0; reader < 6; ++reader) {
       scheduler.add([&torn](View<const Position> view) {
         const float expected = std::get<1>(*view.each().begin()).x;
-        for (auto [entity, pos] : view.each()) {
+        for (auto [entity, pos]: view.each()) {
           // Half of what the second writer adds would show here.
           if (pos.x != expected || pos.y != expected - 1.0f) {
             torn.fetch_add(1);
@@ -558,7 +559,7 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
       scheduler.run(registry);
     }
     REQUIRE(torn.load() == 0);
-    for (const auto &e : entities) {
+    for (const auto &e: entities) {
       REQUIRE(registry.get<Position>(e).x == static_cast<float>(runs));
       REQUIRE(registry.get<Position>(e).y == static_cast<float>(runs));
     }
@@ -572,7 +573,7 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
     // One entity per share, shares that do not divide the count, one share
     // for all.
     const std::vector<size_t> grains{1, 7, 64, 512, 100'000};
-    for (const size_t grain : grains) {
+    for (const size_t grain: grains) {
       scheduler.addParallel([](Health &health, const Velocity &) { health.value += 1; }, {}, grain);
     }
     for (int run = 0; run < 50; ++run) {
@@ -610,7 +611,7 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
     // The stages after the broken one were skipped, nothing else.
     REQUIRE(completed == 40);
     // The loop next to the broken one still went through all of its entities.
-    for (const auto &e : entities) {
+    for (const auto &e: entities) {
       REQUIRE(registry.get<Position>(e).x == 60.0f);
     }
   }
@@ -624,7 +625,7 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
     scheduler.addParallel([](Lifetime &age) { age.runs += 1; }, "age", 8);
     scheduler.add(
         [](View<const Lifetime> view, sc::ecs::Commands<> commands) {
-          for (auto [entity, age] : view.each()) {
+          for (auto [entity, age]: view.each()) {
             if (age.runs >= lifetime) {
               commands.destroy(entity);
             }
@@ -655,7 +656,7 @@ TEST_CASE("Scheduler Runs Systems Reliably", "[ecs][scheduler][threading]") {
     // these runs, no entity has a number much higher than there ever were
     // entities at one time.
     const size_t bound = spawned * (lifetime + 1) + 2 * sc::ecs::internal::CommandBufferBase::ENTITY_BLOCK_SIZE;
-    for (auto [entity, age, pos] : world.view<const Lifetime, const Position>().each()) {
+    for (auto [entity, age, pos]: world.view<const Lifetime, const Position>().each()) {
       REQUIRE(world.valid(entity));
       REQUIRE(age.runs < lifetime);
       REQUIRE(entt::to_entity(entity) < bound);
@@ -899,7 +900,7 @@ TEST_CASE("Loops That Take The Entity And Record Changes", "[ecs][scheduler][com
     for (int run = 1; run <= 3; ++run) {
       scheduler.run(registry);
       REQUIRE(registry.view<Frozen>().size() == (count + 1) / 2 + 2);
-      for (auto entity : registry.view<Frozen>()) {
+      for (auto entity: registry.view<Frozen>()) {
         registry.erase<Frozen>(entity);
       }
     }
@@ -970,24 +971,24 @@ TEST_CASE("Loops Go Through What EnTT Goes Through, Whatever Happened To The Sto
   };
   const auto toggleAny = [&](entt::entity entity) {
     switch (below(6)) {
-    case 0:
-      toggle.template operator()<Alpha>(entity);
-      break;
-    case 1:
-      toggle.template operator()<Beta>(entity);
-      break;
-    case 2:
-      toggle.template operator()<Gamma>(entity);
-      break;
-    case 3:
-      toggle.template operator()<SmallPages>(entity);
-      break;
-    case 4:
-      toggle.template operator()<Anchored>(entity);
-      break;
-    default:
-      toggle.template operator()<Tag>(entity);
-      break;
+      case 0:
+        toggle.template operator()<Alpha>(entity);
+        break;
+      case 1:
+        toggle.template operator()<Beta>(entity);
+        break;
+      case 2:
+        toggle.template operator()<Gamma>(entity);
+        break;
+      case 3:
+        toggle.template operator()<SmallPages>(entity);
+        break;
+      case 4:
+        toggle.template operator()<Anchored>(entity);
+        break;
+      default:
+        toggle.template operator()<Tag>(entity);
+        break;
     }
   };
 
@@ -1028,23 +1029,23 @@ TEST_CASE("Loops Go Through What EnTT Goes Through, Whatever Happened To The Sto
       for (size_t change = 0; change < changes; ++change) {
         const size_t index = below(alive.size());
         switch (below(8)) {
-        case 0:
-          registry.destroy(alive[index]);
-          alive[index] = alive.back();
-          alive.pop_back();
-          break;
-        case 1: {
-          // The number of a destroyed entity comes back with a new version.
-          const entt::entity entity = registry.create();
-          alive.push_back(entity);
-          for (int component = 0; component < 4; ++component) {
-            toggleAny(entity);
+          case 0:
+            registry.destroy(alive[index]);
+            alive[index] = alive.back();
+            alive.pop_back();
+            break;
+          case 1: {
+            // The number of a destroyed entity comes back with a new version.
+            const entt::entity entity = registry.create();
+            alive.push_back(entity);
+            for (int component = 0; component < 4; ++component) {
+              toggleAny(entity);
+            }
+            break;
           }
-          break;
-        }
-        default:
-          toggleAny(alive[index]);
-          break;
+          default:
+            toggleAny(alive[index]);
+            break;
         }
       }
 
@@ -1052,28 +1053,28 @@ TEST_CASE("Loops Go Through What EnTT Goes Through, Whatever Happened To The Sto
       // The entities of the storage, which itself goes through its components.
       const entt::sparse_set &alphas = registry.storage<Alpha>();
       switch (below(6)) {
-      case 0:
-        registry.storage<Alpha>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
-        registry.storage<Beta>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
-        registry.storage<Gamma>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
-        registry.storage<SmallPages>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
-        break;
-      case 1: {
-        const auto salt = static_cast<uint32_t>(random());
-        registry.storage<Beta>().sort([salt](entt::entity lhs, entt::entity rhs) {
-          return (entt::to_integral(lhs) ^ salt) * 2654435761u < (entt::to_integral(rhs) ^ salt) * 2654435761u;
-        });
-        break;
-      }
-      case 2:
-        registry.storage<Beta>().sort_as(alphas.begin(), alphas.end());
-        break;
-      case 3:
-        registry.storage<SmallPages>().sort_as(alphas.begin(), alphas.end());
-        registry.storage<Gamma>().sort_as(alphas.begin(), alphas.end());
-        break;
-      default:
-        break;
+        case 0:
+          registry.storage<Alpha>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
+          registry.storage<Beta>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
+          registry.storage<Gamma>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
+          registry.storage<SmallPages>().sort([](entt::entity lhs, entt::entity rhs) { return lhs < rhs; });
+          break;
+        case 1: {
+          const auto salt = static_cast<uint32_t>(random());
+          registry.storage<Beta>().sort([salt](entt::entity lhs, entt::entity rhs) {
+            return (entt::to_integral(lhs) ^ salt) * 2654435761u < (entt::to_integral(rhs) ^ salt) * 2654435761u;
+          });
+          break;
+        }
+        case 2:
+          registry.storage<Beta>().sort_as(alphas.begin(), alphas.end());
+          break;
+        case 3:
+          registry.storage<SmallPages>().sort_as(alphas.begin(), alphas.end());
+          registry.storage<Gamma>().sort_as(alphas.begin(), alphas.end());
+          break;
+        default:
+          break;
       }
 
       check();
