@@ -5,6 +5,11 @@
 #include <new>
 
 #ifdef _WIN32
+// Without the min and max macros of <windows.h>, which would take the place
+// of std::min and std::max wherever this header is included.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <sys/mman.h>
