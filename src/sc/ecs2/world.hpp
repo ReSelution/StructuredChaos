@@ -506,39 +506,58 @@ namespace sc::ecs2 {
             }
           };
 
-          // Every entity of the page: one loop the compiler turns into SIMD
-          // code.
           if (((std::get<G>(pages).count == PAGE_SIZE) && ...) && (!std::get<X>(without) && ...)) {
-            for (uint32_t slot = 0; slot < PAGE_SIZE; ++slot) {
-              call(slot);
-            }
+            eachInFullPage(call);
             continue;
           }
 
-          // Only the words that may have a bit in every column: a page with
-          // a few entities is not gone through word by word. With one entity
-          // a loop took 55 ns instead of 11, nearly all of it for the 64
-          // words (the update of 7 systems in ecs_benchmark, 395 ns before,
-          // 77 ns after).
-          for (uint64_t words = (std::get<G>(pages).summary & ...); words != 0; words &= words - 1) {
-            const auto word = static_cast<uint32_t>(std::countr_zero(words));
+          // The entities of a word: with all of the components, without the
+          // excluded ones.
+          const auto maskOf = [&](uint32_t word) {
             uint64_t mask = (std::get<G>(pages).mask[word].load(std::memory_order_relaxed) & ...);
             ((mask &=
               std::get<X>(without) ? ~std::get<X>(without).mask[word].load(std::memory_order_relaxed) : ~uint64_t{0}),
              ...);
-            const uint32_t first = word * 64;
-            if (mask == ~uint64_t{0}) {
-              for (uint32_t slot = first; slot < first + 64; ++slot) {
-                call(slot);
-              }
-            } else {
-              for (; mask != 0; mask &= mask - 1) {
-                call(first + static_cast<uint32_t>(std::countr_zero(mask)));
-              }
-            }
-          }
+            return mask;
+          };
+          eachInWords((std::get<G>(pages).summary & ...), maskOf, call);
         }
       }(std::index_sequence_for<Get...>{}, std::index_sequence_for<Excluded...>{});
+    }
+
+    // Every entity of a page: one loop the compiler turns into SIMD code.
+    template<typename Call>
+    static void eachInFullPage(const Call &call) {
+      for (uint32_t slot = 0; slot < PAGE_SIZE; ++slot) {
+        call(slot);
+      }
+    }
+
+    // Only the words that may have a bit in every column: a page with a few
+    // entities is not gone through word by word. With one entity a loop took
+    // 55 ns instead of 11, nearly all of it for the 64 words (the update of 7
+    // systems in ecs_benchmark, 395 ns before, 77 ns after).
+    template<typename MaskOf, typename Call>
+    static void eachInWords(uint64_t words, const MaskOf &maskOf, const Call &call) {
+      for (; words != 0; words &= words - 1) {
+        const auto word = static_cast<uint32_t>(std::countr_zero(words));
+        eachInMask(maskOf(word), word * 64, call);
+      }
+    }
+
+    // The entities of one word, the first of them at the slot first.
+    template<typename Call>
+    static void eachInMask(uint64_t mask, uint32_t first, const Call &call) {
+      if (mask == ~uint64_t{0}) {
+        // A full word: a loop without a search, like a full page.
+        for (uint32_t slot = first; slot < first + 64; ++slot) {
+          call(slot);
+        }
+        return;
+      }
+      for (; mask != 0; mask &= mask - 1) {
+        call(first + static_cast<uint32_t>(std::countr_zero(mask)));
+      }
     }
 
     internal::EntityAllocator m_entities;
