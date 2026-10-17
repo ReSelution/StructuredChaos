@@ -77,6 +77,40 @@ The API is not settled; these are the open questions found so far.
   `World::each`); a command buffer applies them in a fixed order. Relevant for replays and lockstep networking; state
   it as a trade-off, not only as a speed gain.
 
+## Single-thread standing in ecs_benchmark
+
+Measured 2026-10-17 on a Ryzen 7 5800X, after the per-index seed fix in ecs_benchmark (`a9f3135`; before it the
+hero/monster data differed per framework). Small counts with the page summary (`872ede0`).
+
+- **Structural changes, ahead:** remove + add of one component (`BM_RemoveAddComponent`, 1024 entities): sc 7.1 µs,
+  Ginseng 12 µs, EnTT 20 µs, flecs 133 µs. A bit and a construction in place, no table move (archetypes) and no
+  swap-and-pop (EnTT).
+- **Small counts, ahead:** 1 entity, 7 systems: sc 78 ns, EnTT 70 ns, mustache 127 ns, flecs 1370 ns (395 ns before
+  the summary).
+- **Dense data, level:** `ComplexSystemsUpdate` 16K: sc 265 µs, mustache 258 µs, flecs 246 µs, EnTT 599 µs; 262K:
+  4.51 / 4.50 / 4.39 ms.
+- [ ] **Sparse data at medium counts, behind:** `ComplexSystemsUpdateMixedEntities` 16K: sc 175 µs, mustache 143 µs,
+  flecs 145 µs (about 20 %); at 1M nearly level (14.4 / 13.8 / 13.3 ms). Cause not measured. Guess: exactly the even
+  entities have the hero/monster components, so their masks are `0x5555…`; neither the full-page nor the full-word
+  path applies and the loop goes bit by bit, while an archetype ECS runs over a dense array. Check with perf before
+  changing anything.
+
+Entity benchmarks from the full run (`reports/*-entities.json`), ns per entity, rank among 7–8 frameworks (mustache has
+no destroy/remove-add results). Bulk create of sc was still running.
+
+- **`get`, one component, ahead:** `BM_UnpackOneComponent` 0.7 at 1024 and 262K (Ginseng 1.2, EnTT 2.0, flecs 10.7).
+- **Remove + add, ahead:** 7.0 / 7.3 (pico_ecs 9.0, Ginseng 10.6, EnTT 20, flecs 130).
+- **Create at large counts, ahead:** 262K: 9.8 with three components (Ginseng 15.3, EnTT 19.0), 1.6 empty (pico_ecs
+  5.1, EnTT 13.2).
+- **Destroy, second:** 23.8 at 1024, 11.4 at 262K; pico_ecs is about twice as fast (7.0 / 5.9), all others slower
+  (EnTT 34.1 / 31.1).
+- [ ] **Create at small counts, behind:** 1024 with three components 38.9, rank 4 (EnTT 20.5, Ginseng 20.6, pico_ecs
+  21.4), nearly twice EnTT; empty 6.7, rank 3 (Ginseng 4.3). Guess, not measured: fixed costs of new columns and
+  pages (`makeHeader`, `startPage`, committing memory) that only spread out over many entities.
+- [ ] **`get` of three components, middle:** `BM_UnpackThreeComponents` 3.0, rank 5 (Ginseng 2.1, pico_ecs 2.3,
+  EntityX 2.5, gaia 2.7). Odd next to 0.7 for one component: three times that would be 2.1. Cause not looked at.
+- `BM_AddComponent` says nothing: it pauses the timer per entity, every framework lands at ~540 ns.
+
 ## Show the parallel advantage in numbers
 
 ecs_benchmark is single-threaded on purpose, so none of its results shows the main argument for ecs2 (structural
