@@ -316,7 +316,7 @@ meson test -C build --benchmark
 | `enable_chaos_stats` | `false` | Compiles the stats in instead of leaving them out |
 | `dump_magpie` | `false` | Keeps namespace and key of every text, for `Magpie::dump()` |
 | `mimalloc_new_delete` | `true` | On Windows, routes `new`/`delete` of every executable that uses `sc_dep` to mimalloc |
-| `ecs_comparison` | `false` | Fetches other ECS libraries and builds the benchmarks that compare `sc::ecs` with them |
+| `ecs_comparison` | `false` | Fetches other ECS libraries and builds the benchmarks that compare `sc::ecs2` with them |
 
 ```bash
 meson setup build -Denable_chaos_stats=true
@@ -325,9 +325,7 @@ meson setup build -Denable_chaos_stats=true
 ### ECS comparison
 
 With `ecs_comparison`, `tests/ecs_compare` builds one executable per library
-that does the same work on one thread and on all of them: `sc::ecs`, `sc::ecs2`
-(once for each of `sc::ecs2::Pages`: chosen by each column, the default, then
-huge pages and small ones),
+that does the same work on one thread and on all of them: `sc::ecs2`,
 [EnTT](https://github.com/skypjack/entt),
 [Flecs](https://github.com/SanderMertens/flecs),
 [gaia-ecs](https://github.com/richardbiely/gaia-ecs) and
@@ -337,8 +335,16 @@ and prints the results side by side:
 
 ```bash
 scripts/ecs_compare.py
-scripts/ecs_compare.py --only sc,flecs --threads 8
+scripts/ecs_compare.py --only sc2,flecs --threads 8
 scripts/ecs_compare.py --markdown --save results.json
+```
+
+On Windows the script runs from a shell with the environment of Visual
+Studio. A new `build-bench-ecs` is set up with the compiler of the
+environment, so clang-cl has to be chosen for it:
+
+```bat
+set CC=clang-cl& set CXX=clang-cl& python scripts/ecs_compare.py
 ```
 
 Most benchmarks time one operation on a fresh world. The last section of the

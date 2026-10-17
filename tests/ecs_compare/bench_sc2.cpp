@@ -25,12 +25,8 @@ namespace {
   using sc::ecs2::Query;
   using sc::ecs2::Scheduler;
 
-  // The executable is built several times, see meson.build: once for each
-  // kind of pages a world can have its columns backed with.
-#ifndef ECS_COMPARE_PAGES
-#define ECS_COMPARE_PAGES Auto
-#endif
-  constexpr sc::ecs2::Pages PAGES = sc::ecs2::Pages::ECS_COMPARE_PAGES;
+  // The default, which each column chooses its pages with.
+  constexpr sc::ecs2::Pages PAGES = sc::ecs2::Pages::Auto;
 
   struct Target {
     Entity entity;

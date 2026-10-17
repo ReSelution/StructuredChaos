@@ -1,0 +1,24 @@
+diff --git a/src/mustache/utils/timer.cpp b/src/mustache/utils/timer.cpp
+index f6446d5..fd9986e 100644
+--- a/src/mustache/utils/timer.cpp
++++ b/src/mustache/utils/timer.cpp
+@@ -1,7 +1,8 @@
+ #include "timer.hpp"
+ 
+-#ifndef __clang__
+-// including chrono with new version of clang leads to compilation error
++#if !defined(__clang__) || defined(_WIN32)
++// including chrono with new version of clang leads to compilation error;
++// clang-cl has the chrono of MSVC and no clock_gettime
+ #include <chrono>
+ #else
+ #include <time.h>
+@@ -9,7 +10,7 @@
+ 
+ using namespace mustache;
+ namespace {
+-#ifndef __clang__
++#if !defined(__clang__) || defined(_WIN32)
+     using Clock = std::chrono::high_resolution_clock;
+     using TimePoint = Clock::time_point;
+ 

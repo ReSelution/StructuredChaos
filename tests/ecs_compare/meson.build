@@ -1,4 +1,4 @@
-# sc::ecs next to other ECS libraries: one executable per library, all of them
+# sc::ecs2 next to other ECS libraries: one executable per library, all of them
 # doing the same work, see common.hpp. scripts/ecs_compare.py builds them in
 # a build directory of its own, runs them and puts the results side by side.
 # The target does the same for this build directory:
@@ -21,12 +21,8 @@ mustache_dep = dependency(
 
 # The source, what it needs and what it is compiled with.
 ecs_compare_libraries = {
-  'sc': ['bench_sc.cpp', [sc_dep], []],
   # The prototype of an ECS of our own, see src/sc/ecs2.
   'sc2': ['bench_sc2.cpp', [sc_dep], []],
-  # The same with worlds of other sc::ecs2::Pages than Pages::Auto.
-  'sc2_huge': ['bench_sc2.cpp', [sc_dep], ['-DECS_COMPARE_PAGES=Huge']],
-  'sc2_small': ['bench_sc2.cpp', [sc_dep], ['-DECS_COMPARE_PAGES=Small']],
   'entt': ['bench_entt.cpp', [entt_dep], []],
   'flecs': ['bench_flecs.cpp', [flecs_dep], []],
   'gaia': ['bench_gaia.cpp', [gaia_ecs_dep], []],
@@ -39,7 +35,7 @@ foreach name, parts : ecs_compare_libraries
     'ecs_compare_' + name,
     sources: [parts[0]],
     cpp_args: parts[2],
-    # Every library allocates with mimalloc, as sc::ecs does, so that the
+    # Every library allocates with mimalloc, as sc does, so that the
     # allocator is not what is compared.
     dependencies: [catch2_dep, mimalloc_dep] + parts[1],
   )

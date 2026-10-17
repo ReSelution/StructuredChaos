@@ -1,0 +1,13 @@
+diff --git a/meson.build b/meson.build
+index d31fecb..31da2a4 100644
+--- a/meson.build
++++ b/meson.build
+@@ -16,7 +16,7 @@ cc = meson.get_compiler('c')
+ 
+ if host_machine.system() == 'windows'
+     flecs_deps += cc.find_library('ws2_32') # Required for http addon
+-    flecs_deps += cc.find_library('dbgHelp') # Required for backtraces
++    flecs_deps += cc.find_library('dbghelp') # Required for backtraces
+ endif
+ 
+ flecs_src = files(

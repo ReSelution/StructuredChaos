@@ -212,9 +212,6 @@ namespace compare {
     // by the threads and made by the library afterwards, in the way each
     // library provides for it.
     inline constexpr const char *CREATE = "create entities with 2 components";
-    // Only sc::ecs: the registry itself instead of recorded changes, which
-    // lets one thread at a time write a component type.
-    inline constexpr const char *CREATE_DIRECT = "create entities with 2 components, 1 thread per component";
     // The same with what a library has for making many entities in one go,
     // all of them with the same values.
     inline constexpr const char *CREATE_BATCH = "create entities with 2 components, all at once";

@@ -4,6 +4,8 @@ url = https://github.com/kirillochnev/mustache.git
 revision = 75ef20ff2264a46c24768a5fce5bd8a0738c8e2c
 depth = 1
 patch_directory = mustache
+# clang-cl takes the branch for clang, with clock_gettime, which Windows has not.
+diff_files = mustache-windows-timer.patch
 
 [provide]
 mustache = mustache_dep

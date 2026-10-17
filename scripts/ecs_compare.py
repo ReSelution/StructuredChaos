@@ -6,8 +6,13 @@ built in build-bench-ecs, which is configured as an optimized build with
 -Decs_comparison=true if it does not exist yet:
 
     scripts/ecs_compare.py
-    scripts/ecs_compare.py --only sc,flecs --threads 8
+    scripts/ecs_compare.py --only sc2,flecs --threads 8
     scripts/ecs_compare.py --markdown --save results.json
+
+On Windows, from a shell with the environment of Visual Studio, and with
+clang-cl as the compiler of a new build directory:
+
+    set CC=clang-cl& set CXX=clang-cl& python scripts/ecs_compare.py
 """
 
 from __future__ import annotations
@@ -34,10 +39,7 @@ SETUP_OPTIONS = ["-Dbuildtype=release", "-Db_ndebug=true", "-Decs_comparison=tru
 # Column titles, in the order of the columns. Libraries not listed here follow
 # in alphabetical order under the name of their executable.
 LIBRARIES = {
-    "sc": "sc::ecs",
     "sc2": "sc::ecs2",
-    "sc2_huge": "sc::ecs2 huge pages",
-    "sc2_small": "sc::ecs2 small pages",
     "entt": "EnTT",
     "flecs": "Flecs",
     "gaia": "gaia-ecs",
@@ -107,6 +109,14 @@ def configure(build_dir: Path, native_file: Path | None) -> bool:
 
 def build(build_dir: Path, only: list[str] | None) -> bool:
     """Builds the executables of the comparison and nothing else of the project."""
+    # The targets are read from what meson wrote when it last generated the
+    # build; after a change of a meson.build they are those of before, and a
+    # target that is gone fails the build. Regenerating first brings them up
+    # to date, and does nothing otherwise.
+    try:
+        subprocess.run(["ninja", "-C", str(build_dir), "build.ninja"], stdout=sys.stderr)
+    except OSError:
+        pass
     try:
         targets = [
             target["name"]
@@ -433,13 +443,18 @@ def check_build(build_dir: Path) -> None:
 
 
 def main() -> int:
+    # The tables have characters that the code page of a Windows console or of
+    # a redirected stdout there does not.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--build-dir", type=Path, default=BUILD_DIR, help="meson build directory (default: build-bench-ecs)")
     parser.add_argument("--native-file", type=Path, help="for a new build directory, e.g. cross/linux-clang.ini")
     parser.add_argument("--no-build", action="store_true", help="run what is built already, without meson")
     parser.add_argument("--samples", type=int, default=50, help="samples per benchmark (default: 50)")
     parser.add_argument("--threads", type=int, help="threads of the parallel benchmarks (default: all)")
-    parser.add_argument("--only", help="comma separated libraries to run, e.g. sc,flecs")
+    parser.add_argument("--only", help="comma separated libraries to run, e.g. sc2,flecs")
     parser.add_argument("--relative-to", metavar="LIBRARY", help="show factors to this library instead of the fastest")
     parser.add_argument("--markdown", action="store_true", help="print markdown tables")
     parser.add_argument("--no-color", action="store_true", help="plain text also on a terminal")

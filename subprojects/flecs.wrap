@@ -2,6 +2,9 @@
 url = https://github.com/SanderMertens/flecs.git
 revision = v4.1.6
 depth = 1
+# The import library is dbghelp.lib: as dbgHelp it is not found where file
+# names have case, when building for Windows from Linux.
+diff_files = flecs-dbghelp.patch
 
 [provide]
 flecs = flecs_dep

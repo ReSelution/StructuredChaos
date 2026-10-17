@@ -6,6 +6,11 @@
 #include <utility>
 #include <vector>
 
+// gaia includes <windows.h>, whose min and max would take the place of
+// std::min and std::max in common.hpp.
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
 #include <gaia.h>
 
 #include "common.hpp"
