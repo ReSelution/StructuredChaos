@@ -114,25 +114,24 @@ twice as slow at 1024 as it is.
 - **Create empty, third:** 2.6 / 2.1 at 1024 / 262K (Ginseng 2.1 / 1.6, pico_ecs 2.4 / 1.9, EnTT 6.8 / 9.8).
 - **An empty world:** `BM_CreateNoEntities` 4.3 µs for making and tearing it down (Ginseng 1.7 ns, EnTT 46 ns,
   mustache 0.7 µs, gaia 8.4 µs, flecs 1.4 ms).
-- [ ] **Destroy, second:** 10.2 / 10.3 at 1024 / 262K; pico_ecs is about twice as fast (6.0 / 5.5), all others slower
-  (EntityX 22, EnTT 28, flecs 31). pico_ecs only tests a bitset that lies with the entity and leaves the components
+- [ ] **Destroy, second:** 10.2 / 10.3 at 1024 / 262K, 8.2 / 9.4 without `lock` (`86d3592`); pico_ecs 6.0 / 5.5,
+  all others slower (EntityX 22, EnTT 28, flecs 31). pico_ecs only tests a bitset that lies with the entity and leaves the components
   where they are. `World::destroy` calls `erase` through a virtual call on every column of the world, not only on
   those the entity has, each with `findHeader` and a mask load; for a component the entity has, a `fetch_and` and a
-  `fetch_sub` (seq_cst) on top, then `vector::resize` and `push_back` in `FreeList::give`. A game with 100 component
+  `fetch_sub` (seq_cst) on top (gone since `86d3592`), then `vector::resize` and `push_back` in `FreeList::give`. A game with 100 component
   types makes 100 virtual calls per destroy. A per-entity record of its columns would let `eraseAll` visit only
-  those. The atomics protect nothing on this path, see the next point. pico_ecs is flattered by the benchmark: its
+  those. pico_ecs is flattered by the benchmark: its
   systems are registered in `PicoEcsApplication::init()`, which the entity benchmarks never call, so its destroy
   skips `ecs_sync_destroy` (removing the entity from the sparse set of every system it is in).
-- [ ] **Destroy without `lock`:** `destroy` never runs next to a system: `Commands::destroy` only records, and
-  `CommandList::apply` runs with nothing next to it. `World::destroy` cannot run next to other threads anyway
-  (`FreeList::give`, see below). So the four locked RMW per entity of two components (`fetch_and` on the mask,
-  `fetch_sub` seq_cst on `count`, per column) protect nothing there. A column path for exclusive use, e.g.
-  `Column::eraseAlone(index)`: relaxed load and relaxed store instead of RMW (plain `and`/`mov` on x86, no `lock`),
-  `count` the same, and when it reaches 0 `summary = 0` and park/vacate without rebuilding the summary (nobody
-  emplaces meanwhile). `eraseAll` stays as it is for where it may run next to other threads. Measure first with
-  `perf annotate` on `BM_DestroyEntities/262144` how much of the ~10 ns are the locked instructions; if most, sc
-  should come close to pico_ecs (6 ns). Also: `valid` and `EntityAllocator::destroy` both look up `generation` and
-  `pages()`; `FreeList::give` calls `resize` on every destroy, needed only if `take` took something since.
+- [x] **Destroy without `lock` (`86d3592`):** `destroy` never runs next to a system (`Commands::destroy` only
+  records, `CommandList::apply` runs alone), so `World::destroy` now takes the components with
+  `Column::eraseAlone`: relaxed load and store instead of `fetch_and`/`fetch_sub`, no `making` bit, the summary set
+  to 0 without a rebuild. 10 % less, not the hoped jump to pico_ecs: perf put about a quarter of the samples on the
+  locked instructions and right after them, but the plain loads and stores remain. The rest is spread thin over
+  the loop over the columns (devirtualized `erase` with its type check), `valid`, the generation and
+  `FreeList::give`.
+- [ ] **Small costs of destroy:** `valid` and `EntityAllocator::destroy` both look up `generation` and `pages()`;
+  `FreeList::give` calls `resize` on every destroy, needed only if `take` took something since.
 - [ ] **Bulk destroy with kill masks:** `destroyBulk` is a loop over `destroy` today. Instead: (1) for every entity
   `valid`, `++generation`, set its bit in a kill mask per page (64 words, local, not atomic; duplicates drop out at
   `valid`), give all indices to the free list at once; (2) per column one virtual call, per touched page one header
@@ -142,12 +141,12 @@ twice as slow at 1024 as it is.
   2 × 1024 erases at 1024 entities. Pages are independent, so step 2 can be split over threads by page, without
   atomics if every page belongs to one thread; only worth it for many pages (waking threads costs microseconds).
   Scattered entities need a small page → kill mask map (sorted array or flat table of the touched pages).
-- [ ] **Document that `World::destroy` must not run next to other threads:** nothing at `World::destroy` says so,
-  and `eraseAll` even says "Safe next to threads that keep to other entities". But `FreeList::give` (`resize`,
-  `push_back`) runs against `take` from `create` without a lock: thread A in `create` reads `indices[before - 1]`
-  while thread B in `destroy` pushes back, the vector reallocates, A reads freed memory. Someone who calls
-  `world.destroy()` inside `parallelEach` gets that. Same note as at `CommandList::apply` ("nothing may be running
-  next to it"), and a debug assert if ecs2 can tell that a loop or stage is running.
+- [ ] **`World::destroy` must not run next to other threads, assert it:** the comment says so since `86d3592`
+  (like `CommandList::apply`). Before, nothing said so and `eraseAll` even said "Safe next to threads that keep to
+  other entities", while `FreeList::give` (`resize`, `push_back`) runs against `take` from `create` without a lock:
+  thread A in `create` reads `indices[before - 1]` while thread B in `destroy` pushes back, the vector reallocates,
+  A reads freed memory. Now also the components go without locked instructions. Left: a debug assert if ecs2 can
+  tell that a loop or stage is running.
 - [ ] **Bulk create only fast with fresh indices:** 262K: 1.3 into a fresh world (`fill` writes one contiguous index
   range), 14.5 with reused indices from the free list (flecs 3.5, EnTT 13.0). At 1024 10.1 (flecs 4.0, EnTT 12.5).
 - `BM_AddComponent` says nothing: it pauses the timer per entity, every framework lands at ~540 ns.
