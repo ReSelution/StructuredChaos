@@ -61,19 +61,17 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
 
 Goal: a system emits an event and its listeners run right away, on the emitting thread, also from `addParallel`.
 
-- [ ] **`World::modify<Component>(entity, function)`:** calls `function` with the component while holding its
-  `making` bit (taken with the same spin as `Column::erase`), then releases it; false if the entity does not have
-  the component. Today the bit only guards the existence of a component (`tryEmplace`, `erase`), not its value:
-  `get()` returns `*valueAt(index)` and `eachInPages` reads and writes without it. So two listeners that hit the same
-  target from two threads both write `Health` at once, and an `erase` does not wait for a thread that still uses the
-  value (see the comment on `World::parallelEach`). With `modify` the second listener and the `erase` wait, the
-  component does not have to be atomic, and the SIMD loop of full pages stays as it is; only the `modify` path pays
-  for the atomic.
+- [x] **`World::modify<Component>(entity, function)`:** calls `function` with the component while holding its
+  `making` bit, counted in the page with `occupy` meanwhile (as `emplaceOrReplace`, against an `erase` without
+  `DESTROYS` emptying the page); false without a call if the entity does not have the component. For systems the
+  parameter `Modify<T...>`, which declares writing `T` and takes the component from the function's parameter:
+  `modify(target, [](Health &h) { ... })`. 16 threads × 2000 rounds on 8 targets lose no update; without the bit
+  about 19 % were lost (26 000 instead of 32 000). Loops and `get` still do not take the bit, see below.
 - [x] **`get` for writing in a parallel loop asserts:** `World::get` and `Query::get` with a non-const component
   assert in debug builds while the thread runs the function of `parallelEach` (`internal::inParallelLoop`, set per
   chunk, also with no helper thread). The scheduler keeps other systems away, not the other threads of the same
-  loop; reading with `get<const T>` stays allowed. Writing another entity's component there is for `modify`, which
-  does not exist yet. `World::column<T>().get` gets past it.
+  loop; reading with `get<const T>` stays allowed. Writing another entity's component there is for `modify`.
+  `World::column<T>().get` gets past it.
 - [ ] **Listeners declare their access:** `scheduler.on<Hit>([](const Hit &, Query<const Armor>, Commands) { ... })`
   with the same `SystemParam`s as systems, and an `Emit<Hit>` parameter for the emitter whose `declare` adds the
   `SystemAccess` of every listener of `Hit`. The stages are built in `run()`, so listeners only have to be registered
@@ -87,10 +85,12 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
 
 The API is not settled; these are the open questions found so far.
 
-- [ ] **Same-loop race:** `modify` only helps if every writer takes the lock. A `parallelEach<Health>` writes its own
+- [x] **Same-loop race:** `modify` only helps if every writer takes the lock. A `parallelEach<Health>` writes its own
   pages without it; if its callback calls `modify<Health>` on an entity in a page another thread is iterating, both
-  write the same `Health`. Either the scheduler/an assert forbids `modify<T>` inside a loop that writes `T`, or the
-  loop locks what it iterates (next point).
+  write the same `Health`. For systems a `static_assert` in `Scheduler::addSystem` now forbids `Modify<T>` together
+  with `T` as a loop parameter or in a query (also `const T`: reading without the bit next to a `modify` is a race
+  as well). Not checked for `world.parallelEach` with `world.modify` in it, which has no types to check.
+  The page lock below would allow it.
 - [ ] **Page lock while iterating:** a loop locks the page of each column it writes (per column and page, not per
   entity page, so a loop over `Health` does not block `modify<Sprite>`), one RMW per 4096 entities. Pitfalls:
   - Deadlock: thread A holds page P1 and calls `modify` on P2, thread B holds P2 and calls `modify` on P1 (two groups
@@ -105,8 +105,8 @@ The API is not settled; these are the open questions found so far.
   No deadlock, no lost update, the change still lands in the same loop. Costs: a per-thread arena for the callbacks
   (no `std::function` on the heap), mailbox order is not deterministic (the read-modify-write result is still right).
   Only worth it if `modify<T>` inside loops over `T` is common; otherwise the assert is enough.
-- [ ] **Nested `modify`:** a callback that calls `modify` on another entity can deadlock (A holds e1 wants e2, B holds
-  e2 wants e1). Simplest: forbid it with a thread-local flag and an assert.
+- [x] **Nested `modify`:** a callback that calls `modify` on another entity can deadlock (A holds e1 wants e2, B holds
+  e2 wants e1). Asserted in debug builds (`internal::inModify`).
 - [ ] **Escaping references:** C++ cannot stop a callback from storing `&component`; document it. Reads need no lock:
   `get<const T>` on other entities is already safe within a stage, the scheduler keeps writers of `T` out of it and
   `Commands::erase` only applies at the end of the stage.
