@@ -256,9 +256,19 @@ twice as slow at 1024 as it is.
   their components in every column (`eraseAlone` of its `KillPage`); only `giveMany` to the free lists is left to
   the calling thread. A name of its own, as `each`/`parallelEach`: `destroy(span)` stays on the calling thread.
   `destroy` / `parallelDestroy`, µs, 16 threads: 100K entities without components 699 / 254, with 6 components
-  952 / 353; 1M 6 745 / 1 644 and 10 538 / 3 060. Far from 16 times: presumably `giveMany` and compacting the
-  freed indices, on one thread (not split up by measurement). The free lists get the indices in page order, not
-  in the order given.
+  952 / 353; 1M 6 745 / 1 644 and 10 538 / 3 060. The free lists get the indices in page order, not in the order
+  given.
+- [x] **`giveMany` over threads too:** split up by measurement (1M entities, 6 components, µs): counting 135,
+  placing 340 to 770, the work on the pages 1 300 to 2 000, compacting the freed indices 1 (with no entity given
+  twice they already lie where they go, and `memmove` onto itself is skipped), `giveMany` 905 to 983. So only
+  `giveMany` was worth it: the free lists get their final size first and every page copies its indices to its
+  place (`EntityAllocator::giveMany` of pages), which also replaces the compacting. `parallelDestroy`, µs, before
+  / after: 100K without components 250 / 184, with 6 components 343 / 303; 1M 1 680 / 963 and 3 167 / 2 422.
+  Destroy through `Commands`, 100K: 338 → 274.
+- [ ] **+3 to 5 % on unchanged paths after the parallel `giveMany`:** in `ecs_compare_sc2`, destroy on one thread
+  820 → 848 µs, all at once 781 → 821, add + remove recorded 541 → 564 (7 runs each), though their code did not
+  change. The probe that calls `destroy(span)` directly shows no difference (100K 691 / 690 / 700 against 687 /
+  702 / 689). Presumably code placement in that binary (new instantiations, other inlining); not looked into.
 - [ ] **`World::destroy` must not run next to other threads, assert it:** the comment says so since `86d3592`
   (like `CommandList::apply`). Before, nothing said so and `eraseAll` even said "Safe next to threads that keep to
   other entities", while `FreeList::give` (`resize`, `push_back`) runs against `take` from `create` without a lock:
