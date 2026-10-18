@@ -215,6 +215,13 @@ namespace compare {
     // The same with what a library has for making many entities in one go,
     // all of them with the same values.
     inline constexpr const char *CREATE_BATCH = "create entities with 2 components, all at once";
+    // The two above in a world that had as many entities and destroyed them
+    // all, outside the timing: what the world keeps for its entities has been
+    // used, and the indices come back from destroy. The two above fill a new
+    // world, with every first use of what it keeps in the timing.
+    inline constexpr const char *CREATE_AGAIN = "create entities with 2 components, in a world emptied before";
+    inline constexpr const char *CREATE_BATCH_AGAIN =
+        "create entities with 2 components, all at once, in a world emptied before";
     inline constexpr const char *DESTROY = "destroy entities";
     // The same with what a library has for destroying many entities in one go.
     inline constexpr const char *DESTROY_BATCH = "destroy entities, all at once";

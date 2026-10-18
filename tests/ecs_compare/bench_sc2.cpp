@@ -120,6 +120,40 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     });
   };
 
+  // Filled and emptied the way the benchmark fills them, so that the indices
+  // come back from the same free list.
+  BENCHMARK_ADVANCED(name::serial(name::CREATE_AGAIN))(Catch::Benchmark::Chronometer meter) {
+    auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
+    std::vector<Entity> entities(ENTITY_COUNT);
+    for (auto &world: worlds) {
+      for (Entity &entity: entities) {
+        entity = world->create();
+        world->emplace<Position>(entity, 0.0f, 1.0f);
+        world->emplace<Velocity>(entity, 1.0f, 2.0f);
+      }
+      world->destroy(std::span<const Entity>{entities});
+    }
+    meter.measure([&](int run) {
+      auto &world = *worlds[static_cast<size_t>(run)];
+      for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+        const Entity entity = world.create();
+        world.emplace<Position>(entity, static_cast<float>(i), 1.0f);
+        world.emplace<Velocity>(entity, 1.0f, 2.0f);
+      }
+    });
+  };
+  BENCHMARK_ADVANCED(name::serial(name::CREATE_BATCH_AGAIN))(Catch::Benchmark::Chronometer meter) {
+    auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
+    std::vector<Entity> entities(ENTITY_COUNT);
+    for (auto &world: worlds) {
+      world->create(entities, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
+      world->destroy(std::span<const Entity>{entities});
+    }
+    meter.measure([&](int run) {
+      create_all(*worlds[static_cast<size_t>(run)], ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
+    });
+  };
+
   {
     // One system, whose threads create their entities in pages of their own
     // and give them components right away.
