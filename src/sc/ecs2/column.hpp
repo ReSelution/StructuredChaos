@@ -174,8 +174,8 @@ namespace sc::ecs2::internal {
       // Which of them a thread is making the component for with tryEmplace:
       // it is that thread's to make, and not in the mask before it is made.
       // Also set while erase destroys a component, so that the next one is
-      // not made in its place before it is gone, and while emplaceOrReplace
-      // makes or assigns one.
+      // not made in its place before it is gone, while emplaceOrReplace
+      // makes or assigns one, and while modify changes one.
       std::array<std::atomic<uint64_t>, PAGE_WORDS> making;
       // Which words of the mask may have a bit set: a loop only looks at
       // these. Set with the first bit of a word, but only cleared when the
@@ -437,6 +437,58 @@ namespace sc::ecs2::internal {
       }
       making.fetch_and(~bit, std::memory_order_release);
       return made ? Emplaced::Made : Emplaced::Replaced;
+    }
+
+    // Calls the function with the component at the index while it holds the
+    // making bit. Another thread that modifies the same index waits, as do
+    // emplaceOrReplace and erase of a component that DESTROYS, so of two
+    // threads that change the same component, the second sees what the first
+    // did. False, without a call, if the index has no component. Counted in
+    // the page while the function runs, as in emplaceOrReplace: erase of a
+    // component without DESTROYS takes no bit, and if it took the last one of
+    // the page, the page could give its memory back under the function.
+    //
+    // Loops and get do not take the bit, so nothing may read or write the
+    // component at the index past modify while it may run.
+    template<typename Function>
+    bool modify(uint32_t index, Function &&function) {
+      static_assert(HAS_VALUE, "a component without members has no value to modify");
+      static_assert(std::is_invocable_v<Function &, T &>, "the function takes the component by reference");
+      assert(index < INDEX_LIMIT);
+      const uint32_t number = index >> PAGE_BITS;
+      Header *const found = findHeader(number);
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      // Mostly the answer, and without a locked instruction.
+      if (found == nullptr || !has(*found, slot)) {
+        return false;
+      }
+      Header &header = *found;
+      std::atomic<uint64_t> &making = header.making[slot / 64];
+      const uint64_t bit = uint64_t{1} << (slot % 64);
+      // Not for long, as in erase.
+      while ((making.fetch_or(bit, std::memory_order_acq_rel) & bit) != 0) {
+        std::this_thread::yield();
+      }
+      bool called = false;
+      try {
+        occupy(header, number, 1);
+        try {
+          // Asked again under the bit: an erase may have taken it meanwhile.
+          if (has(header, slot)) {
+            function(*valueAt(index));
+            called = true;
+          }
+        } catch (...) {
+          forsake(header, number, 1);
+          throw;
+        }
+        forsake(header, number, 1);
+      } catch (...) {
+        making.fetch_and(~bit, std::memory_order_release);
+        throw;
+      }
+      making.fetch_and(~bit, std::memory_order_release);
+      return called;
     }
 
     // Says that so many components are about to be added. In a world of

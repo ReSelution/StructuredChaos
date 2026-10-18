@@ -58,6 +58,30 @@ namespace sc::ecs2::internal {
 #endif
   };
 
+#ifndef NDEBUG
+  // Set while a thread runs the function of World::modify.
+  inline thread_local bool inModify = false;
+#endif
+
+  // Has inModify set for as long as it exists, after asserting it was not:
+  // a function of modify that calls modify for another entity holds one bit
+  // and waits for the next, and a thread that does the same the other way
+  // round waits for it. Nothing in release builds.
+  class Modifying {
+  public:
+#ifndef NDEBUG
+    Modifying() noexcept {
+      assert(!inModify && "sc::ecs2: modify within modify, which can wait for a thread that waits for this one");
+      inModify = true;
+    }
+    ~Modifying() { inModify = false; }
+#else
+    Modifying() noexcept = default;
+#endif
+    Modifying(const Modifying &) = delete;
+    Modifying &operator=(const Modifying &) = delete;
+  };
+
   // Whether get may hand out a component of this type here: for reading
   // always, for writing not in a parallel loop.
   template<typename Component>
@@ -324,6 +348,26 @@ namespace sc::ecs2 {
     Emplaced tryEmplace(Entity entity, Args &&...args) {
       assert(valid(entity));
       return column<Component>().tryEmplace(indexOf(entity), std::forward<Args>(args)...);
+    }
+
+    // Calls the function with the component of the entity, locked against
+    // other threads that modify it at the same time: of two threads that deal
+    // damage to the same target, the second sees the health the first left.
+    // False, without a call, if the entity does not have the component.
+    //
+    //   world.modify<Health>(target, [](Health &health) { health.value -= 10; });
+    //
+    // Within a parallel loop the way to change a component of another
+    // entity, which get does not allow there. Only safe while nothing reads
+    // or writes the component without modify at the same time: not the
+    // function of a loop that takes it. The function must not call modify
+    // itself, which is asserted. See Column::modify.
+    template<typename Component, typename Function>
+    bool modify(Entity entity, Function &&function) {
+      static_assert(!std::is_const_v<Component>, "modify is for writing; a const component is read with get");
+      assert(valid(entity));
+      [[maybe_unused]] const internal::Modifying modifying;
+      return column<Component>().modify(indexOf(entity), std::forward<Function>(function));
     }
 
     // The entity must exist. False if it did not have the component, or if

@@ -184,6 +184,23 @@ namespace sc::ecs2::internal {
     std::mutex m_mutex;
   };
 
+  // Defined below, with the parameters of systems.
+  template<typename F>
+  struct SystemSignature;
+
+  // The component a function for Modify takes: its only parameter.
+  template<typename Params>
+  struct OnlyParam {
+    static_assert(sizeof(Params) == 0, "the function takes the component, and nothing else");
+  };
+  template<typename Param>
+  struct OnlyParam<List<Param>> {
+    using Type = std::remove_cvref_t<Param>;
+  };
+
+  template<typename F>
+  using ModifiedBy = typename OnlyParam<typename SystemSignature<F>::Params>::Type;
+
 } // namespace sc::ecs2::internal
 
 namespace sc::ecs2 {
@@ -303,6 +320,43 @@ namespace sc::ecs2 {
       requires named<Component>
     [[nodiscard]] bool contains(Entity entity) const {
       return m_world->template contains<Component>(entity);
+    }
+
+  private:
+    World *m_world;
+  };
+
+  // Lets a system change the values of the components it names, on any
+  // entity, right away and from several threads for the same one:
+  //
+  //   scheduler.addParallel([](Modify<Health> modify, const Target &target) {
+  //     modify(target.entity, [](Health &health) { health.value -= 10; });
+  //   });
+  //
+  // To the scheduler this is writing the components, so no other system uses
+  // them at the same time. Within the system modify locks a component and
+  // nothing else does, so nothing else may use them: the function of a
+  // parallel loop does not take them as parameters, and no query of the
+  // system names them, not even for reading. Both are checked when the
+  // system is added. To read such a component, read it in the function of
+  // modify.
+  template<typename... Components>
+  class Modify {
+    static_assert((!std::is_const_v<Components> && ...), "Modify is for writing; a const component is read with Query");
+
+    template<typename Component>
+    static constexpr bool named = (std::same_as<Component, Components> || ...);
+
+  public:
+    explicit Modify(World &world) : m_world(&world) {}
+
+    // See World::modify. The component is the one the function takes, by
+    // reference.
+    template<typename Function>
+    bool operator()(Entity entity, Function &&function) const { // NOLINT(modernize-use-nodiscard)
+      using Component = internal::ModifiedBy<std::decay_t<Function>>;
+      static_assert(named<Component>, "the function takes a component the Modify names");
+      return m_world->template modify<Component>(entity, std::forward<Function>(function));
     }
 
   private:
@@ -458,6 +512,13 @@ namespace sc::ecs2::internal {
     static Change<Components...> fetch(const SystemContext &context) { return Change<Components...>{context.world}; }
   };
 
+  template<typename... Components>
+  struct SystemParam<Modify<Components...>> {
+    static void declare(SystemAccess &access) { (access.add(componentIndex<Components>(), true), ...); }
+
+    static Modify<Components...> fetch(const SystemContext &context) { return Modify<Components...>{context.world}; }
+  };
+
   template<>
   struct SystemParam<Commands> {
     static void declare(SystemAccess &access) { access.commands = true; }
@@ -503,6 +564,8 @@ namespace sc::ecs2::internal {
   inline constexpr bool isLoopExtra = false;
   template<typename... Components>
   inline constexpr bool isLoopExtra<Change<Components...>> = true;
+  template<typename... Components>
+  inline constexpr bool isLoopExtra<Modify<Components...>> = true;
   template<>
   inline constexpr bool isLoopExtra<Commands> = true;
   template<typename... Terms>
@@ -539,6 +602,55 @@ namespace sc::ecs2::internal {
   using TermOf =
       std::conditional_t<std::is_lvalue_reference_v<Param> && !std::is_const_v<std::remove_reference_t<Param>>,
                          std::remove_reference_t<Param>, const std::remove_cvref_t<Param>>;
+
+  template<typename... Lists>
+  struct Concat {
+    using Type = List<>;
+  };
+  template<typename... Items>
+  struct Concat<List<Items...>> {
+    using Type = List<Items...>;
+  };
+  template<typename... First, typename... Second, typename... Rest>
+  struct Concat<List<First...>, List<Second...>, Rest...> : Concat<List<First..., Second...>, Rest...> {};
+
+  // The components a parameter of a system names for modify.
+  template<typename Param>
+  struct ModifiedOf {
+    using Type = List<>;
+  };
+  template<typename... Components>
+  struct ModifiedOf<Modify<Components...>> {
+    using Type = List<Components...>;
+  };
+
+  // The components a parameter of a system reads or writes without modify:
+  // those a query gets. Excluded ones are only looked up in the mask, which
+  // modify does not change.
+  template<typename Param>
+  struct GottenOf {
+    using Type = List<>;
+  };
+  template<typename... Terms>
+  struct GottenOf<Query<Terms...>> {
+    using Type = typename Split<List<>, List<>, Terms...>::GetList;
+  };
+
+  template<typename Component, typename... Gotten>
+  inline constexpr bool isGotten = (std::same_as<Component, std::remove_const_t<Gotten>> || ...);
+
+  template<typename Modified, typename Gotten>
+  inline constexpr bool overlaps = false;
+  template<typename... Modified, typename... Gotten>
+  inline constexpr bool overlaps<List<Modified...>, List<Gotten...>> = (isGotten<Modified, Gotten...> || ...);
+
+  // Whether a system with these parameters uses a component it modifies
+  // also past modify, which takes no lock: through a query, or as a
+  // component of its loop, which comes as a query as well.
+  template<typename... Params>
+  inline constexpr bool usesModifiedOtherwise =
+      overlaps<typename Concat<typename ModifiedOf<std::remove_cvref_t<Params>>::Type...>::Type,
+               typename Concat<typename GottenOf<std::remove_cvref_t<Params>>::Type...>::Type>;
 
   // Calls the function for every item, for more than one item on the thread
   // pool, and returns once all calls are done. Rethrows the first exception.
@@ -584,6 +696,7 @@ namespace sc::ecs2 {
   //
   //   void move(Query<Position, const Velocity> query);   // writes Position, reads Velocity
   //   void freeze(Query<const Health> query, Change<Frozen> change);   // adds and removes Frozen
+  //   void hit(Query<const Target> query, Modify<Health> modify);   // changes Health of any entity, locked
   //   void reap(Query<const Lifetime> query, Commands commands);   // destroys entities, later
   //   void load(World &world);                             // may do anything, runs alone
   //
@@ -608,11 +721,15 @@ namespace sc::ecs2 {
     //
     // A component taken by reference to non-const is written, any other one is
     // only read. Before the components, the function may take the entity and,
-    // after it, Change, Commands and queries, the latter to look at entities
-    // other than its own:
+    // after it, Change, Commands, Modify and queries, the last two for
+    // entities other than its own:
     //
     //   scheduler.addParallel([](Entity entity, Commands commands, const Health &health) { ... });
     //   scheduler.addParallel([](Query<const Health> others, const Target &target) { ... });
+    //   scheduler.addParallel([](Modify<Health> modify, const Target &target) { ... });
+    //
+    // A query there only reads: the other threads of the loop may be at the
+    // same entity, and get asserts in debug builds. To write, Modify.
     //
     // grain is the number of pages a thread takes at a time.
     template<typename F>
@@ -737,6 +854,9 @@ namespace sc::ecs2 {
 
     template<typename F, typename... Params>
     Scheduler &addSystem(F &&system, const std::string &name, internal::List<Params...>) {
+      static_assert(!internal::usesModifiedOtherwise<Params...>,
+                    "a component the system modifies is not also taken by its loop or named by its queries: modify "
+                    "locks it and they do not; read it in the function of modify");
       internal::SystemAccess access;
       (internal::SystemParamFor<Params>::declare(access), ...);
       if (sizeof...(Params) == 0) {

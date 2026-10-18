@@ -18,6 +18,7 @@ namespace {
   using sc::ecs2::Commands;
   using sc::ecs2::Entity;
   using sc::ecs2::Exclude;
+  using sc::ecs2::Modify;
   using sc::ecs2::PAGE_SIZE;
   using sc::ecs2::Query;
   using sc::ecs2::Scheduler;
@@ -130,6 +131,14 @@ TEST_CASE("ECS2 Scheduler Stages", "[ecs2][scheduler]") {
     scheduler.add([](Query<const Health>) {});
     scheduler.add([](Query<const Position>, Change<Frozen>) {});
     REQUIRE(scheduler.stages() == Stages{{0, 2}, {1}});
+  }
+
+  SECTION("Modifying A Component Counts As Writing It") {
+    scheduler.add([](Query<const Position>, Modify<Health>) {});
+    scheduler.add([](Query<const Health>) {});
+    scheduler.add([](Query<const Position>, Modify<Spawner, Target>) {});
+    scheduler.addParallel([](Modify<Target>, const Velocity &) {});
+    REQUIRE(scheduler.stages() == Stages{{0, 2}, {1, 3}});
   }
 
   SECTION("Commands Keep Nobody Waiting") {
@@ -388,6 +397,28 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     }
     for (size_t i = 0; i < targets; ++i) {
       REQUIRE(world.get<Spawner>(entities[i]).count == 5);
+    }
+  }
+
+  SECTION("A Loop Modifies Entities That Other Threads Go For As Well") {
+    // Every entity hits one of a few, as do many on other threads, and
+    // every hit counts.
+    constexpr size_t targets = 10;
+    std::atomic<size_t> missed = 0;
+    scheduler.addParallel([&](Modify<Health, Spawner> modify, const Position &pos) {
+      const Entity target = entities[static_cast<size_t>(pos.x) % targets];
+      modify(target, [](Health &health) { health.value -= 1; });
+      // No entity has one.
+      missed += !modify(target, [](Spawner &spawner) { ++spawner.count; });
+    });
+    scheduler.run(world);
+    scheduler.run(world);
+
+    REQUIRE(missed == 2 * entities.size());
+    for (size_t i = 0; i < entities.size(); ++i) {
+      // How many entities hit it, twice each.
+      const int hits = i < targets ? static_cast<int>((entities.size() - i + targets - 1) / targets) : 0;
+      REQUIRE(world.get<Health>(entities[i]).value == 100 - (2 * hits));
     }
   }
 

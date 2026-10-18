@@ -682,6 +682,100 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(usedPages(world.column<Position>()) == 0);
   }
 
+  SECTION("A Component Is Modified In Place") {
+    const Entity entity = world.create();
+    const Entity without = world.create();
+    world.emplace<Position>(entity, 1.0f, 2.0f);
+    const Position *const before = &world.get<Position>(entity);
+    REQUIRE(world.modify<Position>(entity, [](Position &position) { position.x += 10.0f; }));
+    REQUIRE(world.get<Position>(entity).x == 11.0f);
+    REQUIRE(&world.get<Position>(entity) == before);
+
+    // No call for an entity without it.
+    bool called = false;
+    REQUIRE_FALSE(world.modify<Position>(without, [&](Position &) { called = true; }));
+    REQUIRE_FALSE(called);
+    REQUIRE_FALSE(world.modify<Velocity>(entity, [&](Velocity &) { called = true; }));
+    REQUIRE_FALSE(called);
+
+    // A function that throws leaves what it changed, and the component
+    // unlocked for the next one.
+    REQUIRE_THROWS_AS(world.modify<Position>(entity,
+                                             [](Position &position) {
+                                               position.y = 5.0f;
+                                               throw std::runtime_error("modify");
+                                             }),
+                      std::runtime_error);
+    REQUIRE(world.get<Position>(entity).y == 5.0f);
+    REQUIRE(world.modify<Position>(entity, [](Position &position) { position.y += 1.0f; }));
+    REQUIRE(world.get<Position>(entity).y == 6.0f);
+    REQUIRE(world.column<Position>().page(0).count == 1);
+
+    // One that owns something.
+    const auto alive = std::make_shared<int>(0);
+    world.emplace<Named>(entity, "named", alive);
+    REQUIRE(world.modify<Named>(entity, [](Named &named) { named.name += " again"; }));
+    REQUIRE(world.get<Named>(entity).name == "named again");
+    REQUIRE(alive.use_count() == 2);
+  }
+
+  SECTION("Threads Modify The Same Components Without Losing A Change") {
+    // Few, so that the threads keep meeting at the same ones.
+    std::vector<Entity> targets(8);
+    for (Entity &target: targets) {
+      target = world.create();
+      world.emplace<Position>(target);
+    }
+    // And some that come and go meanwhile, which owns something as well.
+    const auto alive = std::make_shared<int>(0);
+    std::vector<Entity> others(64);
+    for (Entity &other: others) {
+      other = world.create();
+    }
+
+    constexpr size_t chunks = 16;
+    constexpr int rounds = 2000;
+    std::atomic<size_t> missed = 0;
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        for (int round = 0; round < rounds; ++round) {
+          for (const Entity target: targets) {
+            world.modify<Position>(target, [](Position &position) { position.x += 1.0f; });
+          }
+          const Entity other = others[(chunk + static_cast<size_t>(round)) % others.size()];
+          switch ((chunk + static_cast<size_t>(round)) % 3) {
+            case 0:
+              world.tryEmplace<Named>(other, "n", alive);
+              world.tryEmplace<Velocity>(other, 1.0f, 0.0f);
+              break;
+            case 1:
+              missed += !world.modify<Named>(other, [](Named &named) { named.name += "m"; });
+              world.modify<Velocity>(other, [](Velocity &velocity) { velocity.dy += 1.0f; });
+              break;
+            default:
+              world.erase<Named>(other);
+              world.erase<Velocity>(other);
+              break;
+          }
+        }
+      }
+    });
+    // Every change of every thread is there.
+    for (const Entity target: targets) {
+      REQUIRE(world.get<Position>(target).x == static_cast<float>(chunks * rounds));
+    }
+    size_t named = 0;
+    world.each<const Named>([&](const Named &) { ++named; });
+    REQUIRE(alive.use_count() == 1 + static_cast<long>(named));
+    REQUIRE(world.column<Named>().page(0).count == named);
+    for (const Entity other: others) {
+      world.erase<Named>(other);
+      world.erase<Velocity>(other);
+    }
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE(usedPages(world.column<Named>()) == 0);
+  }
+
   SECTION("Threads Add The First And Remove The Last Component Of A Page") {
     // So few that the page gets its memory and gives it back all the time.
     constexpr size_t chunks = 8;
