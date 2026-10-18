@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <mutex>
 #include <span>
 #include <stdexcept>
@@ -258,7 +259,9 @@ namespace sc::ecs2::internal {
     // function with every run of indices it handed out, as (first index,
     // count): what destroy gave back in the rows it lies in, the rest in rows
     // as long as the pages of the thread allow. For a thread outside the pool
-    // the function is called under the lock of withShare.
+    // the function is called under the lock of withShare. If the function
+    // throws, every entity of the span is made all the same, the function is
+    // not called again, and the exception is thrown on.
     //
     // The indices given back are taken all at once, and every row of them
     // goes to the function in one call: one by one, a column made every one
@@ -297,6 +300,21 @@ namespace sc::ecs2::internal {
 
     template<typename Function>
     void create(std::span<Entity> entities, Area &in, uint32_t area, Function &run) {
+      // Once the function threw, the entities are made all the same, without
+      // it, and the exception goes on afterwards: stopped there, the indices
+      // taken from the free list after it were lost, and the new ones of the
+      // run it threw in were handed out once more by the next create.
+      std::exception_ptr failed;
+      const auto give = [&](uint32_t first, uint32_t count) {
+        if (failed) {
+          return;
+        }
+        try {
+          run(first, count);
+        } catch (...) {
+          failed = std::current_exception();
+        }
+      };
       size_t made = 0;
       const std::span<const uint32_t> reused = in.free.takeMany(entities.size());
       for (size_t i = 0; i < reused.size();) {
@@ -308,14 +326,11 @@ namespace sc::ecs2::internal {
         for (uint32_t k = 0; k < count; ++k) {
           entities[made + k] = makeEntity(first + k, *generation(first + k));
         }
-        run(first, count);
+        give(first, count);
         made += count;
         i += count;
       }
 
-      if (made == entities.size()) {
-        return;
-      }
       withShare(in, [&](Share &share) {
         while (made < entities.size()) {
           if (share.next == share.end) {
@@ -326,11 +341,14 @@ namespace sc::ecs2::internal {
           for (uint32_t i = 0; i < count; ++i) {
             entities[made + i] = makeEntity(share.next + i, 0);
           }
-          run(share.next, count);
+          give(share.next, count);
           share.next += count;
           made += count;
         }
       });
+      if (failed) {
+        std::rethrow_exception(failed);
+      }
     }
 
   public:

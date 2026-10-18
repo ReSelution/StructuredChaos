@@ -531,31 +531,56 @@ namespace sc::ecs2::internal {
     void fill(uint32_t index, uint32_t count, [[maybe_unused]] const T &value) {
       assert(size_t{index} + count <= INDEX_LIMIT);
       while (count != 0) {
-        const uint32_t number = index >> PAGE_BITS;
-        Header &header = makeHeader(number);
-        const uint32_t slot = index & (PAGE_SIZE - 1);
-        const uint32_t here = std::min(count, PAGE_SIZE - slot);
-        occupy(header, number, slot, here);
+        const uint32_t here = std::min(count, PAGE_SIZE - (index & (PAGE_SIZE - 1)));
+        [[maybe_unused]] T *const values = startRun(index, here);
         if constexpr (HAS_VALUE) {
           try {
-            std::uninitialized_fill_n(valueAt(index), here, value);
+            std::uninitialized_fill_n(values, here, value);
           } catch (...) {
             // The ones before stay, these are all gone again.
-            forsake(header, number, here);
+            abandonRun(index, here);
             throw;
           }
         }
-        for (uint32_t bit = slot; bit < slot + here;) {
-          const uint32_t width = std::min(64 - (bit % 64), slot + here - bit);
-          const uint64_t bits = (width == 64 ? ~uint64_t{0} : (uint64_t{1} << width) - 1) << (bit % 64);
-          [[maybe_unused]] const uint64_t before = header.mask[bit / 64].fetch_or(bits, std::memory_order_relaxed);
-          assert((before & bits) == 0);
-          markWord(header, bit / 64);
-          bit += width;
-        }
+        finishRun(index, here);
         index += here;
         count -= here;
       }
+    }
+
+    // fill in three steps, for values that are made one by one: startRun
+    // counts count indices in a row from index on, all in one page and none
+    // with the component yet, and gives the place of their values (null for
+    // a component without members); once every value is made there,
+    // finishRun gives them the component. If making one throws, the caller
+    // destroys those it made and calls abandonRun instead.
+    [[nodiscard]] T *startRun(uint32_t index, uint32_t count) {
+      assert(count != 0 && (index & (PAGE_SIZE - 1)) + count <= PAGE_SIZE);
+      const uint32_t number = index >> PAGE_BITS;
+      occupy(makeHeader(number), number, index & (PAGE_SIZE - 1), count);
+      if constexpr (HAS_VALUE) {
+        return valueAt(index);
+      } else {
+        return nullptr;
+      }
+    }
+
+    void finishRun(uint32_t index, uint32_t count) noexcept {
+      Header &header = headers()[index >> PAGE_BITS];
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      for (uint32_t bit = slot; bit < slot + count;) {
+        const uint32_t width = std::min(64 - (bit % 64), slot + count - bit);
+        const uint64_t bits = (width == 64 ? ~uint64_t{0} : (uint64_t{1} << width) - 1) << (bit % 64);
+        [[maybe_unused]] const uint64_t before = header.mask[bit / 64].fetch_or(bits, std::memory_order_relaxed);
+        assert((before & bits) == 0);
+        markWord(header, bit / 64);
+        bit += width;
+      }
+    }
+
+    void abandonRun(uint32_t index, uint32_t count) noexcept {
+      const uint32_t number = index >> PAGE_BITS;
+      forsake(headers()[number], number, count);
     }
 
     bool erase(uint32_t index) noexcept override {

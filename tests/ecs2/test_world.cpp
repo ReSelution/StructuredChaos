@@ -500,6 +500,47 @@ TEST_CASE("World Components", "[ecs2][world]") {
   sc::threading::init();
   World world{GENERATE(Pages::Auto, Pages::Huge, Pages::Small)};
 
+  SECTION("Entities Are Created All At Once With Values Of Their Own") {
+    // Over three pages, in the area of their set.
+    std::vector<Entity> entities((2 * size_t{PAGE_SIZE}) + 100);
+    const auto alive = std::make_shared<int>(0);
+    world.create<Position, Named, Tag>(entities, [&](size_t i) {
+      return std::tuple{Position{.x = static_cast<float>(i), .y = 1.0f}, Named{std::to_string(i), alive}, Tag{}};
+    });
+    size_t right = 0;
+    for (size_t i = 0; i < entities.size(); ++i) {
+      right += static_cast<size_t>(world.valid(entities[i]) && world.contains<Tag>(entities[i]) &&
+                                   world.get<const Position>(entities[i]).x == static_cast<float>(i) &&
+                                   world.get<const Named>(entities[i]).name == std::to_string(i));
+    }
+    REQUIRE(right == entities.size());
+    REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size()));
+    const Entity same = world.create(Tag{}, Position{}, Named{"", alive});
+    REQUIRE(sc::ecs2::indexOf(same) >> sc::ecs2::PAGE_BITS == sc::ecs2::indexOf(entities.back()) >> sc::ecs2::PAGE_BITS);
+
+    // A make that throws in the second page: the first one keeps its
+    // components, the second gets none, and what was made of it is gone.
+    std::vector<Entity> more((2 * size_t{PAGE_SIZE}) + 100);
+    const auto counted = std::make_shared<int>(0);
+    const auto make = [&](size_t i) {
+      if (i == PAGE_SIZE + 5) {
+        throw std::runtime_error("make");
+      }
+      return std::tuple{Named{"", counted}, Velocity{}};
+    };
+    const auto createMore = [&] { world.create<Named, Velocity>(more, make); };
+    REQUIRE_THROWS_AS(createMore(), std::runtime_error);
+    REQUIRE(counted.use_count() == 1 + static_cast<long>(PAGE_SIZE));
+    size_t first = 0;
+    size_t second = 0;
+    for (size_t i = 0; i < more.size(); ++i) {
+      REQUIRE(world.valid(more[i]));
+      (i < PAGE_SIZE ? first : second) += world.contains<Named>(more[i]) && world.contains<Velocity>(more[i]);
+    }
+    REQUIRE(first == PAGE_SIZE);
+    REQUIRE(second == 0);
+  }
+
   SECTION("Entities Are Created With Their Components All At Once") {
     // Some indices to hand out again, in no order, before the new ones.
     std::vector<Entity> gone;

@@ -7,7 +7,9 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <new>
 #include <span>
 #include <stdexcept>
 #include <tuple>
@@ -512,7 +514,10 @@ namespace sc::ecs2 {
     //
     // The same as create and emplace for each of them, only faster: the
     // columns are told how many components are coming and take them a page at
-    // a time. As safe from several threads as those two are.
+    // a time. As safe from several threads as those two are. If a copy
+    // throws, every entity of the span is made all the same, those from the
+    // page it threw in on with some or none of the components, and the
+    // exception is thrown on.
     template<typename... Components>
     void create(std::span<Entity> entities, const Components &...components) {
       (column<Components>().expect(entities.size()), ...);
@@ -524,6 +529,35 @@ namespace sc::ecs2 {
       } else {
         m_entities.create(entities, areaOf<Components...>(), fill);
       }
+    }
+
+    // An entity for every place of the span, in the area of the set, each
+    // with the components make gives for its place, as a std::tuple of them:
+    //
+    //   world.create<Position, Velocity>(bullets, [&](size_t i) {
+    //     return std::tuple{Position{x[i], y[i]}, Velocity{speed, 0.0f}};
+    //   });
+    //
+    // The values are moved into place a page at a time, as create of copies
+    // does. If make throws, every entity of the span is made all the same,
+    // those from the page it threw in on without components, and the
+    // exception is thrown on.
+    template<typename... Components, typename Make>
+      requires(sizeof...(Components) != 0 && std::is_invocable_v<Make &, size_t>)
+    void create(std::span<Entity> entities, Make &&make) {
+      static_assert((std::is_nothrow_move_constructible_v<Components> && ...),
+                    "the components are moved into place, where nothing may be thrown");
+      (column<Components>().expect(entities.size()), ...);
+      size_t done = 0;
+      m_entities.create(entities, areaOf<Components...>(), [&](uint32_t first, uint32_t count) {
+        while (count != 0) {
+          const uint32_t here = std::min(count, PAGE_SIZE - (first & (PAGE_SIZE - 1)));
+          makeRun<Components...>(first, here, done, make);
+          first += here;
+          count -= here;
+          done += here;
+        }
+      });
     }
 
     // An entity that is unlike most others, see Rare. It is an entity like any
@@ -845,6 +879,36 @@ namespace sc::ecs2 {
   private:
     // How many entities a loop needs before another thread helps with it.
     static constexpr size_t ENTITIES_PER_THREAD = 1024;
+
+    // The values of count entities from index first on, in one page, made
+    // by make for the places from place on.
+    template<typename... Components, typename Make>
+    void makeRun(uint32_t first, uint32_t count, size_t place, Make &make) {
+      const std::tuple values{column<Components>().startRun(first, count)...};
+      [&]<size_t... C>(std::index_sequence<C...>) {
+        uint32_t made = 0;
+        try {
+          for (; made < count; ++made) {
+            std::tuple<Components...> components = make(place + made);
+            (construct(std::get<C>(values), made, std::get<C>(components)), ...);
+          }
+        } catch (...) {
+          ((std::get<C>(values) != nullptr ? std::destroy_n(std::get<C>(values), made) : nullptr), ...);
+          (column<Components>().abandonRun(first, count), ...);
+          throw;
+        }
+        (column<Components>().finishRun(first, count), ...);
+      }(std::index_sequence_for<Components...>{});
+    }
+
+    // Moves a component to its place among the values of a page; nothing for
+    // a component without members.
+    template<typename Component>
+    static void construct(Component *values, uint32_t at, Component &component) noexcept {
+      if constexpr (ColumnOf<Component>::HAS_VALUE) {
+        ::new (static_cast<void *>(values + at)) Component(std::move(component));
+      }
+    }
 
     // The area of a set of components in this world, given the next one free
     // the first time.
