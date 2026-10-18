@@ -81,6 +81,7 @@ namespace compare {
 
   // The work of the systems, the same for every library.
   inline void nudge(Position &pos) { pos.x += DT; }
+  inline void heal(Health &health) { health.value = std::min(100.0f, health.value + DT); }
   inline void integrate(Position &pos, const Velocity &vel) {
     pos.x += vel.dx * DT;
     pos.y += vel.dy * DT;
@@ -276,6 +277,13 @@ namespace compare {
     inline constexpr const char *ITERATE_TRANSFORM = "iterate 64 bytes, all of them used";
     inline constexpr const char *ITERATE_BODY = "iterate 256 bytes, 4 of them used";
     inline constexpr const char *ITERATE_HEAVY = "iterate both, 4 bytes of each used";
+
+    // The worlds of SETS_AFTER_WORLD and SETS_WITH_WORLD: the first set (a
+    // third of the entities), the second one by its own component, and the
+    // component all of them have.
+    inline constexpr const char *ITERATE_SET_1 = "iterate the 1st set, Position and Velocity";
+    inline constexpr const char *ITERATE_SET_2 = "iterate the 2nd set, Health";
+    inline constexpr const char *ITERATE_SETS_ALL = "iterate the component of all 3 sets, Position";
   } // namespace name
 
   // Names of the test cases, the sections of the report. They state
@@ -286,6 +294,13 @@ namespace compare {
   inline constexpr const char *STEADY_WORLD = "100 000 entities in use, 1 000 replaced and 1 000 changed per frame";
 
   inline constexpr const char *HEAVY_WORLD = "100 000 entities with components of 64 and 256 bytes";
+
+  // ENTITY_COUNT entities in three sets of components, created in turn:
+  // Position and Velocity, Position and Health, Position alone. Given their
+  // components after create, the way every library can, or created with
+  // them, with what a library has for that (for sc2 an area per set).
+  inline constexpr const char *SETS_AFTER_WORLD = "100 000 entities in 3 sets, given their components after create";
+  inline constexpr const char *SETS_WITH_WORLD = "100 000 entities in 3 sets, created with their components";
 
   // The benchmarks of HEAVY_WORLD on a world of a library, which is a type
   // with
@@ -433,6 +448,9 @@ namespace compare {
     inline constexpr const char *HEAVY = "100 000 entities with 2 components of 64 and 256 bytes";
     // The world of STEADY_WORLD after all of its frames.
     inline constexpr const char *STEADY = "100 000 entities in use after 2 200 frames";
+    // The worlds of SETS_AFTER_WORLD and SETS_WITH_WORLD.
+    inline constexpr const char *SETS_AFTER = "100 000 entities in 3 sets given their components after create";
+    inline constexpr const char *SETS_WITH = "100 000 entities in 3 sets created with their components";
   } // namespace memory
 
   // The bytes of the process that are in memory right now. Counts whatever a

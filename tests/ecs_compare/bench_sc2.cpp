@@ -554,6 +554,79 @@ TEST_CASE(HEAVY_WORLD, "[ecs_compare][!benchmark]") {
   run_heavy<Heavy>();
 }
 
+namespace {
+
+  // Entity i gets set i % 3, see SETS_AFTER_WORLD: with create and emplace,
+  // or created with its components, which puts every set in an area of its
+  // own.
+  std::unique_ptr<sc::ecs2::World> make_sets(bool with) {
+    auto world = std::make_unique<sc::ecs2::World>(PAGES);
+    for (size_t i = 0; i < ENTITY_COUNT; ++i) {
+      const Position pos{static_cast<float>(i), 1.0f};
+      if (with) {
+        switch (i % 3) {
+          case 0: (void)world->create(pos, Velocity{1.0f, 2.0f}); break;
+          case 1: (void)world->create(pos, Health{50.0f}); break;
+          default: (void)world->create(pos);
+        }
+        continue;
+      }
+      const Entity entity = world->create();
+      world->emplace<Position>(entity, pos);
+      switch (i % 3) {
+        case 0: world->emplace<Velocity>(entity, 1.0f, 2.0f); break;
+        case 1: world->emplace<Health>(entity, 50.0f); break;
+        default: break;
+      }
+    }
+    return world;
+  }
+
+  void run_sets(bool with) {
+    const auto made = make_sets(with);
+    sc::ecs2::World &world = *made;
+    size_t first = 0;
+    size_t second = 0;
+    size_t all = 0;
+    world.each<const Position, const Velocity>([&](const Position &, const Velocity &) { ++first; });
+    world.each<const Health>([&](const Health &) { ++second; });
+    world.each<const Position>([&](const Position &) { ++all; });
+    REQUIRE(first == (ENTITY_COUNT + 2) / 3);
+    REQUIRE(second == (ENTITY_COUNT + 1) / 3);
+    REQUIRE(all == ENTITY_COUNT);
+
+    BENCHMARK(name::serial(name::ITERATE_SET_1)) {
+      world.each<Position, const Velocity>([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+    };
+    BENCHMARK(name::serial(name::ITERATE_SET_2)) {
+      world.each<Health>([](Health &health) { heal(health); });
+    };
+    BENCHMARK(name::serial(name::ITERATE_SETS_ALL)) {
+      world.each<Position>([](Position &pos) { nudge(pos); });
+    };
+    Scheduler set1;
+    set1.addParallel([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+    BENCHMARK(name::parallel(name::ITERATE_SET_1)) { set1.run(world); };
+    Scheduler set2;
+    set2.addParallel([](Health &health) { heal(health); });
+    BENCHMARK(name::parallel(name::ITERATE_SET_2)) { set2.run(world); };
+    Scheduler sets;
+    sets.addParallel([](Position &pos) { nudge(pos); });
+    BENCHMARK(name::parallel(name::ITERATE_SETS_ALL)) { sets.run(world); };
+  }
+
+} // namespace
+
+TEST_CASE(SETS_AFTER_WORLD, "[ecs_compare][!benchmark]") {
+  sc::threading::init(thread_count() - 1);
+  run_sets(false);
+}
+
+TEST_CASE(SETS_WITH_WORLD, "[ecs_compare][!benchmark]") {
+  sc::threading::init(thread_count() - 1);
+  run_sets(true);
+}
+
 // The memory of the worlds, see memory in common.hpp.
 TEST_CASE(memory::MOVING, "[ecs_compare][.memory]") {
   report_memory<World>(memory::MOVING, ENTITY_COUNT, &World::fill_moving);
@@ -567,3 +640,9 @@ TEST_CASE(memory::LARGE, "[ecs_compare][.memory]") {
 }
 TEST_CASE(memory::HEAVY, "[ecs_compare][.memory]") { report_heavy_memory<Heavy>(); }
 TEST_CASE(memory::STEADY, "[ecs_compare][.memory]") { report_steady_memory<Steady>(); }
+TEST_CASE(memory::SETS_AFTER, "[ecs_compare][.memory]") {
+  report_memory(memory::SETS_AFTER, [] { return make_sets(false); });
+}
+TEST_CASE(memory::SETS_WITH, "[ecs_compare][.memory]") {
+  report_memory(memory::SETS_WITH, [] { return make_sets(true); });
+}
