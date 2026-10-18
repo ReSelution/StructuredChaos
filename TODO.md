@@ -321,8 +321,12 @@ it already (own pages at the top of the index space).
   the reworked create benchmark of ecs_benchmark measures, with reused indices).
 - [x] **Threads:** a `Share` per thread and area (129 per area, 8 KiB). Pages are handed out under a lock, once per
   4096 entities, so that the row of pages the loops go through has no gap.
-- [ ] **Measure the benefit:** not done yet. Three sets created interleaved, then a loop over one of them and the
-  pages per column, `create()` + `emplace` (mixed) against `create(components...)`. Was:
+- [x] **Measure the benefit:** `SETS_AFTER_WORLD` / `SETS_WITH_WORLD` in `ecs_compare` (sc2 only so far): 100K entities
+  in three sets created in turn (Position + Velocity, Position + Health, Position), given their components after
+  `create` against created with them. µs, 5 runs, after / with: the 1st set 23.8 / 5.9 on one thread (a third of
+  the entities at the speed of full pages), 5.4 / 3.4 on all; the 2nd set 20.1 / 2.6 and 4.8 / 2.9; Position, which
+  all have, 22.8 / 23.6 and 5.3 / 5.3. Memory of the world 2.36 / 1.68 MB. Next: the same sets for the other
+  libraries, file by file; archetypes iterate like the areas but move on every emplace. Was:
 - [ ] **Measure the upper bound first:** a variant of the mixed update in which the hero entities get one contiguous
   index range (e.g. with `create(rare)` or bulk create). It shows how close sc gets to mustache/flecs with perfect
   locality; only if that pays off does the API.
