@@ -1088,10 +1088,12 @@ namespace sc::ecs2::internal {
     // it in one go held as much memory for one component in every page as for
     // a full column, 63 MB instead of 1.3 MB for 245 components of 64 bytes
     // spread over 1M entities. Not in a chunk that memory::rangeCache kept,
-    // until the page gave its memory back: the memory is there already, or
-    // offered to the OS and still there unless it took it. Writing to it is
-    // all it takes then, while fetching it in one go has the OS go through
-    // every piece of it.
+    // nor in a page that gave its memory back before (memory::decommit): the
+    // memory is there already, or offered to the OS and still there unless it
+    // took it. Writing to it is all it takes then, while fetching it in one
+    // go has the OS go through every piece of it: refilling 100 000 entities
+    // with two components took 218 instead of 157 µs. On Windows decommit
+    // takes the memory at once, but there populate does nothing anyway.
     void startPage(uint32_t number, uint32_t slot, uint32_t count, bool vacated) {
       const size_t chunk = number / CHUNK_PAGES;
       auto *const base = reinterpret_cast<std::byte *>(makeChunk(chunk));
@@ -1114,7 +1116,7 @@ namespace sc::ecs2::internal {
             regions[region].store(STARTED, std::memory_order_release);
           }
           const size_t bytes = size_t{count} * sizeof(T);
-          if ((vacated || !chunkTable()[chunk].kept) && bytes > memory::OS_PAGE_SIZE) {
+          if (!vacated && !chunkTable()[chunk].kept && bytes > memory::OS_PAGE_SIZE) {
             memory::populate(first + (size_t{slot} * sizeof(T)), bytes);
           }
           return;

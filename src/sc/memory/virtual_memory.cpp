@@ -115,9 +115,16 @@ namespace sc::memory {
     }
 #ifdef _WIN32
     VirtualFree(startOf(address, pieces), pieces.bytes, MEM_DECOMMIT);
-#else
+#elifdef MADV_FREE
     // Linux promises nothing for a range reserved with MAP_NORESERVE, so
-    // there is nothing to take back but the memory.
+    // there is nothing to take back but the memory, and that only when it is
+    // needed elsewhere, as with offer: taken back at once, a column that was
+    // emptied and filled again fetched every piece of it anew, 528 instead of
+    // 220 µs to refill 100 000 entities with two components, and emptying it
+    // took 855 instead of 765 µs.
+    madvise(startOf(address, pieces), pieces.bytes, MADV_FREE);
+#else
+    // Before Linux 4.5 there is no MADV_FREE.
     madvise(startOf(address, pieces), pieces.bytes, MADV_DONTNEED);
 #endif
   }

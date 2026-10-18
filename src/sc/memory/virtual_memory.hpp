@@ -104,10 +104,12 @@ namespace sc::memory {
   // Takes the memory of a part back from the OS and with it the promise of
   // memory for it, which on Windows counts against the commit limit for as
   // long as the part is committed. On Windows the part is not usable after
-  // this until commit is called for it again; elsewhere it stays usable, as
-  // after discard. What is in it once it is used again is not defined. Only
-  // the pieces of the OS that lie in the part as a whole are taken back, as
-  // with discard.
+  // this until commit is called for it again; elsewhere it stays usable, and
+  // on Linux the memory is offered as with offer, taken only when the OS
+  // needs it: until then it counts as the process' (Rss, with LazyFree), and
+  // using the part again costs nothing. What is in it once it is used again
+  // is not defined. Only the pieces of the OS that lie in the part as a
+  // whole are taken back, as with discard.
   void decommit(void *address, size_t bytes) noexcept;
 
   // Gives the whole range back, with the address and size it was reserved
