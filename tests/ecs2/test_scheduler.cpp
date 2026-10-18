@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <memory>
@@ -304,6 +305,52 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     size_t velocities = 0;
     world.each<const Velocity>([&](const Velocity &) { ++velocities; });
     REQUIRE(velocities == before + (spawners * perSpawner));
+  }
+
+  SECTION("Systems Spawn Entities In The Areas Of Their Sets") {
+    // Every entity with a velocity spawns three: one with its components
+    // right away, one created for them and given them after, and one
+    // through Commands.
+    scheduler.addParallel([](Change<Frozen, Spawner> change, const Velocity &) {
+      (void)change.create(Frozen{}, Spawner{1});
+      const Entity planned = change.create<Spawner, Frozen>();
+      change.emplace<Frozen>(planned);
+      change.emplace<Spawner>(planned, 2);
+    });
+    scheduler.addParallel([](Commands commands, const Velocity &) {
+      const Entity made = commands.create<Target>();
+      commands.emplace<Target>(made, 3);
+    });
+    scheduler.run(world);
+
+    size_t moving = 0;
+    world.each<const Velocity>([&](const Velocity &) { ++moving; });
+    // Which set gets its area first depends on which thread gets there
+    // first: the two systems run side by side. So per set the pages it
+    // has, which must be a few near each other, apart from the other set's
+    // and from the pages of the entities before.
+    const auto pageOf = [](Entity entity) { return sc::ecs2::indexOf(entity) >> sc::ecs2::PAGE_BITS; };
+    std::vector<uint32_t> spawnerPages;
+    std::vector<uint32_t> targetPages;
+    size_t right = 0;
+    world.each<const Frozen, const Spawner>([&](Entity entity, const Spawner &spawner) {
+      spawnerPages.push_back(pageOf(entity));
+      right += spawner.count == 1 || spawner.count == 2;
+    });
+    world.each<const Target>([&](Entity entity, const Target &target) {
+      targetPages.push_back(pageOf(entity));
+      right += target.value == 3;
+    });
+    REQUIRE(spawnerPages.size() == 2 * moving);
+    REQUIRE(targetPages.size() == moving);
+    REQUIRE(right == 3 * moving);
+    for (std::vector<uint32_t> *pages: {&spawnerPages, &targetPages}) {
+      std::ranges::sort(*pages);
+      // A page per thread at most beyond those the entities fill.
+      REQUIRE(pages->back() - pages->front() < 4 + sc::threading::threadSlots());
+      REQUIRE(pages->front() >= 1u << 17);
+    }
+    REQUIRE((spawnerPages.back() < targetPages.front() || targetPages.back() < spawnerPages.front()));
   }
 
   SECTION("Creating And Destroying Run After Run Does Not Use Up The Indices") {

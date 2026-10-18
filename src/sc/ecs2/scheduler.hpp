@@ -524,6 +524,21 @@ namespace sc::ecs2 {
     // function of a parallel loop, like World::create.
     [[nodiscard]] Entity create() const { return m_world->create(); }
 
+    // The same in the area of a set of components, see World::create: an
+    // entity a system spawns lies with the others of its kind.
+    template<typename... Set>
+      requires(sizeof...(Set) != 0)
+    [[nodiscard]] Entity create() const {
+      return m_world->template create<Set...>();
+    }
+
+    // An entity with named components, right away, in the area of their set.
+    template<typename First, typename... Rest>
+      requires(named<First> && (named<Rest> && ...))
+    [[nodiscard]] Entity create(const First &first, const Rest &...rest) const {
+      return m_world->create(first, rest...);
+    }
+
     template<typename Component, typename... Args>
       requires named<Component>
     Emplaced emplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
@@ -629,6 +644,15 @@ namespace sc::ecs2 {
     // over. Safe to call from the function of a parallel loop, like
     // World::create.
     [[nodiscard]] Entity create() const { return m_world->create(); }
+
+    // The same in the area of a set of components, see World::create: an
+    // entity a system spawns lies with the others of its kind once the
+    // recorded components are there.
+    template<typename... Set>
+      requires(sizeof...(Set) != 0)
+    [[nodiscard]] Entity create() const {
+      return m_world->template create<Set...>();
+    }
 
     // Does nothing if the entity does not exist any more by then.
     void destroy(Entity entity) const {
