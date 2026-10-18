@@ -373,8 +373,16 @@ level or faster (random `get` -4 %, damage without lock -34 %, add + remove thro
   emptied world 1 512 → 1 095 µs, all at once 539 → 174; destroy 852 → 761, all at once 752 → 674; add + remove
   904 → 795, on all threads 142 → 118; create in a new world level. Memory: the emptied pages count as Rss
   (`LazyFree`) until taken, the world after 2 200 frames 4.89 → 4.95 MB. Windows unchanged (`MEM_DECOMMIT`).
-- [ ] **create one by one in an emptied world still slower than in a new one:** 1 095 against 929 µs. Not looked
-  into; the free list hands the indices out from the back, so in falling order, perhaps that.
+- [ ] **create one by one in an emptied world still slower than in a new one:** 1 095 against 929 µs. Split up
+  (probe, 100K): `create` alone 103 µs in a new world, 248 in an emptied one; the two `emplace`s level (832 / 790).
+  The falling order of the indices is little of it (237 when emptied backwards, so that they come out rising). Most
+  is `FreeList::take`, one `fetch_sub` per create, where a new page needs none (`share.next++`).
+  - Tried and dropped: every thread takes `Share::CACHED` (13, what fits the cache line of its `Share`) indices
+    with one `fetch_sub` and hands them out from there: 248 → 141 µs, a new world level. But a thread whose cache
+    and the free list are empty takes a new page while others still hold up to 12 each, so free indices no longer
+    always come before new pages (the scheduler test "A Loop Changes Its Entity Next To Entities Created In The
+    Same Page": 4 pages instead of 3). Kept the rule; a game creates a few hundred per frame, where it is fractions
+    of a microsecond.
 
 ## Show the parallel advantage in numbers
 
