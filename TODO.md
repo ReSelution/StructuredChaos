@@ -315,6 +315,20 @@ it already (own pages at the top of the index space).
 - [ ] **Open pages per layout:** still open with areas: every thread keeps a partly filled page per area. Every layout keeps its own partly filled page. Many layouts with few entities give
   many half empty pages: more memory, and `each()` touches more pages (the summary softens it, the page loop and
   `page()` calls stay). A limit, or a fallback group for small layouts.
+- [x] **`create<Components...>()` (`08e97d5`):** picks the area by the types and makes no component; they come
+  with `emplace` afterwards. `create(components...)` stays for an entity that gets its values right away.
+- [x] **From systems (`9eb110b`):** `Change::create<Set...>()`, `Change::create(values...)` with named components and
+  `Commands::create<Set...>()`, all right away, nothing recorded. Before, everything a system spawned went to the
+  common area.
+- [x] **Many with values of their own (`33027f2`):** `create<Components...>(span, make)`, `make(i)` gives a tuple,
+  moved into place a page at a time. 100K with two components in a new world: 149 µs, against 888 with an
+  `emplace` each and 113 for copies of the same values.
+- [x] **A throw in a create of a span:** `EntityAllocator::create` stopped there, handed the new indices of that
+  run out once more and lost the reused ones after it (also `create(span, values...)` when a copy threw). Now
+  every entity is made, the exception goes on afterwards.
+- [ ] **`create(rare)` next to the areas:** rare is a fixed area (1) without a set. With sets it is mostly not
+  needed (`create<Player>()` keeps players together); it stays for entities whose components are not known at
+  create. The documentation of `Rare` should say so.
 - [x] **Reused indices:** a free list per area; a page knows its area in 16 bits. Was: one free list for common and
   one for rare entities. For a destroyed hero to make room
   for a hero again, every layout needs its own free list; otherwise the index space mixes again over time (the state
