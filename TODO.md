@@ -104,10 +104,33 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   also fight over 16 words for different entities. Anything that asks at the target during the stage stays at
   about one contended atomic (10.8 ns); only not touching it, `Commands::modify`, gets below. Kept apart instead:
   `Modify` for few hits per entity, `Commands::modify` for many, as their comments say.
-- [ ] **Apply recorded changes in parallel:** `CommandList::apply` runs the lists one after the other on one thread,
-  which is most of the 6.3 ns of a recorded change to a random target (assumed, not split up by measurement).
-  Changes to different pages could be applied by different threads if every page's changes go to one of them;
-  the order of the changes of one entity has to stay.
+- [x] **Apply recorded changes in parallel (`CommandApplier`):** after a stage the changes of all lists are sorted by
+  the page of their entity (counting sort, stable, counted and placed per segment of 64K changes on several
+  threads), and every page goes to one thread: the order of an entity's changes stays, and no other thread touches
+  the page in any column. So the erases of a page are gathered per column into a `KillPage` and done with
+  `eraseAlone`, a mask word for up to 64 entities, flushed before any emplace or modify. `eraseAlone(span)` now
+  lowers the count with `forsake`, one locked instruction per page, as other threads change other pages and a page
+  leaving the spares may look at its count. The entities to destroy go to `World::destroy(span)` at once, after all
+  changes of all lists (before: after the changes of their own list). When the lists noted while recording that all
+  their changes are in one page, there is no sorting at all. Before and after, ms, all threads unless noted:
+
+  | | before | after |
+  |---|---|---|
+  | add + remove a component, recorded (100K) | 1.60 | 0.54 |
+  | destroy entities through `Commands` (100K) | 1.01 | 0.87 |
+  | damage a random target, recorded (1M) | 6.30 | 3.60 |
+  | the same, recorded on one thread (1M) | 8.10 | 6.43 |
+  | one of 1 000 targets, recorded (1M) | 3.45 | 3.24 |
+  | the same target, recorded (1M) | 3.77 | 3.37 |
+
+  On the way: sorting on one thread made the one-page cases worse (6.2 instead of 3.4 ms, about 2.8 ms for 1M
+  changes); per list was not enough when one list had them all; and `clear` went through all changes once more to
+  drop values (32 MB for 1M), now only after an exception.
+- [ ] **Destroys of a stage over threads:** `World::destroy(span)` still runs on one thread after the changes; see
+  "Bulk destroy over threads".
+- [ ] **No write per applied change:** `applyChange` sets `finish` to null in every change it does, so that `clear`
+  after an exception knows what is left. A position per page (and one for the lists in order) would tell the same
+  without writing 1M changes back; not measured whether it matters.
 - [ ] **Listeners declare their access:** `scheduler.on<Hit>([](const Hit &, Query<const Armor>, Commands) { ... })`
   with the same `SystemParam`s as systems, and an `Emit<Hit>` parameter for the emitter whose `declare` adds the
   `SystemAccess` of every listener of `Hit`. The stages are built in `run()`, so listeners only have to be registered
