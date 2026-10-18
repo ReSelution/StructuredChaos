@@ -225,6 +225,22 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
       adder.run(world.world);
       remover.run(world.world);
     };
+
+    Scheduler recordAdd;
+    recordAdd.addParallel(
+        [](Entity entity, Commands commands, const Position &) { commands.emplace<Health>(entity, 50.0f); });
+    Scheduler recordRemove;
+    recordRemove.addParallel([](Entity entity, Commands commands, const Position &) { commands.erase<Health>(entity); });
+    recordAdd.run(world.world);
+    REQUIRE(world.world.column<Health>().pages() == world.world.column<Position>().pages());
+    REQUIRE(world.world.get<const Health>(world.entities.back()).value == 50.0f);
+    recordRemove.run(world.world);
+    REQUIRE(world.world.column<Health>().pages() == world.world.column<Health>().spares());
+    REQUIRE_FALSE(world.world.contains<Health>(world.entities.back()));
+    BENCHMARK(name::parallel(name::ADD_REMOVE_RECORDED)) {
+      recordAdd.run(world.world);
+      recordRemove.run(world.world);
+    };
   }
 
   {

@@ -219,6 +219,8 @@ namespace compare {
     // The same with what a library has for destroying many entities in one go.
     inline constexpr const char *DESTROY_BATCH = "destroy entities, all at once";
     inline constexpr const char *ADD_REMOVE = "add + remove a component";
+    // The same recorded with Commands and done once the system is over.
+    inline constexpr const char *ADD_REMOVE_RECORDED = "add + remove a component, recorded";
     inline constexpr const char *GET = "get 1 component, random order";
     inline constexpr const char *ITERATE_1 = "iterate 1 component";
     inline constexpr const char *ITERATE_2 = "iterate 2 components";
