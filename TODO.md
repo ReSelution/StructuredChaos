@@ -69,6 +69,11 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   value (see the comment on `World::parallelEach`). With `modify` the second listener and the `erase` wait, the
   component does not have to be atomic, and the SIMD loop of full pages stays as it is; only the `modify` path pays
   for the atomic.
+- [x] **`get` for writing in a parallel loop asserts:** `World::get` and `Query::get` with a non-const component
+  assert in debug builds while the thread runs the function of `parallelEach` (`internal::inParallelLoop`, set per
+  chunk, also with no helper thread). The scheduler keeps other systems away, not the other threads of the same
+  loop; reading with `get<const T>` stays allowed. Writing another entity's component there is for `modify`, which
+  does not exist yet. `World::column<T>().get` gets past it.
 - [ ] **Listeners declare their access:** `scheduler.on<Hit>([](const Hit &, Query<const Armor>, Commands) { ... })`
   with the same `SystemParam`s as systems, and an `Emit<Hit>` parameter for the emitter whose `declare` adds the
   `SystemAccess` of every listener of `Hit`. The stages are built in `run()`, so listeners only have to be registered
