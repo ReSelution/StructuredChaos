@@ -78,8 +78,23 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   before that. Needed even with `modify`: a plain system that writes the same component through `each`/`get` in the
   same stage does not take the bit, so either the scheduler knows the listener writes it, or every writer of that
   component goes through `modify`.
-- [ ] **Measure:** cost of `modify` per event, and with many threads waiting on the same target (one boss, many
-  hits), as a case in `tests/ecs_compare`.
+- [x] **Measure:** cost of `modify` per event, and with many threads waiting on the same target (one boss, many
+  hits), as a case in `tests/ecs_compare` (large world, 1M entities, each damages another by 1; Ryzen 7 5800X,
+  16 threads, clang release, median of 5 runs, ns per entity):
+
+  | | 1 thread | all threads |
+  |---|---|---|
+  | random target, `get` without lock | 3.7 | – |
+  | random target, `modify` | 6.7 | 1.4 |
+  | one of 1 000 targets, `modify` | – | 14.5 |
+  | same target, `modify` | 3.8 | 16.0 |
+  | same `std::atomic`, `fetch_add` (what the hardware takes at least) | – | 10.9 |
+
+  Uncontended `modify` costs about 3 ns over a write without lock (two locked instructions). With all threads on
+  one target it takes 1.5 times a single contended `fetch_add`. The first version also counted itself in the page
+  with `occupy`/`forsake`: 10.8, 2.1, 37.8, 7.0 and 22.2 ns. One of 1 000 targets was the worst case then, since
+  all of them lie in page 0 and every thread wrote its count. Now `vacate` keeps a page whose making bits are
+  held instead (`Column::heldHas`), and add + remove is unchanged (899 to 909 µs against 898).
 
 ## `modify` inside parallel loops: directions, not decided
 
