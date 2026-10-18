@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cassert>
 #include <concepts>
 #include <cstddef>
@@ -120,6 +121,7 @@ namespace sc::ecs2::internal {
 
     void erase(Entity entity, ColumnBase &column) {
       m_changes.push_back({.entity = entity, .column = &column, .finish = nullptr, .value = nullptr});
+      note(entity);
     }
 
     template<typename T, typename... Args>
@@ -134,6 +136,7 @@ namespace sc::ecs2::internal {
           throw;
         }
       }
+      note(entity);
     }
 
     template<typename T, typename Function>
@@ -148,6 +151,7 @@ namespace sc::ecs2::internal {
         m_changes.pop_back();
         throw;
       }
+      note(entity);
     }
 
     void destroy(Entity entity) { m_destroyed.push_back(entity); }
@@ -156,64 +160,342 @@ namespace sc::ecs2::internal {
     // they all share one list, see Commands::withList.
     [[nodiscard]] std::mutex &mutex() noexcept { return m_mutex; }
 
-    // Does what was recorded: the components in the order they were added,
-    // removed and modified, then the entities. Nothing may be running next
-    // to it. If making a component or a function of modify throws, the rest
-    // is dropped.
-    void apply(World &world) {
-      for (; m_done < m_changes.size(); ++m_done) {
-        const Change change = m_changes[m_done];
-        // Not that of an entity that got the index since.
-        const bool valid = world.valid(change.entity);
-        if (change.finish != nullptr) {
-          // Counted before: the value is gone after this, whatever happens.
-          ++m_done;
-          change.finish(*change.column, indexOf(change.entity), change.value, valid);
-          --m_done;
-        } else if (valid) {
-          change.column->erase(indexOf(change.entity));
-        }
-      }
-      for (const Entity entity: m_destroyed) {
-        world.destroy(entity);
-      }
-      clear();
-    }
-
-    // Drops what was recorded and not done.
-    void clear() noexcept {
-      for (; m_done < m_changes.size(); ++m_done) {
-        const Change &change = m_changes[m_done];
-        if (change.finish != nullptr) {
-          change.finish(*change.column, indexOf(change.entity), change.value, false);
-        }
-      }
-      m_changes.clear();
-      m_done = 0;
-      m_values.clear();
-      m_destroyed.clear();
-    }
-
-  private:
     // A component to add, remove or modify: the entity and the column of the
     // component.
     struct Change {
       Entity entity;
       ColumnBase *column;
       // finishEmplace of a component to add or finishModify of one to
-      // modify, which also drop the value; null for one to remove.
+      // modify, which also drop the value; null for one to remove, and once
+      // the change is done.
       void (*finish)(ColumnBase &column, uint32_t index, void *value, bool give);
       // The component to add, or the function of modify.
       void *value;
     };
 
+    // What was recorded, for CommandApplier.
+    [[nodiscard]] std::span<Change> changes() noexcept { return m_changes; }
+    // The page of entities all changes are in, or NO_PAGE if they are in
+    // several. Meaningless without changes.
+    [[nodiscard]] uint32_t page() const noexcept { return m_page; }
+    [[nodiscard]] std::span<const Entity> destroyed() const noexcept { return m_destroyed; }
+
+    // Forgets what was recorded once all of it is done: no value is left to
+    // drop, so without going through the changes again (1M of them are 32 MB).
+    void clearDone() noexcept {
+      m_changes.clear();
+      m_values.clear();
+      m_destroyed.clear();
+    }
+
+    // Drops what was recorded: the values of the changes not done.
+    void clear() noexcept {
+      for (const Change &change: m_changes) {
+        if (change.finish != nullptr) {
+          change.finish(*change.column, indexOf(change.entity), change.value, false);
+        }
+      }
+      m_changes.clear();
+      m_values.clear();
+      m_destroyed.clear();
+    }
+
+    static constexpr uint32_t NO_PAGE = ~uint32_t{0};
+
+  private:
+    // Keeps page up to date. One comparison per change, which spares
+    // CommandApplier counting 1M changes (about 0.6 ms on all threads) to
+    // find that they all hit one page.
+    void note(Entity entity) noexcept {
+      const uint32_t page = indexOf(entity) >> PAGE_BITS;
+      if (m_changes.size() == 1) {
+        m_page = page;
+      } else if (page != m_page) {
+        m_page = NO_PAGE;
+      }
+    }
+
     std::vector<Change> m_changes;
-    // How many of them are done with.
-    size_t m_done = 0;
+    uint32_t m_page = NO_PAGE;
     ValueStore m_values;
     // The entities to destroy.
     std::vector<Entity> m_destroyed;
     std::mutex m_mutex;
+  };
+
+  // Does what the lists of a stage recorded, once nothing runs any more: the
+  // changes of the components first, then the entities to destroy.
+  //
+  // The changes are sorted by the page of their entity, keeping their order
+  // (the lists one after the other, each in the order it was recorded), and
+  // every page goes to one thread. So the changes of an entity are done in
+  // their order, and no other thread touches the page in any column, which
+  // lets the erases of a page be done a word of the mask at a time
+  // (Column::eraseAlone of a KillPage). The entities are destroyed at once,
+  // with World::destroy of a span.
+  class CommandApplier {
+  public:
+    // Does what the lists recorded and clears them. If a change throws, the
+    // pages that are not started yet and the entities to destroy are left in
+    // the lists, for clear to drop, and the first exception is rethrown;
+    // pages that other threads are working on are finished.
+    void apply(World &world, std::span<CommandList *const> lists) {
+      size_t total = 0;
+      for (CommandList *const list: lists) {
+        total += list->changes().size();
+      }
+      if (onePage(lists)) {
+        applyInOrder(world, lists);
+      } else {
+        // A thread for every so many changes, as World::parallelEach does for
+        // entities.
+        applySpread(world, lists, total / CHANGES_PER_THREAD);
+      }
+
+      m_destroyed.clear();
+      for (CommandList *const list: lists) {
+        m_destroyed.insert(m_destroyed.end(), list->destroyed().begin(), list->destroyed().end());
+      }
+      if (!m_destroyed.empty()) {
+        world.destroy(std::span<const Entity>{m_destroyed});
+      }
+      // All of it done, also the changes of the null entity, which only drop
+      // their values.
+      for (CommandList *const list: lists) {
+        list->clearDone();
+      }
+    }
+
+  private:
+    using Change = CommandList::Change;
+
+    // A page is not worth waking a thread for below this.
+    static constexpr size_t CHANGES_PER_THREAD = 4096;
+    // The lists are counted and placed in pieces of this many changes, so
+    // that a list with most of the changes does not leave the work to one
+    // thread.
+    static constexpr size_t SEGMENT = size_t{1} << 16;
+
+    // The erases of a page in one column, gathered until something else comes.
+    struct Kill {
+      ColumnBase *column;
+      KillPage page;
+    };
+
+    // Whether all changes of all lists are in one page, or there are none:
+    // nothing to spread then, as the lists noted while recording.
+    [[nodiscard]] static bool onePage(std::span<CommandList *const> lists) noexcept {
+      uint32_t page = CommandList::NO_PAGE;
+      for (CommandList *const list: lists) {
+        if (list->changes().empty()) {
+          continue;
+        }
+        if (list->page() == CommandList::NO_PAGE || (page != CommandList::NO_PAGE && list->page() != page)) {
+          return false;
+        }
+        page = list->page();
+      }
+      return true;
+    }
+
+    // Every change on the calling thread, in the order of the lists.
+    static void applyInOrder(World &world, std::span<CommandList *const> lists) {
+      std::vector<Kill> kills;
+      for (CommandList *const list: lists) {
+        for (Change &change: list->changes()) {
+          applyChange(world, change, kills);
+        }
+      }
+      flush(kills);
+    }
+
+    // Every page on one thread. If a change throws, the pages that are not
+    // started yet are left, and the first exception is rethrown once the
+    // pages that other threads are working on are finished.
+    void applySpread(World &world, std::span<CommandList *const> lists, size_t helpers) {
+      m_segments.clear();
+      for (CommandList *const list: lists) {
+        const std::span<Change> changes = list->changes();
+        for (size_t first = 0; first < changes.size(); first += SEGMENT) {
+          m_segments.push_back(changes.subspan(first, std::min(SEGMENT, changes.size() - first)));
+        }
+      }
+      count(helpers);
+      if (m_pages.size() <= 1) {
+        // Only one after all, past those of the null entity, which count did.
+        // The counts go back to zero first, whatever happens then.
+        uncount();
+        applyInOrder(world, lists);
+        return;
+      }
+      place(helpers);
+      std::atomic_flag failed;
+      std::exception_ptr error;
+      threading::parallelFor(m_pages.size(), 1, helpers, [&](size_t first, size_t last) {
+        std::vector<Kill> kills;
+        for (size_t i = first; i < last; ++i) {
+          if (failed.test(std::memory_order_relaxed)) {
+            return;
+          }
+          try {
+            applyPage(world, std::span<Change *const>{m_order}.subspan(m_offsets[i], m_offsets[i + 1] - m_offsets[i]),
+                      kills);
+          } catch (...) {
+            if (!failed.test_and_set(std::memory_order_acq_rel)) {
+              error = std::current_exception();
+            }
+            return;
+          }
+        }
+      });
+      if (error) {
+        std::rethrow_exception(error);
+      }
+    }
+
+    // m_order: the changes by page, those of m_pages[i] from m_offsets[i] to
+    // m_offsets[i + 1]. A counting sort over the pages, which keeps the order:
+    // count counts the changes of every segment per page, a segment per
+    // thread, and finds the pages; place puts the changes in m_order, again a
+    // thread per segment, each in the places the segments before it leave.
+    // Sorting 1M changes on one thread took about 2.8 ms, as long as applying
+    // them. A change of an index past INDEX_LIMIT (the null entity) has no
+    // page: count does it right away, which only drops its value.
+    void count(size_t helpers) {
+      if (m_counts.size() < m_segments.size() * PAGE_COUNT) {
+        m_counts.assign(m_segments.size() * PAGE_COUNT, 0);
+      }
+      threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
+        for (size_t segment = first; segment < last; ++segment) {
+          uint32_t *const counts = m_counts.data() + (segment * PAGE_COUNT);
+          for (Change &change: m_segments[segment]) {
+            const uint32_t index = indexOf(change.entity);
+            if (index < INDEX_LIMIT) {
+              ++counts[index >> PAGE_BITS];
+            } else if (change.finish != nullptr) {
+              const auto finish = change.finish;
+              change.finish = nullptr;
+              finish(*change.column, index, change.value, false);
+            }
+          }
+        }
+      });
+      m_pages.clear();
+      for (uint32_t page = 0; page < PAGE_COUNT; ++page) {
+        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+          if (m_counts[(segment * PAGE_COUNT) + page] != 0) {
+            m_pages.push_back(page);
+            break;
+          }
+        }
+      }
+    }
+
+    // m_pages as count left it, with more than one page. Leaves m_counts at
+    // zero.
+    void place(size_t helpers) {
+      m_offsets.resize(m_pages.size() + 1);
+      uint32_t at = 0;
+      for (size_t i = 0; i < m_pages.size(); ++i) {
+        m_offsets[i] = at;
+        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+          uint32_t &count = m_counts[(segment * PAGE_COUNT) + m_pages[i]];
+          const uint32_t here = count;
+          // From here on where the next change of the segment in the page
+          // goes.
+          count = at;
+          at += here;
+        }
+      }
+      m_offsets.back() = at;
+      m_order.resize(at);
+      threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
+        for (size_t segment = first; segment < last; ++segment) {
+          uint32_t *const places = m_counts.data() + (segment * PAGE_COUNT);
+          for (Change &change: m_segments[segment]) {
+            const uint32_t index = indexOf(change.entity);
+            if (index < INDEX_LIMIT) {
+              m_order[places[index >> PAGE_BITS]++] = &change;
+            }
+          }
+        }
+      });
+      uncount();
+    }
+
+    // Leaves m_counts at zero for the next stage.
+    void uncount() noexcept {
+      for (const uint32_t page: m_pages) {
+        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+          m_counts[(segment * PAGE_COUNT) + page] = 0;
+        }
+      }
+    }
+
+    // The changes of one page, in their order. The erases that come one
+    // after the other are gathered per column and done together before the
+    // next change of another kind.
+    static void applyPage(World &world, std::span<Change *const> changes, std::vector<Kill> &kills) {
+      for (Change *const change: changes) {
+        applyChange(world, *change, kills);
+      }
+      flush(kills);
+    }
+
+    static void applyChange(World &world, Change &change, std::vector<Kill> &kills) {
+      const uint32_t index = indexOf(change.entity);
+      // Not that of an entity that got the index since.
+      const bool valid = world.valid(change.entity);
+      if (change.finish == nullptr) {
+        if (valid) {
+          kill(kills, *change.column, index);
+        }
+        return;
+      }
+      flush(kills);
+      // Done before the call: finish drops the value whatever happens.
+      const auto finish = change.finish;
+      change.finish = nullptr;
+      finish(*change.column, index, change.value, valid);
+    }
+
+    static void kill(std::vector<Kill> &kills, ColumnBase &column, uint32_t index) {
+      auto found = std::ranges::find(kills, &column, &Kill::column);
+      if (found == kills.end()) {
+        kills.push_back({.column = &column, .page = {}});
+        found = kills.end() - 1;
+      }
+      KillPage &page = found->page;
+      page.number = index >> PAGE_BITS;
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      page.words[slot / 64] |= uint64_t{1} << (slot % 64);
+      page.touched |= uint64_t{1} << (slot / 64);
+    }
+
+    // Does the gathered erases and makes the pages empty again for the next.
+    static void flush(std::vector<Kill> &kills) noexcept {
+      for (Kill &kill: kills) {
+        if (kill.page.touched == 0) {
+          continue;
+        }
+        kill.column->eraseAlone(std::span<const KillPage>{&kill.page, 1});
+        for (uint64_t touched = kill.page.touched; touched != 0; touched &= touched - 1) {
+          kill.page.words[static_cast<size_t>(std::countr_zero(touched))] = 0;
+        }
+        kill.page.touched = 0;
+      }
+    }
+
+    // The lists in pieces of SEGMENT changes.
+    std::vector<std::span<Change>> m_segments;
+    // Per segment and page number, while sorting; zero in between.
+    std::vector<uint32_t> m_counts;
+    // The pages that have changes, by number.
+    std::vector<uint32_t> m_pages;
+    std::vector<uint32_t> m_offsets;
+    std::vector<Change *> m_order;
+    // Of all lists.
+    std::vector<Entity> m_destroyed;
   };
 
   // Defined below, with the parameters of systems.
@@ -381,7 +663,7 @@ namespace sc::ecs2 {
   // entity the line goes from core to core for each of them, whether the bit
   // is free or not. ecs_compare, 1M entities damaging another one, all
   // threads, ns per hit, Modify against Commands::modify: random target 1.4
-  // and 6.3, one of 1 000 targets 14.6 and 3.4, the same target 15.6 and 3.8.
+  // and 3.6, one of 1 000 targets 14.6 and 3.2, the same target 15.6 and 3.4.
   template<typename... Components>
   class Modify {
     static_assert((!std::is_const_v<Components> && ...), "Modify is for writing; a const component is read with Query");
@@ -420,7 +702,9 @@ namespace sc::ecs2 {
   // What one thread records for the components is done in that order, so a
   // component that is erased and then emplaced is replaced. The threads come
   // one after the other, in no particular order, and the entities are
-  // destroyed after the components of their thread.
+  // destroyed after the components of all threads, all at once. The changes
+  // are done on several threads, every page of entities on one (see
+  // CommandApplier).
   class Commands {
   public:
     Commands(World &world, std::span<internal::CommandList> lists) : m_world(&world), m_lists(lists) {}
@@ -476,7 +760,7 @@ namespace sc::ecs2 {
     // order does not matter, as with damage that is subtracted.
     //
     // Faster than Modify where many threads hit few entities, slower where
-    // they hit many: the changes are done on one thread, see Modify.
+    // they hit many, see Modify.
     template<typename Function>
     void modify(Entity entity, Function &&function) const {
       using Component = internal::ModifiedBy<std::decay_t<Function>>;
@@ -865,11 +1149,13 @@ namespace sc::ecs2 {
 
         // Now that nothing is running: nobody is using what goes away.
         try {
+          m_stageLists.clear();
           for (const size_t index: stage) {
             for (internal::CommandList &list: m_systems[index].commands) {
-              list.apply(world);
+              m_stageLists.push_back(&list);
             }
           }
+          m_applier.apply(world, m_stageLists);
         } catch (...) {
           clearCommands(stage);
           throw;
@@ -983,6 +1269,9 @@ namespace sc::ecs2 {
     std::vector<System> m_systems;
     std::vector<std::vector<size_t>> m_stages;
     bool m_stagesValid = true;
+    // For the commands of a stage, kept for the next one.
+    internal::CommandApplier m_applier;
+    std::vector<internal::CommandList *> m_stageLists;
   };
 
 } // namespace sc::ecs2

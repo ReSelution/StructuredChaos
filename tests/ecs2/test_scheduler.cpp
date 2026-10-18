@@ -622,6 +622,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
   }
 
   SECTION("Recorded Changes Of Values Are Done In Their Order") {
+    const auto alive = std::make_shared<int>(0);
     world.emplace<Spawner>(entities[0], 1);
     const Entity gone = entities[2];
     world.emplace<Spawner>(gone, 1);
@@ -636,9 +637,12 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
       made = commands.create();
       commands.emplace<Spawner>(made, 4);
       commands.modify(made, [](Spawner &spawner) { spawner.count += 1; });
-      // Nothing for an entity without the component, or one that is no more.
+      // Nothing for an entity without the component, or one that is no more,
+      // or none at all.
       commands.modify(entities[1], [&](Spawner &) { ++called; });
       commands.modify(gone, [&](Spawner &) { ++called; });
+      commands.modify(sc::ecs2::null, [&, alive](Spawner &) { ++called; });
+      commands.emplace<Named>(sc::ecs2::null, "nobody", alive);
     });
     world.destroy(gone);
     scheduler.run(world);
@@ -646,6 +650,83 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     REQUIRE(world.get<Spawner>(entities[0]).count == 3);
     REQUIRE(world.get<Spawner>(made).count == 5);
     REQUIRE(called == 0);
+    REQUIRE(alive.use_count() == 1);
+  }
+
+  SECTION("Recorded Changes Of Many Entities Keep Their Order Per Entity") {
+    // Done on several threads, a page each, with the erases of a page
+    // gathered: whatever comes after an erase of the same entity must see it
+    // done, whatever comes before must not.
+    const auto alive = std::make_shared<int>(0);
+    scheduler.addParallel([&](Entity entity, Commands commands, const Position &pos) {
+      const auto i = static_cast<size_t>(pos.x);
+      if (i % 97 == 0) {
+        // Nobody's: only dropped, also what the function holds.
+        commands.emplace<Named>(sc::ecs2::null, "nobody", alive);
+        commands.modify(sc::ecs2::null, [alive](Health &health) { health.value = -2; });
+      }
+      switch (i % 5) {
+        case 0:
+          commands.erase<Health>(entity);
+          commands.emplace<Health>(entity, 7);
+          commands.modify(entity, [](Health &health) { health.value += 1; });
+          break;
+        case 1:
+          commands.erase<Health>(entity);
+          break;
+        case 2:
+          // Has one: dropped, and the modify sees the old one.
+          commands.emplace<Health>(entity, 5);
+          commands.modify(entity, [](Health &health) { health.value -= 1; });
+          break;
+        case 3:
+          commands.modify(entity, [](Health &health) { health.value *= 2; });
+          commands.erase<Health>(entity);
+          commands.emplace<Named>(entity, "named", alive);
+          commands.erase<Named>(entity);
+          break;
+        default:
+          commands.emplace<Named>(entity, "kept", alive);
+          commands.destroy(entity);
+          // Still done: entities go after all changes.
+          commands.modify(entity, [](Health &health) { health.value = -1; });
+          break;
+      }
+    });
+    scheduler.run(world);
+
+    size_t healthy = 0;
+    for (size_t i = 0; i < entities.size(); ++i) {
+      const Entity entity = entities[i];
+      switch (i % 5) {
+        case 0:
+          REQUIRE(world.get<Health>(entity).value == 8);
+          ++healthy;
+          break;
+        case 1:
+        case 3:
+          REQUIRE_FALSE(world.contains<Health>(entity));
+          REQUIRE_FALSE(world.contains<Named>(entity));
+          break;
+        case 2:
+          REQUIRE(world.get<Health>(entity).value == 99);
+          ++healthy;
+          break;
+        default:
+          REQUIRE_FALSE(world.valid(entity));
+          break;
+      }
+    }
+    // The counts of the pages agree with what is there, and what was owned
+    // is given back.
+    size_t counted = 0;
+    world.each<const Health>([&](const Health &) { ++counted; });
+    REQUIRE(counted == healthy);
+    REQUIRE(world.column<Health>().page(0).count + world.column<Health>().page(1).count +
+                world.column<Health>().page(2).count ==
+            healthy);
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE(world.column<Named>().pages() == world.column<Named>().spares());
   }
 
   SECTION("Threads Record Changes For The Same Components, Done Once The Stage Is Over") {

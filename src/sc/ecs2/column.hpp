@@ -591,6 +591,12 @@ namespace sc::ecs2::internal {
     // entities, and the count once: what eraseAlone does per entity. Only the
     // words that may have a bit in the column are looked at, and a word that
     // is empty afterwards leaves the summary, which is exact here.
+    //
+    // Only no other thread may use these pages; other threads may change
+    // other pages of the column at the same time, as when CommandApplier
+    // gives every page to one thread. So the count goes down with forsake,
+    // one locked instruction per page: a page emptied elsewhere may leave the
+    // spares and look at the count of this one in vacate.
     void eraseAlone(std::span<const KillPage> pages) noexcept override {
       for (const KillPage &kill: pages) {
         Header *const header = findHeader(kill.number);
@@ -622,16 +628,7 @@ namespace sc::ecs2::internal {
           continue;
         }
         header->summary.store(summary, std::memory_order_relaxed);
-        const uint32_t left = header->count.load(std::memory_order_relaxed) - removed;
-        header->count.store(left, std::memory_order_relaxed);
-        if (left == 0) {
-          header->summary.store(0, std::memory_order_relaxed);
-          if constexpr (HAS_VALUE) {
-            park(*header, kill.number);
-          } else {
-            vacate(*header, kill.number);
-          }
-        }
+        forsake(*header, kill.number, removed);
       }
     }
 
