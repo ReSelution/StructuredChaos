@@ -126,8 +126,8 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   On the way: sorting on one thread made the one-page cases worse (6.2 instead of 3.4 ms, about 2.8 ms for 1M
   changes); per list was not enough when one list had them all; and `clear` went through all changes once more to
   drop values (32 MB for 1M), now only after an exception.
-- [ ] **Destroys of a stage over threads:** `World::destroy(span)` still runs on one thread after the changes; see
-  "Bulk destroy over threads".
+- [x] **Destroys of a stage over threads:** `CommandApplier` calls `World::parallelDestroy`, see "Bulk destroy over
+  threads". Destroy through `Commands`, 100K entities, all threads: 862 → 339 µs.
 - [ ] **No write per applied change:** `applyChange` sets `finish` to null in every change it does, so that `clear`
   after an exception knows what is left. A position per page (and one for the lists in order) would tell the same
   without writing 1M changes back; not measured whether it matters.
@@ -249,9 +249,16 @@ twice as slow at 1024 as it is.
   per page one header, per word one change of the mask for up to 64 entities, the count once per page, the summary
   bit of a word that became empty cleared. No `lock`. 4.2 instead of 8.4 ns per entity at 1024, 5.3 instead of 9.2
   at 262K (against a loop over `destroy`); below the single destroy of pico_ecs (6.0 / 5.5).
-- [ ] **Bulk destroy over threads:** pages are independent, so the second step could be split over threads by
-  page, without atomics if every page belongs to one thread. Only worth it for many pages (waking threads costs
-  microseconds); not tried.
+- [x] **Bulk destroy over threads (`World::parallelDestroy`):** not the second step, as guessed, but mostly the
+  first: on one thread ending the entities (`valid`, generation, free list, kill bit) took 6.6 ns per entity without
+  components, and every column only 0.4 to 0.6 ns more. So the entities are sorted by page (`PageSort`, taken out of
+  `CommandApplier`), and every page goes to one thread, which ends its entities (`EntityAllocator::kill`) and takes
+  their components in every column (`eraseAlone` of its `KillPage`); only `giveMany` to the free lists is left to
+  the calling thread. A name of its own, as `each`/`parallelEach`: `destroy(span)` stays on the calling thread.
+  `destroy` / `parallelDestroy`, µs, 16 threads: 100K entities without components 699 / 254, with 6 components
+  952 / 353; 1M 6 745 / 1 644 and 10 538 / 3 060. Far from 16 times: presumably `giveMany` and compacting the
+  freed indices, on one thread (not split up by measurement). The free lists get the indices in page order, not
+  in the order given.
 - [ ] **`World::destroy` must not run next to other threads, assert it:** the comment says so since `86d3592`
   (like `CommandList::apply`). Before, nothing said so and `eraseAll` even said "Safe next to threads that keep to
   other entities", while `FreeList::give` (`resize`, `push_back`) runs against `take` from `create` without a lock:
