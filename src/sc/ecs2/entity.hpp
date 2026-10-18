@@ -6,7 +6,6 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <span>
 #include <stdexcept>
@@ -15,6 +14,7 @@
 
 #include <mimalloc.h>
 
+#include "sc/memory/virtual_memory.hpp"
 #include "sc/threading/threading.hpp"
 
 namespace sc::ecs2 {
@@ -30,15 +30,16 @@ namespace sc::ecs2 {
 
   inline constexpr unsigned INDEX_BITS = 32;
 
-  // No entity has this index or a higher one, so there are never more
-  // entities than this at a time. It is what every column reserves addresses
-  // for.
-  inline constexpr uint32_t INDEX_LIMIT = uint32_t{1} << 24;
-
   // Components are stored in pages of this many entities. Threads that work
   // on different pages share nothing.
   inline constexpr unsigned PAGE_BITS = 12;
   inline constexpr uint32_t PAGE_SIZE = uint32_t{1} << PAGE_BITS;
+
+  // No entity has this index or a higher one, so there are never more
+  // entities than this at a time. It is what every column reserves addresses
+  // for. All of the index but its last page: the index of null lies in it
+  // and above every other one, and the end of a page is still a uint32_t.
+  inline constexpr uint32_t INDEX_LIMIT = ~uint32_t{0} - PAGE_SIZE + 1;
 
   [[nodiscard]] constexpr uint32_t indexOf(Entity entity) noexcept {
     return static_cast<uint32_t>(static_cast<uint64_t>(entity));
@@ -81,7 +82,10 @@ namespace sc::ecs2::internal {
     // The generations of this many indices are kept in one piece.
     static constexpr unsigned BLOCK_BITS = 16;
     static constexpr uint32_t BLOCK_SIZE = uint32_t{1} << BLOCK_BITS;
-    static constexpr size_t BLOCK_COUNT = INDEX_LIMIT >> BLOCK_BITS;
+    // Also for the indices from INDEX_LIMIT on, which share a block with
+    // those below it.
+    static constexpr size_t BLOCK_COUNT = size_t{1} << (INDEX_BITS - BLOCK_BITS);
+    static constexpr size_t BLOCKS_BYTES = BLOCK_COUNT * sizeof(std::atomic<uint32_t *>);
     static constexpr uint32_t PAGE_COUNT = INDEX_LIMIT >> PAGE_BITS;
 
     // The indices a thread hands out next, which nobody else has.
@@ -154,12 +158,32 @@ namespace sc::ecs2::internal {
   public:
     static constexpr size_t MAX_THREADS = 128;
 
-    EntityAllocator() : m_blocks(std::make_unique<std::atomic<uint32_t *>[]>(BLOCK_COUNT)) {}
+    // The addresses of the blocks get memory with their first use, all zero:
+    // 512 KiB for all of them, of which most worlds touch a page or two.
+    // Filled with nulls up front, all of it would be the process' at once.
+    // Reserving and giving them back takes about 4 µs per allocator, against
+    // 0.5 µs for the 2 KiB this was with 2^24 indices.
+    EntityAllocator() : m_blocks(static_cast<std::atomic<uint32_t *> *>(memory::reserve(BLOCKS_BYTES))) {
+      try {
+        memory::commit(m_blocks, BLOCKS_BYTES);
+      } catch (...) {
+        memory::release(m_blocks, BLOCKS_BYTES);
+        throw;
+      }
+    }
 
+    // Only the blocks of pages handed out can have memory.
     ~EntityAllocator() {
-      for (size_t block = 0; block < BLOCK_COUNT; ++block) {
+      const Pages pages = this->pages();
+      const size_t commonEnd = (size_t{pages.limit()} + BLOCK_SIZE - 1) >> BLOCK_BITS;
+      // Not below commonEnd: a block may have common and rare pages.
+      for (size_t block = std::max(commonEnd, size_t{pages.rareBegin()} >> BLOCK_BITS); block < BLOCK_COUNT; ++block) {
         mi_free(m_blocks[block].load(std::memory_order_relaxed));
       }
+      for (size_t block = 0; block < commonEnd; ++block) {
+        mi_free(m_blocks[block].load(std::memory_order_relaxed));
+      }
+      memory::release(m_blocks, BLOCKS_BYTES);
     }
 
     EntityAllocator(const EntityAllocator &) = delete;
@@ -444,7 +468,7 @@ namespace sc::ecs2::internal {
     }
 
     // One for every index block, null until an index of it is handed out.
-    std::unique_ptr<std::atomic<uint32_t *>[]> m_blocks;
+    std::atomic<uint32_t *> *m_blocks;
     // How many pages were handed out to threads: from below in the lower half,
     // from above in the upper half. Both in one, so that they never overlap.
     alignas(64) std::atomic<uint64_t> m_pageCounts{0};

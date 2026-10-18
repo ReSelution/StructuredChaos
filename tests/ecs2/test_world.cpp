@@ -238,6 +238,10 @@ TEST_CASE("World Entities", "[ecs2][world]") {
   }
 
   SECTION("There Are Never More Entities Than INDEX_LIMIT") {
+    // TODO: with INDEX_LIMIT at 2^32 - PAGE_SIZE this makes about 4 billion
+    // entities: 33 s and 21 GB in the release build, far more under TSan.
+    // Needs a way to start the allocator close to its limit, or a smaller
+    // limit for the test.
     // The rare entities take their pages from the same indices.
     const Entity special = world.create(sc::ecs2::rare);
     REQUIRE(sc::ecs2::indexOf(special) == sc::ecs2::INDEX_LIMIT - PAGE_SIZE);
@@ -1096,7 +1100,9 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
   SECTION("A Column Keeps The Last Pages That Were Emptied") {
     using Column = sc::ecs2::internal::Column<Position>;
-    Column column{world.pages()};
+    // On the heap: a column holds the headers of all pages.
+    const auto made = std::make_unique<Column>(world.pages());
+    Column &column = *made;
     constexpr uint32_t pages = Column::SPARE_PAGES + 2;
     for (uint32_t number = 0; number < pages; ++number) {
       column.emplace(number * PAGE_SIZE, static_cast<float>(number), 0.0f);
@@ -1159,7 +1165,9 @@ TEST_CASE("World Components", "[ecs2][world]") {
 
   SECTION("Headers And Values Get Memory Only Where Pages Are Used") {
     using Column = sc::ecs2::internal::Column<Position>;
-    Column column{world.pages()};
+    // On the heap: a column holds the headers of all pages.
+    const auto made = std::make_unique<Column>(world.pages());
+    Column &column = *made;
     REQUIRE(column.headerBlocks() == 0);
     REQUIRE(column.chunks() == 0);
     // Asking makes nothing.

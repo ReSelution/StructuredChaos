@@ -94,7 +94,7 @@ namespace sc::ecs2::internal {
   // How many indices a chunk of a column of components of the given size
   // has, as a power of two: enough for memory::HUGE_PAGE_SIZE, so that huge
   // pages fit into it, and at least 16 pages, so that a column has at most
-  // 256 chunks.
+  // 65 536 chunks.
   template<size_t ComponentBytes>
   constexpr unsigned chunkBits() noexcept {
     unsigned bits = PAGE_BITS + 4;
@@ -235,12 +235,15 @@ namespace sc::ecs2::internal {
 
     // A rare component gets small pages whatever the world asks for. Has no
     // memory of its own until a component is added, only the addresses of
-    // its headers.
+    // its headers. Only made with new, see operator new.
     explicit Column(Pages pages = Pages::Huge) :
         m_hugePages(!rareComponent<T> &&
                     (pages == Pages::Huge || (pages == Pages::Auto && sizeof(T) >= HUGE_PAGE_COMPONENT_BYTES))),
-        m_grows(!rareComponent<T> && pages == Pages::Auto && sizeof(T) < HUGE_PAGE_COMPONENT_BYTES),
-        m_headers(static_cast<Header *>(memory::reserve(HEADER_BYTES))) {
+        m_grows(!rareComponent<T> && pages == Pages::Auto && sizeof(T) < HUGE_PAGE_COMPONENT_BYTES) {
+      // Windows commits nothing for no bytes, it fails.
+      if constexpr (CHUNK_COUNT != 0) {
+        memory::commit(m_chunkBytes, sizeof(m_chunkBytes));
+      }
       for (std::atomic<uint32_t> &spare: m_spares) {
         spare.store(NO_PAGE, std::memory_order_relaxed);
       }
@@ -249,30 +252,71 @@ namespace sc::ecs2::internal {
     ~Column() override {
       if constexpr (DESTROYS) {
         // The pages that have memory, the spares among them, which have no
-        // components.
+        // components. Only in the blocks of headers that have memory: one
+        // page after the other took 1M steps for a rare entity.
         size_t left = pages();
-        for (uint32_t number = 0; left != 0 && number < PAGE_COUNT; ++number) {
-          const Header *const header = findHeader(number);
-          if (header == nullptr || !header->started.load(std::memory_order_relaxed)) {
-            continue;
-          }
-          --left;
-          T *const values = valuesOf(number);
-          for (uint32_t word = 0; word < PAGE_WORDS; ++word) {
-            for (uint64_t mask = header->mask[word].load(std::memory_order_relaxed); mask != 0; mask &= mask - 1) {
-              std::destroy_at(values + (word * 64) + static_cast<uint32_t>(std::countr_zero(mask)));
+        for (size_t word = 0; left != 0 && word < m_headerBlocks.size(); ++word) {
+          for (uint64_t blocks = m_headerBlocks[word].load(std::memory_order_relaxed); left != 0 && blocks != 0;
+               blocks &= blocks - 1) {
+            const size_t block = (word * 64) + static_cast<size_t>(std::countr_zero(blocks));
+            const auto first = static_cast<uint32_t>(block * HEADER_BLOCK_PAGES);
+            const auto end = static_cast<uint32_t>(std::min(first + size_t{HEADER_BLOCK_PAGES}, PAGE_COUNT));
+            for (uint32_t number = first; left != 0 && number < end; ++number) {
+              const Header &header = headers()[number];
+              if (!header.started.load(std::memory_order_relaxed)) {
+                continue;
+              }
+              --left;
+              T *const values = valuesOf(number);
+              for (uint32_t at = 0; at < PAGE_WORDS; ++at) {
+                for (uint64_t mask = header.mask[at].load(std::memory_order_relaxed); mask != 0; mask &= mask - 1) {
+                  std::destroy_at(values + (at * 64) + static_cast<uint32_t>(std::countr_zero(mask)));
+                }
+              }
             }
           }
         }
       }
-      for (void *const reserved: m_chunkMemory) {
-        if (reserved != nullptr) {
+      // Up to the last one there is: a table of all chunks has no memory but
+      // for those it got.
+      for (size_t chunk = 0, left = chunks(); left != 0 && chunk < CHUNK_COUNT; ++chunk) {
+        if (void *const reserved = chunkTable()[chunk].memory; reserved != nullptr) {
           memory::rangeCache().release(reserved, CHUNK_RESERVED_BYTES);
+          --left;
         }
       }
-      // The headers have nothing to do at their end.
-      static_assert(std::is_trivially_destructible_v<Header>);
-      memory::release(m_headers, HEADER_BYTES);
+      // The headers and chunks have nothing to do at their end; their
+      // memory goes with the column, see operator delete.
+      static_assert(std::is_trivially_destructible_v<Header> && std::is_trivially_destructible_v<Chunk>);
+    }
+
+    // A column lies in addresses reserved for it alone, with the headers of
+    // all pages and what it keeps per chunk in it, all zero from the OS and
+    // without memory until used: about 1.06 GiB of them. Found at a fixed
+    // place from the column, a component is one load away from it, as when
+    // the chunks were a std::array of the column; behind a pointer to a range
+    // of their own, a get of a random entity waited for one more load (the
+    // lookup benchmarks of tests/ecs_compare, 21 to 27 % slower). On Linux
+    // with vm.overcommit_memory=2 all of it is promised from the start, see
+    // vacate. Not on the stack, which has no room for it.
+    [[nodiscard]] static void *operator new(size_t bytes) {
+      void *const reserved = memory::reserve(bytes);
+      try {
+        // The members before the headers and chunks, and maybe a little of
+        // the chunks, which the constructor commits anyway.
+        memory::commit(reserved, bytes - HEADER_BYTES - sizeof(m_chunkBytes));
+      } catch (...) {
+        memory::release(reserved, bytes);
+        throw;
+      }
+      return reserved;
+    }
+    // A column is aligned to a cache line, a reserved range to a page of the
+    // OS.
+    [[nodiscard]] static void *operator new(size_t bytes, std::align_val_t) { return operator new(bytes); }
+    static void operator delete(void *address, size_t bytes) noexcept { memory::release(address, bytes); }
+    static void operator delete(void *address, size_t bytes, std::align_val_t) noexcept {
+      memory::release(address, bytes);
     }
 
     Column(const Column &) = delete;
@@ -644,8 +688,8 @@ namespace sc::ecs2::internal {
       size_t found = 0;
       for (const std::atomic<uint32_t> &spare: m_spares) {
         const uint32_t number = spare.load(std::memory_order_relaxed);
-        found += number != NO_PAGE && m_headers[number].count.load(std::memory_order_relaxed) == 0 &&
-                 m_headers[number].started.load(std::memory_order_relaxed);
+        found += number != NO_PAGE && headers()[number].count.load(std::memory_order_relaxed) == 0 &&
+                 headers()[number].started.load(std::memory_order_relaxed);
       }
       return found;
     }
@@ -664,7 +708,11 @@ namespace sc::ecs2::internal {
     // How many blocks of headers have memory, see HEADER_BLOCK_PAGES. They
     // keep it until the column goes.
     [[nodiscard]] size_t headerBlocks() const noexcept {
-      return static_cast<size_t>(std::popcount(m_headerBlocks.load(std::memory_order_relaxed)));
+      size_t count = 0;
+      for (const std::atomic<uint64_t> &word: m_headerBlocks) {
+        count += static_cast<size_t>(std::popcount(word.load(std::memory_order_relaxed)));
+      }
+      return count;
     }
 
     // How many chunks of the values have their addresses reserved, see
@@ -690,9 +738,9 @@ namespace sc::ecs2::internal {
     static constexpr size_t PAGE_BYTES = sizeof(T) * PAGE_SIZE;
     static_assert(!HAS_VALUE || PAGE_BYTES % memory::OS_PAGE_SIZE == 0);
 
-    static constexpr size_t HEADER_BLOCK_COUNT = PAGE_COUNT / HEADER_BLOCK_PAGES;
-    static_assert(PAGE_COUNT % HEADER_BLOCK_PAGES == 0);
-    static_assert(HEADER_BLOCK_COUNT <= 64, "one bit of m_headerBlocks for every block");
+    // The last block is short of a page: INDEX_LIMIT leaves the last page
+    // out.
+    static constexpr size_t HEADER_BLOCK_COUNT = (PAGE_COUNT + HEADER_BLOCK_PAGES - 1) / HEADER_BLOCK_PAGES;
     static constexpr size_t HEADER_BLOCK_BYTES = sizeof(Header) * HEADER_BLOCK_PAGES;
     static constexpr size_t HEADER_BYTES = HEADER_BLOCK_BYTES * HEADER_BLOCK_COUNT;
     // A block gets its memory without touching its neighbours.
@@ -700,7 +748,8 @@ namespace sc::ecs2::internal {
 
     static constexpr unsigned CHUNK_BITS = chunkBits<sizeof(T)>();
     static constexpr uint32_t CHUNK_PAGES = CHUNK_SIZE >> PAGE_BITS;
-    static constexpr size_t CHUNK_COUNT = HAS_VALUE ? INDEX_LIMIT >> CHUNK_BITS : 0;
+    // The last one is short of the last page, as the last block of headers.
+    static constexpr size_t CHUNK_COUNT = HAS_VALUE ? (size_t{INDEX_LIMIT} + CHUNK_SIZE - 1) >> CHUNK_BITS : 0;
     static constexpr size_t CHUNK_BYTES = PAGE_BYTES * CHUNK_PAGES;
     // With room to move the values to where a huge page may start.
     static constexpr size_t CHUNK_RESERVED_BYTES = CHUNK_BYTES + memory::HUGE_PAGE_SIZE;
@@ -710,13 +759,27 @@ namespace sc::ecs2::internal {
     // page; its last one may be cut short where the chunk is not a whole
     // number of them.
     static constexpr size_t CHUNK_REGIONS = (CHUNK_BYTES + memory::HUGE_PAGE_SIZE - 1) / memory::HUGE_PAGE_SIZE;
-    static constexpr size_t REGION_COUNT = CHUNK_COUNT * CHUNK_REGIONS;
-    // What m_regions says about a huge page.
+    // What Chunk::regions says about a huge page.
     static constexpr uint32_t UNTOUCHED = 0;
     static constexpr uint32_t STARTING = 1;
     static constexpr uint32_t STARTED = 2;
     // An empty place among the spares.
     static constexpr uint32_t NO_PAGE = ~uint32_t{0};
+
+    // What the column knows about a chunk, all zero until it is reserved.
+    struct Chunk {
+      // The values, at a huge page, null until the chunk is reserved.
+      std::atomic<T *> values;
+      // The range reserved for it, which they lie in.
+      void *memory;
+      // Whether memory::rangeCache kept that range, see startPage.
+      bool kept;
+      // Whether the first access to each of its huge pages was made.
+      std::array<std::atomic<uint32_t>, CHUNK_REGIONS> regions;
+    };
+    // At least a byte: a column of a component without members has no
+    // chunks.
+    static constexpr size_t CHUNK_TABLE_BYTES = std::max<size_t>(CHUNK_COUNT * sizeof(Chunk), 1);
 
     [[nodiscard]] static bool has(const Header &header, uint32_t slot) noexcept {
       return ((header.mask[slot / 64].load(std::memory_order_relaxed) >> (slot % 64)) & 1u) != 0;
@@ -773,20 +836,27 @@ namespace sc::ecs2::internal {
       }
     }
 
+    // The header of every page and what the column keeps of every chunk, in
+    // the column itself, see operator new.
+    [[nodiscard]] Header *headers() const noexcept { return reinterpret_cast<Header *>(m_headerBytes); }
+    [[nodiscard]] Chunk *chunkTable() const noexcept { return reinterpret_cast<Chunk *>(m_chunkBytes); }
+
     // The header of a page, null as long as no page of its block was used.
     [[nodiscard]] Header *findHeader(uint32_t number) const noexcept {
-      const uint64_t blocks = m_headerBlocks.load(std::memory_order_acquire);
-      return ((blocks >> (number / HEADER_BLOCK_PAGES)) & 1u) != 0 ? m_headers + number : nullptr;
+      const uint32_t block = number / HEADER_BLOCK_PAGES;
+      const uint64_t blocks = m_headerBlocks[block / 64].load(std::memory_order_acquire);
+      return ((blocks >> (block % 64)) & 1u) != 0 ? headers() + number : nullptr;
     }
 
     // The same, with the block given its memory if it has none yet. Throws
     // std::bad_alloc if there is no memory for it.
     [[nodiscard]] Header &makeHeader(uint32_t number) {
-      const uint64_t bit = uint64_t{1} << (number / HEADER_BLOCK_PAGES);
-      if ((m_headerBlocks.load(std::memory_order_acquire) & bit) == 0) [[unlikely]] {
-        startHeaderBlock(number / HEADER_BLOCK_PAGES);
+      const uint32_t block = number / HEADER_BLOCK_PAGES;
+      const uint64_t bit = uint64_t{1} << (block % 64);
+      if ((m_headerBlocks[block / 64].load(std::memory_order_acquire) & bit) == 0) [[unlikely]] {
+        startHeaderBlock(block);
       }
-      return m_headers[number];
+      return headers()[number];
     }
 
     // Gives a block of headers its memory, all zero, which makes all of its
@@ -799,22 +869,22 @@ namespace sc::ecs2::internal {
     // Out of line, so that what adds a component stays small enough to be
     // inlined where it is called.
     [[gnu::noinline]] void startHeaderBlock(size_t block) {
-      memory::commit(m_headers + (block * HEADER_BLOCK_PAGES), HEADER_BLOCK_BYTES);
-      m_headerBlocks.fetch_or(uint64_t{1} << block, std::memory_order_acq_rel);
+      memory::commit(headers() + (block * HEADER_BLOCK_PAGES), HEADER_BLOCK_BYTES);
+      m_headerBlocks[block / 64].fetch_or(uint64_t{1} << (block % 64), std::memory_order_acq_rel);
     }
 
     // Where the component of an index is, made or not. Its chunk must be
     // reserved. Relaxed: a thread that may touch the component has seen the
     // page get its memory, and with it the chunk.
     [[nodiscard]] T *valueAt(uint32_t index) const noexcept {
-      return m_chunks[index >> CHUNK_BITS].load(std::memory_order_relaxed) + (index & (CHUNK_SIZE - 1));
+      return chunkTable()[index >> CHUNK_BITS].values.load(std::memory_order_relaxed) + (index & (CHUNK_SIZE - 1));
     }
 
     // The values of a page, null for a component without members and for a
     // page whose chunk was never reserved.
     [[nodiscard]] T *valuesOf(uint32_t number) const noexcept {
       if constexpr (HAS_VALUE) {
-        T *const values = m_chunks[number / CHUNK_PAGES].load(std::memory_order_relaxed);
+        T *const values = chunkTable()[number / CHUNK_PAGES].values.load(std::memory_order_relaxed);
         return values != nullptr ? values + (size_t{number % CHUNK_PAGES} << PAGE_BITS) : nullptr;
       } else {
         return nullptr;
@@ -825,7 +895,7 @@ namespace sc::ecs2::internal {
     // std::bad_alloc if the OS has no room for them. Out of line, as
     // makeHeaderBlock.
     [[gnu::noinline]] T *makeChunk(size_t chunk) {
-      std::atomic<T *> &slot = m_chunks[chunk];
+      std::atomic<T *> &slot = chunkTable()[chunk].values;
       T *values = slot.load(std::memory_order_acquire);
       if (values != nullptr) [[likely]] {
         return values;
@@ -853,10 +923,10 @@ namespace sc::ecs2::internal {
         memory::preferSmallPages(fresh, CHUNK_BYTES);
       }
       // Before the chunk is there for others, who read it after they saw it.
-      m_chunkKept[chunk] = kept;
+      chunkTable()[chunk].kept = kept;
       slot.store(fresh, std::memory_order_release);
       // Only read when the column goes, after every thread is done with it.
-      m_chunkMemory[chunk] = reserved;
+      chunkTable()[chunk].memory = reserved;
       m_chunkCount.fetch_add(1, std::memory_order_relaxed);
       return fresh;
     }
@@ -957,7 +1027,7 @@ namespace sc::ecs2::internal {
     // A page that came out of the spares gives its memory back if it still
     // has no component, see park.
     void unpark(uint32_t number) noexcept {
-      Header &header = m_headers[number];
+      Header &header = headers()[number];
       header.parked.store(false, std::memory_order_seq_cst);
       vacate(header, number);
     }
@@ -1029,8 +1099,10 @@ namespace sc::ecs2::internal {
       const size_t offset = size_t{number % CHUNK_PAGES} * PAGE_BYTES;
       std::byte *const first = base + offset;
       memory::commit(first, PAGE_BYTES);
-      const size_t firstRegion = (chunk * CHUNK_REGIONS) + (offset / memory::HUGE_PAGE_SIZE);
-      const size_t lastRegion = (chunk * CHUNK_REGIONS) + ((offset + PAGE_BYTES - 1) / memory::HUGE_PAGE_SIZE);
+      // Within the chunk, as offset.
+      const size_t firstRegion = offset / memory::HUGE_PAGE_SIZE;
+      const size_t lastRegion = (offset + PAGE_BYTES - 1) / memory::HUGE_PAGE_SIZE;
+      std::array<std::atomic<uint32_t>, CHUNK_REGIONS> &regions = chunkTable()[chunk].regions;
 
       if (!hugePages()) {
         if (m_grows && (pages() + 1) * PAGE_BYTES >= HUGE_PAGE_COLUMN_BYTES) {
@@ -1039,10 +1111,10 @@ namespace sc::ecs2::internal {
           // Remembered for moveToHugePages. Whoever comes to the huge page
           // later finds it started.
           for (size_t region = firstRegion; region <= lastRegion; ++region) {
-            m_regions[region].store(STARTED, std::memory_order_release);
+            regions[region].store(STARTED, std::memory_order_release);
           }
           const size_t bytes = size_t{count} * sizeof(T);
-          if ((vacated || !m_chunkKept[chunk]) && bytes > memory::OS_PAGE_SIZE) {
+          if ((vacated || !chunkTable()[chunk].kept) && bytes > memory::OS_PAGE_SIZE) {
             memory::populate(first + (size_t{slot} * sizeof(T)), bytes);
           }
           return;
@@ -1050,7 +1122,7 @@ namespace sc::ecs2::internal {
       }
 
       for (size_t region = firstRegion; region <= lastRegion; ++region) {
-        std::atomic<uint32_t> &state = m_regions[region];
+        std::atomic<uint32_t> &state = regions[region];
         uint32_t seen = state.load(std::memory_order_acquire);
         if (seen == STARTED) [[likely]] {
           continue;
@@ -1058,7 +1130,7 @@ namespace sc::ecs2::internal {
         if (seen == UNTOUCHED &&
             state.compare_exchange_strong(seen, STARTING, std::memory_order_acq_rel, std::memory_order_acquire)) {
           // Within this page: the rest of the huge page belongs to others.
-          const size_t touched = std::max(offset, (region - (chunk * CHUNK_REGIONS)) * memory::HUGE_PAGE_SIZE);
+          const size_t touched = std::max(offset, region * memory::HUGE_PAGE_SIZE);
           *reinterpret_cast<volatile std::byte *>(base + touched) = std::byte{0};
           state.store(STARTED, std::memory_order_release);
           state.notify_all();
@@ -1079,16 +1151,21 @@ namespace sc::ecs2::internal {
       if (m_hugePages.exchange(true, std::memory_order_acq_rel)) {
         return;
       }
-      for (size_t chunk = 0; chunk < CHUNK_COUNT; ++chunk) {
-        T *const values = m_chunks[chunk].load(std::memory_order_acquire);
+      // Up to the last one there is, as when the column goes. Under the lock
+      // that chunks are made under, so that none comes in between and the
+      // count is right; one made afterwards is made for huge pages anyway.
+      const std::scoped_lock lock{m_growMutex};
+      for (size_t chunk = 0, left = chunks(); left != 0 && chunk < CHUNK_COUNT; ++chunk) {
+        T *const values = chunkTable()[chunk].values.load(std::memory_order_acquire);
         if (values == nullptr) {
           continue;
         }
+        --left;
         memory::preferHugePages(values, CHUNK_BYTES);
         auto *const base = reinterpret_cast<std::byte *>(values);
         // Only the huge pages that lie in the chunk as a whole.
         for (size_t region = 0; (region + 1) * memory::HUGE_PAGE_SIZE <= CHUNK_BYTES; ++region) {
-          if (m_regions[(chunk * CHUNK_REGIONS) + region].load(std::memory_order_acquire) == STARTED) {
+          if (chunkTable()[chunk].regions[region].load(std::memory_order_acquire) == STARTED) {
             memory::collapse(base + (region * memory::HUGE_PAGE_SIZE), memory::HUGE_PAGE_SIZE);
           }
         }
@@ -1098,30 +1175,26 @@ namespace sc::ecs2::internal {
     // Changes once at most, from small pages to huge ones, see Pages::Auto.
     std::atomic<bool> m_hugePages{true};
     bool m_grows = false;
-    // The header of every page, reserved for all of them and given memory a
-    // block of HEADER_BLOCK_PAGES at a time, when a page of the block is
-    // first used; a bit of m_headerBlocks for every block that has it. On
-    // Linux with vm.overcommit_memory=2 the whole range of HEADER_BYTES is
-    // promised from the start, see vacate.
-    Header *m_headers;
-    std::atomic<uint64_t> m_headerBlocks{0};
-    // The values of every chunk, at a huge page, null until the chunk is
-    // reserved; and the range reserved for it, which they lie in.
-    std::array<std::atomic<T *>, CHUNK_COUNT> m_chunks{};
-    std::array<void *, CHUNK_COUNT> m_chunkMemory{};
-    // Whether memory::rangeCache kept the range of a chunk, see startPage.
-    std::array<bool, CHUNK_COUNT> m_chunkKept{};
+    // A bit for every block of headers that has memory, see m_headerBytes.
+    std::array<std::atomic<uint64_t>, (HEADER_BLOCK_COUNT + 63) / 64> m_headerBlocks{};
     std::atomic<size_t> m_chunkCount{0};
     // Held while a chunk is reserved.
     std::mutex m_growMutex;
-    // Whether the first access to a huge page of the values was made, by
-    // chunk.
-    std::array<std::atomic<uint32_t>, REGION_COUNT> m_regions{};
     std::atomic<size_t> m_pages{0};
     // The emptied pages that keep their memory, NO_PAGE for an empty place;
     // the next one takes the place m_nextSpare points to.
     std::array<std::atomic<uint32_t>, SPARE_PAGES> m_spares;
     std::atomic<uint32_t> m_nextSpare{0};
+    // Last, and left as the OS gives them, all zero; see operator new. What
+    // the column keeps of every chunk, see Chunk. Filled with zeros by the
+    // constructor, it was 1.6 MiB for a component of 64 bytes in every
+    // column, whether used or not. In ranges of their own, one per table,
+    // making and dropping a world of two columns took 106 instead of 45 µs,
+    // nearly all of it in mmap and munmap.
+    alignas(Chunk) mutable std::byte m_chunkBytes[CHUNK_TABLE_BYTES];
+    // The header of every page, given memory a block of HEADER_BLOCK_PAGES at
+    // a time, when a page of the block is first used.
+    alignas(Header) mutable std::byte m_headerBytes[HEADER_BYTES];
   };
 
 } // namespace sc::ecs2::internal
