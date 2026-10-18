@@ -30,7 +30,10 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
   `addComponents` still checks with `contains` and otherwise assigns `T{}`.
 - [x] **No bulk destroy:** `World::destroy(std::span<const Entity>)` since `fa865dc`; the factory of ecs_benchmark
   uses it since its commit `9bf8775`.
-- [ ] **No entity count:** the benchmark tests check with `valid()` instead.
+- [x] **No entity count:** `World::alive()` now, worked out from the pages handed out, less what the threads have
+  not handed out of them yet and the free lists; create and destroy keep no count (it would be a locked instruction
+  per create on a line all creating threads write). Nothing may create or destroy next to it. Its own cost (129
+  `Share`s read) not measured. The benchmark tests still check with `valid()`.
 
 ## Limits
 
