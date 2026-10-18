@@ -226,13 +226,13 @@ namespace sc::ecs2::internal {
   // Does what the lists of a stage recorded, once nothing runs any more: the
   // changes of the components first, then the entities to destroy.
   //
-  // The changes are sorted by the page of their entity, keeping their order
-  // (the lists one after the other, each in the order it was recorded), and
-  // every page goes to one thread. So the changes of an entity are done in
+  // The changes are sorted by the page of their entity with PageSort,
+  // keeping their order (the lists one after the other, each in the order it
+  // was recorded), and every page goes to one thread. So the changes of an entity are done in
   // their order, and no other thread touches the page in any column, which
   // lets the erases of a page be done a word of the mask at a time
   // (Column::eraseAlone of a KillPage). The entities are destroyed at once,
-  // with World::destroy of a span.
+  // with World::parallelDestroy.
   class CommandApplier {
   public:
     // Does what the lists recorded and clears them. If a change throws, the
@@ -257,7 +257,7 @@ namespace sc::ecs2::internal {
         m_destroyed.insert(m_destroyed.end(), list->destroyed().begin(), list->destroyed().end());
       }
       if (!m_destroyed.empty()) {
-        world.destroy(std::span<const Entity>{m_destroyed});
+        world.parallelDestroy(std::span<const Entity>{m_destroyed});
       }
       // All of it done, also the changes of the null entity, which only drop
       // their values.
@@ -271,10 +271,6 @@ namespace sc::ecs2::internal {
 
     // A page is not worth waking a thread for below this.
     static constexpr size_t CHANGES_PER_THREAD = 4096;
-    // The lists are counted and placed in pieces of this many changes, so
-    // that a list with most of the changes does not leave the work to one
-    // thread.
-    static constexpr size_t SEGMENT = size_t{1} << 16;
 
     // The erases of a page in one column, gathered until something else comes.
     struct Kill {
@@ -313,33 +309,38 @@ namespace sc::ecs2::internal {
     // started yet are left, and the first exception is rethrown once the
     // pages that other threads are working on are finished.
     void applySpread(World &world, std::span<CommandList *const> lists, size_t helpers) {
-      m_segments.clear();
+      m_sort.clear();
       for (CommandList *const list: lists) {
-        const std::span<Change> changes = list->changes();
-        for (size_t first = 0; first < changes.size(); first += SEGMENT) {
-          m_segments.push_back(changes.subspan(first, std::min(SEGMENT, changes.size() - first)));
-        }
+        m_sort.add(list->changes());
       }
-      count(helpers);
-      if (m_pages.size() <= 1) {
-        // Only one after all, past those of the null entity, which count did.
-        // The counts go back to zero first, whatever happens then.
-        uncount();
+      const auto index = [](const Change &change) { return indexOf(change.entity); };
+      // A change of the null entity is done right away, which only drops its
+      // value.
+      m_sort.count(helpers, index, [](Change &change) {
+        if (change.finish != nullptr) {
+          const auto finish = change.finish;
+          change.finish = nullptr;
+          finish(*change.column, indexOf(change.entity), change.value, false);
+        }
+      });
+      if (m_sort.pages().size() <= 1) {
+        // Only one after all, past those of the null entity. The counts go
+        // back to zero first, whatever happens then.
+        m_sort.uncount();
         applyInOrder(world, lists);
         return;
       }
-      place(helpers);
+      m_sort.place(helpers, index);
       std::atomic_flag failed;
       std::exception_ptr error;
-      threading::parallelFor(m_pages.size(), 1, helpers, [&](size_t first, size_t last) {
+      threading::parallelFor(m_sort.pages().size(), 1, helpers, [&](size_t first, size_t last) {
         std::vector<Kill> kills;
         for (size_t i = first; i < last; ++i) {
           if (failed.test(std::memory_order_relaxed)) {
             return;
           }
           try {
-            applyPage(world, std::span<Change *const>{m_order}.subspan(m_offsets[i], m_offsets[i + 1] - m_offsets[i]),
-                      kills);
+            applyPage(world, m_sort.page(i), kills);
           } catch (...) {
             if (!failed.test_and_set(std::memory_order_acq_rel)) {
               error = std::current_exception();
@@ -350,85 +351,6 @@ namespace sc::ecs2::internal {
       });
       if (error) {
         std::rethrow_exception(error);
-      }
-    }
-
-    // m_order: the changes by page, those of m_pages[i] from m_offsets[i] to
-    // m_offsets[i + 1]. A counting sort over the pages, which keeps the order:
-    // count counts the changes of every segment per page, a segment per
-    // thread, and finds the pages; place puts the changes in m_order, again a
-    // thread per segment, each in the places the segments before it leave.
-    // Sorting 1M changes on one thread took about 2.8 ms, as long as applying
-    // them. A change of an index past INDEX_LIMIT (the null entity) has no
-    // page: count does it right away, which only drops its value.
-    void count(size_t helpers) {
-      if (m_counts.size() < m_segments.size() * PAGE_COUNT) {
-        m_counts.assign(m_segments.size() * PAGE_COUNT, 0);
-      }
-      threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
-        for (size_t segment = first; segment < last; ++segment) {
-          uint32_t *const counts = m_counts.data() + (segment * PAGE_COUNT);
-          for (Change &change: m_segments[segment]) {
-            const uint32_t index = indexOf(change.entity);
-            if (index < INDEX_LIMIT) {
-              ++counts[index >> PAGE_BITS];
-            } else if (change.finish != nullptr) {
-              const auto finish = change.finish;
-              change.finish = nullptr;
-              finish(*change.column, index, change.value, false);
-            }
-          }
-        }
-      });
-      m_pages.clear();
-      for (uint32_t page = 0; page < PAGE_COUNT; ++page) {
-        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
-          if (m_counts[(segment * PAGE_COUNT) + page] != 0) {
-            m_pages.push_back(page);
-            break;
-          }
-        }
-      }
-    }
-
-    // m_pages as count left it, with more than one page. Leaves m_counts at
-    // zero.
-    void place(size_t helpers) {
-      m_offsets.resize(m_pages.size() + 1);
-      uint32_t at = 0;
-      for (size_t i = 0; i < m_pages.size(); ++i) {
-        m_offsets[i] = at;
-        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
-          uint32_t &count = m_counts[(segment * PAGE_COUNT) + m_pages[i]];
-          const uint32_t here = count;
-          // From here on where the next change of the segment in the page
-          // goes.
-          count = at;
-          at += here;
-        }
-      }
-      m_offsets.back() = at;
-      m_order.resize(at);
-      threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
-        for (size_t segment = first; segment < last; ++segment) {
-          uint32_t *const places = m_counts.data() + (segment * PAGE_COUNT);
-          for (Change &change: m_segments[segment]) {
-            const uint32_t index = indexOf(change.entity);
-            if (index < INDEX_LIMIT) {
-              m_order[places[index >> PAGE_BITS]++] = &change;
-            }
-          }
-        }
-      });
-      uncount();
-    }
-
-    // Leaves m_counts at zero for the next stage.
-    void uncount() noexcept {
-      for (const uint32_t page: m_pages) {
-        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
-          m_counts[(segment * PAGE_COUNT) + page] = 0;
-        }
       }
     }
 
@@ -486,14 +408,7 @@ namespace sc::ecs2::internal {
       }
     }
 
-    // The lists in pieces of SEGMENT changes.
-    std::vector<std::span<Change>> m_segments;
-    // Per segment and page number, while sorting; zero in between.
-    std::vector<uint32_t> m_counts;
-    // The pages that have changes, by number.
-    std::vector<uint32_t> m_pages;
-    std::vector<uint32_t> m_offsets;
-    std::vector<Change *> m_order;
+    PageSort<Change> m_sort;
     // Of all lists.
     std::vector<Entity> m_destroyed;
   };

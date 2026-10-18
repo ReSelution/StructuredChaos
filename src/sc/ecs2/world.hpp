@@ -93,6 +93,124 @@ namespace sc::ecs2::internal {
 #endif
   }
 
+  // Sorts items by the page of their entity, keeping their order, so that
+  // every page can go to one thread: no other thread touches it in any
+  // column then, and what happens to one entity keeps its order. For
+  // World::destroy and CommandApplier.
+  //
+  // A counting sort over the pages: count counts the items of every segment
+  // per page, a segment per thread, and finds the pages; place puts the items
+  // in order, again a thread per segment, each in the places the segments
+  // before it leave. Sorting 1M changes on one thread took about 2.8 ms, as
+  // long as applying them.
+  template<typename Item>
+  class PageSort {
+  public:
+    // The items are counted and placed in pieces of this many, so that one
+    // long span of them does not leave the work to one thread.
+    static constexpr size_t SEGMENT = size_t{1} << 16;
+
+    void clear() noexcept { m_segments.clear(); }
+
+    // More items, after those added before.
+    void add(std::span<Item> items) {
+      for (size_t first = 0; first < items.size(); first += SEGMENT) {
+        m_segments.push_back(items.subspan(first, std::min(SEGMENT, items.size() - first)));
+      }
+    }
+
+    // indexOf gives the index of an item; one past INDEX_LIMIT (the null
+    // entity) has no page and goes to none instead, on the thread that
+    // counts it.
+    template<typename IndexOf, typename None>
+    void count(size_t helpers, const IndexOf &indexOf, const None &none) {
+      if (m_counts.size() < m_segments.size() * PAGE_COUNT) {
+        m_counts.assign(m_segments.size() * PAGE_COUNT, 0);
+      }
+      threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
+        for (size_t segment = first; segment < last; ++segment) {
+          uint32_t *const counts = m_counts.data() + (segment * PAGE_COUNT);
+          for (Item &item: m_segments[segment]) {
+            const uint32_t index = indexOf(item);
+            if (index < INDEX_LIMIT) {
+              ++counts[index >> PAGE_BITS];
+            } else {
+              none(item);
+            }
+          }
+        }
+      });
+      m_pages.clear();
+      for (uint32_t page = 0; page < PAGE_COUNT; ++page) {
+        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+          if (m_counts[(segment * PAGE_COUNT) + page] != 0) {
+            m_pages.push_back(page);
+            break;
+          }
+        }
+      }
+    }
+
+    // After count, for the items of the pages; leaves the counts at zero.
+    // Without it, uncount does that.
+    template<typename IndexOf>
+    void place(size_t helpers, const IndexOf &indexOf) {
+      m_offsets.resize(m_pages.size() + 1);
+      uint32_t at = 0;
+      for (size_t i = 0; i < m_pages.size(); ++i) {
+        m_offsets[i] = at;
+        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+          uint32_t &count = m_counts[(segment * PAGE_COUNT) + m_pages[i]];
+          const uint32_t here = count;
+          // From here on where the next item of the segment in the page goes.
+          count = at;
+          at += here;
+        }
+      }
+      m_offsets.back() = at;
+      m_order.resize(at);
+      threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
+        for (size_t segment = first; segment < last; ++segment) {
+          uint32_t *const places = m_counts.data() + (segment * PAGE_COUNT);
+          for (Item &item: m_segments[segment]) {
+            const uint32_t index = indexOf(item);
+            if (index < INDEX_LIMIT) {
+              m_order[places[index >> PAGE_BITS]++] = &item;
+            }
+          }
+        }
+      });
+      uncount();
+    }
+
+    // Leaves the counts at zero for the next sort.
+    void uncount() noexcept {
+      for (const uint32_t page: m_pages) {
+        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+          m_counts[(segment * PAGE_COUNT) + page] = 0;
+        }
+      }
+    }
+
+    // The pages that have items, by number, as count found them.
+    [[nodiscard]] std::span<const uint32_t> pages() const noexcept { return m_pages; }
+
+    // After place: where the items of pages()[i] start among all, and the
+    // items themselves.
+    [[nodiscard]] uint32_t offset(size_t i) const noexcept { return m_offsets[i]; }
+    [[nodiscard]] std::span<Item *const> page(size_t i) const noexcept {
+      return std::span<Item *const>{m_order}.subspan(m_offsets[i], m_offsets[i + 1] - m_offsets[i]);
+    }
+
+  private:
+    std::vector<std::span<Item>> m_segments;
+    // Per segment and page number, while sorting; zero in between.
+    std::vector<uint32_t> m_counts;
+    std::vector<uint32_t> m_pages;
+    std::vector<uint32_t> m_offsets;
+    std::vector<Item *> m_order;
+  };
+
   // Far more than a program has: a world only reserves the addresses for
   // them, see World::m_table.
   inline constexpr size_t MAX_COMPONENT_TYPES = size_t{1} << 16;
@@ -299,6 +417,65 @@ namespace sc::ecs2 {
         m_killPlace[kill.number] = 0;
       }
       m_killPages.clear();
+      return destroyed;
+    }
+
+    // The same on the calling thread and on every pool thread that has
+    // nothing else to do, for many entities: sorted by page with PageSort,
+    // and every page on one thread, which ends its entities and takes their
+    // components away in every column; only giving the indices back to the
+    // free lists is left to the calling thread. Ending the entities was most
+    // of it on one thread: 6.6 ns per entity without components, and 0.4 to
+    // 0.6 ns more per column. Fewer than ENTITIES_PER_THREAD, or all in one
+    // page, are done as destroy does.
+    size_t parallelDestroy(std::span<const Entity> entities) {
+      const size_t helpers = entities.size() / ENTITIES_PER_THREAD;
+      if (helpers == 0) {
+        return destroy(entities);
+      }
+      m_destroySort.clear();
+      m_destroySort.add(entities);
+      const auto index = [](const Entity &entity) { return indexOf(entity); };
+      m_destroySort.count(helpers, index, [](const Entity &) {});
+      if (m_destroySort.pages().size() <= 1) {
+        m_destroySort.uncount();
+        return destroy(entities);
+      }
+      m_destroySort.place(helpers, index);
+      const std::span<const uint32_t> pages = m_destroySort.pages();
+      m_freed.resize(entities.size());
+      m_freedCounts.resize(pages.size());
+      const size_t columns = m_columnCount.load(std::memory_order_relaxed);
+      threading::parallelFor(pages.size(), 1, helpers, [&](size_t first, size_t last) {
+        internal::KillPage kill;
+        for (size_t i = first; i < last; ++i) {
+          kill = {.number = pages[i]};
+          // Where the indices of this page go, in the order of the pages.
+          uint32_t *const freed = m_freed.data() + m_destroySort.offset(i);
+          uint32_t count = 0;
+          for (const Entity *const entity: m_destroySort.page(i)) {
+            if (m_entities.kill(*entity)) {
+              const uint32_t slot = indexOf(*entity) & (PAGE_SIZE - 1);
+              kill.words[slot / 64] |= uint64_t{1} << (slot % 64);
+              kill.touched |= uint64_t{1} << (slot / 64);
+              freed[count++] = indexOf(*entity);
+            }
+          }
+          m_freedCounts[i] = count;
+          if (count != 0) {
+            for (size_t c = 0; c < columns; ++c) {
+              m_columnList[c]->eraseAlone(std::span<const internal::KillPage>{&kill, 1});
+            }
+          }
+        }
+      });
+      // Together at the front, in the order of the pages.
+      size_t destroyed = 0;
+      for (size_t i = 0; i < pages.size(); ++i) {
+        std::copy_n(m_freed.data() + m_destroySort.offset(i), m_freedCounts[i], m_freed.data() + destroyed);
+        destroyed += m_freedCounts[i];
+      }
+      m_entities.giveMany(std::span<const uint32_t>{m_freed.data(), destroyed});
       return destroyed;
     }
 
@@ -736,6 +913,11 @@ namespace sc::ecs2 {
     // one (made the first time, PAGE_COUNT entries).
     std::vector<internal::KillPage> m_killPages;
     std::vector<uint32_t> m_killPlace;
+    // For destroy of many entities on the pool: the entities by page, the
+    // indices each page gave back, and how many.
+    internal::PageSort<const Entity> m_destroySort;
+    std::vector<uint32_t> m_freed;
+    std::vector<uint32_t> m_freedCounts;
   };
 
 } // namespace sc::ecs2

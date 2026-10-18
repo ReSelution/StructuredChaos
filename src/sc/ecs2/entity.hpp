@@ -312,6 +312,32 @@ namespace sc::ecs2::internal {
       return count - m_free.size() - m_rareFree.size();
     }
 
+    // destroyMany in two halves, for threads that take a page of entities
+    // each: kill ends the entity if it exists, without giving its index back,
+    // which giveMany does afterwards for all of them on one thread. kill only
+    // touches the generation of the index, so threads may kill entities of
+    // different pages at the same time, but nothing else may run.
+    [[nodiscard]] bool kill(Entity entity) noexcept {
+      if (!valid(entity)) {
+        return false;
+      }
+      ++*generation(indexOf(entity));
+      return true;
+    }
+
+    // The indices of entities kill ended, to the lists they came from in one
+    // step each. Must have nothing running next to it.
+    void giveMany(std::span<const uint32_t> indices) {
+      const uint32_t rareBegin = pages().rareBegin();
+      m_free.open();
+      m_rareFree.open();
+      for (const uint32_t index: indices) {
+        (index >= rareBegin ? m_rareFree : m_free).add(index);
+      }
+      m_free.close();
+      m_rareFree.close();
+    }
+
     // Which pages have entities: the first so many, and the last so many for
     // the rare ones.
     struct Pages {

@@ -908,6 +908,69 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(world.valid(entity));
   }
 
+  SECTION("Many Entities Are Destroyed At Once On Several Threads") {
+    // Enough for the pool, over several pages, some of them rare.
+    const auto alive = std::make_shared<int>(0);
+    std::vector<Entity> entities;
+    for (size_t i = 0; i < (3 * PAGE_SIZE) + 100; ++i) {
+      entities.push_back(i % 50 == 0 ? world.create(sc::ecs2::rare) : world.create());
+      world.emplace<Position>(entities.back(), static_cast<float>(i), 0.0f);
+      if (i % 3 == 0) {
+        world.emplace<Named>(entities.back(), std::string(100, 'n'), alive);
+      }
+    }
+
+    // Every other one, one of them twice, one destroyed before, and nobody.
+    std::vector<Entity> gone;
+    std::vector<Entity> kept;
+    for (size_t i = 0; i < entities.size(); ++i) {
+      (i % 2 == 0 ? gone : kept).push_back(entities[i]);
+    }
+    const size_t freed = gone.size();
+    REQUIRE(world.destroy(gone[4]));
+    gone.push_back(gone[10]);
+    gone.push_back(sc::ecs2::null);
+    REQUIRE(world.parallelDestroy(std::span<const Entity>{gone}) == freed - 1);
+    REQUIRE(world.alive() == kept.size());
+
+    for (const Entity entity: gone) {
+      REQUIRE_FALSE(world.valid(entity));
+    }
+    size_t named = 0;
+    for (const Entity entity: kept) {
+      REQUIRE(world.valid(entity));
+      REQUIRE(world.contains<Position>(entity));
+      named += world.contains<Named>(entity);
+    }
+    REQUIRE(alive.use_count() == 1 + static_cast<long>(named));
+    size_t positions = 0;
+    world.each<const Position>([&](const Position &) { ++positions; });
+    REQUIRE(positions == kept.size());
+
+    // The indices come back, each once, to the kind they came from.
+    std::unordered_set<uint32_t> indices;
+    for (size_t i = 0; i < freed; ++i) {
+      const bool rare = sc::ecs2::indexOf(gone[i]) >= sc::ecs2::INDEX_LIMIT - (4 * PAGE_SIZE);
+      indices.insert(sc::ecs2::indexOf(rare ? world.create(sc::ecs2::rare) : world.create()));
+    }
+    REQUIRE(indices.size() == freed);
+    for (size_t i = 0; i < freed; ++i) {
+      REQUIRE(indices.contains(sc::ecs2::indexOf(gone[i])));
+    }
+    for (const Entity entity: kept) {
+      world.erase<Named>(entity);
+    }
+    REQUIRE(alive.use_count() == 1);
+
+    // Many in one page are done on the calling thread, with the same result.
+    World single{world.pages()};
+    std::vector<Entity> page(PAGE_SIZE / 2);
+    single.create(std::span<Entity>{page}, Position{});
+    REQUIRE(single.parallelDestroy(std::span<const Entity>{page}) == page.size());
+    REQUIRE(single.alive() == 0);
+    REQUIRE(single.column<Position>().pages() == single.column<Position>().spares());
+  }
+
   SECTION("A Component Is Added Or Replaced") {
     const Entity entity = world.create();
     REQUIRE(world.emplaceOrReplace<Position>(entity, 1.0f, 2.0f) == Emplaced::Made);
