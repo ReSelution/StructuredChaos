@@ -135,6 +135,17 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     });
   };
 
+  BENCHMARK_ADVANCED(name::serial(name::DESTROY_BATCH))(Catch::Benchmark::Chronometer meter) {
+    auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
+    for (auto &world: worlds) {
+      world->fill_moving();
+    }
+    meter.measure([&](int run) {
+      World &world = *worlds[static_cast<size_t>(run)];
+      world.registry.destroy(world.entities.begin(), world.entities.end());
+    });
+  };
+
   {
     World world{ENTITY_COUNT};
     world.fill_moving();

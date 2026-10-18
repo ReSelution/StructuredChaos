@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -155,6 +156,24 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
       for (const Entity entity: world.entities) {
         world.world.destroy(entity);
       }
+    });
+  };
+
+  {
+    World world{ENTITY_COUNT};
+    world.fill_moving();
+    REQUIRE(world.world.destroy(std::span<const Entity>{world.entities}) == ENTITY_COUNT);
+    REQUIRE(world.world.column<Position>().pages() == world.world.column<Position>().spares());
+    REQUIRE_FALSE(world.world.valid(world.entities.back()));
+  }
+  BENCHMARK_ADVANCED(name::serial(name::DESTROY_BATCH))(Catch::Benchmark::Chronometer meter) {
+    auto worlds = make_worlds<World>(meter.runs(), ENTITY_COUNT);
+    for (auto &world: worlds) {
+      world->fill_moving();
+    }
+    meter.measure([&](int run) {
+      World &world = *worlds[static_cast<size_t>(run)];
+      world.world.destroy(std::span<const Entity>{world.entities});
     });
   };
 
