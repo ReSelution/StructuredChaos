@@ -372,6 +372,16 @@ namespace sc::ecs2 {
   // system names them, not even for reading. Both are checked when the
   // system is added. To read such a component, read it in the function of
   // modify.
+  //
+  // Modify or Commands::modify: where few threads hit the same entity,
+  // Modify, which runs right away where the threads are; where many hit few,
+  // Commands::modify, which does not touch the entity before the stage is
+  // over. Every modify of a thread reaches for the cache line of the lock bit,
+  // and every one that takes it writes it twice; with many threads on one
+  // entity the line goes from core to core for each of them, whether the bit
+  // is free or not. ecs_compare, 1M entities damaging another one, all
+  // threads, ns per hit, Modify against Commands::modify: random target 1.4
+  // and 6.3, one of 1 000 targets 14.6 and 3.4, the same target 15.6 and 3.8.
   template<typename... Components>
   class Modify {
     static_assert((!std::is_const_v<Components> && ...), "Modify is for writing; a const component is read with Query");
@@ -464,6 +474,9 @@ namespace sc::ecs2 {
     // a thread gets in a parallel loop is not fixed, so the order is only the
     // same from run to run for one thread. The result is the same where the
     // order does not matter, as with damage that is subtracted.
+    //
+    // Faster than Modify where many threads hit few entities, slower where
+    // they hit many: the changes are done on one thread, see Modify.
     template<typename Function>
     void modify(Entity entity, Function &&function) const {
       using Component = internal::ModifiedBy<std::decay_t<Function>>;
