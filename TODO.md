@@ -37,25 +37,20 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
 
 ## Limits
 
-- [ ] **`INDEX_LIMIT` beyond 2^24:** the limit comes from the version before the chunks, which reserved the address
-  space of every column for all indices (2^32 × 256 bytes = 1 TiB per column). With values in chunks, what is left
-  that grows with the limit (looked at in the code, nothing measured):
-  - The entity handle already has 32 bits of index (`INDEX_BITS = 32`), and the values only take address space for
-    the chunks in use: no work.
-  - The page headers lie in reserved address space and are found from the index: at 2^32 about 1.1 GB of address
-    space per column (`PAGE_COUNT × 1088 B`), untouched where unused; with 128 TiB that is room for ~100 000 columns.
-    No problem.
-  - **The one hard limit:** `m_headerBlocks` is a single `uint64_t`, one bit per committed header block, so that
-    `findHeader` never reads a reservation without memory (needed on Windows); `static_assert(HEADER_BLOCK_COUNT <=
-    64)`. At 2^32 there are 16 384 blocks: an array of masks (256 words), or a second level as with the summary.
-  - Real memory instead of address space: `m_chunks`, `m_chunkMemory`, `m_chunkKept` are `std::array`s in the
-    `Column` object, sized `INDEX_LIMIT / CHUNK_SIZE` and zeroed when it is made; at 2^32 and 256-byte components
-    ~9 MB per column. In reserved address space like the headers, a table would only cost what is touched.
-  - The same for `m_killPlace` of the bulk destroy (`fa865dc`): a `std::vector` of `PAGE_COUNT` entries, 16 KB per
-    world now, 4 MB at 2^32. Reserved instead, only the entries of the touched pages get memory, and destroy sets
-    them back to 0 anyway.
-  - A middle way: 2^28 (268 M entities) needs 1024 header blocks, 16 words instead of one, and nothing else changes
-    much.
+- [x] **`INDEX_LIMIT` beyond 2^24 (`4766545`):** now `2^32 - PAGE_SIZE`, the index stays a `uint32_t` (the last
+  page is left out: the index of null lies in it, and the end of a page still fits). What grew with the limit:
+  - Header blocks: a bitmap of 256 words instead of one `uint64_t`, the headers still one reservation (1.06 GiB of
+    addresses per column; with `vm.overcommit_memory=2` all of it is promised, decided so for a `findHeader` of one
+    load).
+  - The chunk tables: first in a range of their own behind a pointer, which cost a random `get` one more dependent
+    load (lookup benchmarks +21 to 27 %), and in five ranges a world of two columns 106 instead of 45 µs to make and
+    drop. Now a column is made with `operator new` in a range of its own and holds headers and chunks itself, one
+    load from `this` as before; create of 100K entities with 2 components in new worlds 1 541 → 1 497 µs, a world
+    made and dropped 30 → 40 µs.
+  - Generations: reserved, not a zeroed `std::unique_ptr` array.
+  - `m_killPlace` and `PageSort` counted over all pages (4 MiB per segment): add + remove through `Commands` went
+    to 19 ms. Fixed with the areas (`df066c0`), see below.
+  - The test that made every entity up to the limit (4 billion, 21 GB) is replaced by `EntityAllocator(pageBits)`.
 
 ## Events with immediate delivery
 
@@ -304,28 +299,53 @@ twice as slow at 1024 as it is.
 
 ## Entity locality: say at create which components an entity will get
 
-Idea, not decided. Entities with the same set of components get their indices from the same pages, so their masks
+Done as areas (`df066c0`): `world.create(components...)` and `create(span, components...)` put the entity in the area
+of its set; area k starts at `bitreverse20(k)` (van der Corput: 0, 2^19, 2^18, 3 * 2^18, ...) and goes on with the
+next free page; free lists and thread shares per area. The original idea: Entities with the same set of components get their indices from the same pages, so their masks
 are full and their components lie without gaps: the full-page/full-word loops apply and every loaded cache line is
 used. Archetype locality at create, without the move on every later change. `create(rare)` is the small version of
 it already (own pages at the top of the index space).
 
-- [ ] **API:** something like `world.create(Layout<Position, Velocity, Health>{})`, or a handle made once
-  (`auto heroes = world.layout<...>(); world.create(heroes);`) so that the lookup is not done per create.
+- [x] **API:** `world.create(Position{}, Velocity{}, Health{})`; the set is numbered once per type list
+  (`setIndex`, a static), the area per world in a table: one load per create, no handle needed.
 - [ ] **Only a hint at create:** components added later do not move the entity, the index stays. In ecs_benchmark the
   mixed entities get their hero components only after create; there it helps only if the factory gives the layout
   at create. Legitimate use of the API, but the benchmark notes should say that sc gets a hint the others do not
   need.
-- [ ] **Open pages per layout:** every layout keeps its own partly filled page. Many layouts with few entities give
+- [ ] **Open pages per layout:** still open with areas: every thread keeps a partly filled page per area. Every layout keeps its own partly filled page. Many layouts with few entities give
   many half empty pages: more memory, and `each()` touches more pages (the summary softens it, the page loop and
   `page()` calls stay). A limit, or a fallback group for small layouts.
-- [ ] **Reused indices:** today one free list for common and one for rare entities. For a destroyed hero to make room
+- [x] **Reused indices:** a free list per area; a page knows its area in 16 bits. Was: one free list for common and
+  one for rare entities. For a destroyed hero to make room
   for a hero again, every layout needs its own free list; otherwise the index space mixes again over time (the state
   the reworked create benchmark of ecs_benchmark measures, with reused indices).
-- [ ] **Threads:** `EntityAllocator::withShare` gives every thread ranges of its own; with layouts every thread needs
-  a range per layout, or threads compete for the open page of a layout.
+- [x] **Threads:** a `Share` per thread and area (129 per area, 8 KiB). Pages are handed out under a lock, once per
+  4096 entities, so that the row of pages the loops go through has no gap.
+- [ ] **Measure the benefit:** not done yet. Three sets created interleaved, then a loop over one of them and the
+  pages per column, `create()` + `emplace` (mixed) against `create(components...)`. Was:
 - [ ] **Measure the upper bound first:** a variant of the mixed update in which the hero entities get one contiguous
   index range (e.g. with `create(rare)` or bulk create). It shows how close sc gets to mustache/flecs with perfect
   locality; only if that pays off does the API.
+
+## Slower after the index limit and the areas
+
+`ecs_compare_sc2`, 5 runs alternating, `5e57280` (before both) against `df066c0`. The benchmarks create their
+worlds with `create(span, Position, Velocity)`, so those entities now lie in an area at page 2^18. The rest is
+level or faster (random `get` -4 %, damage without lock -34 %, add + remove through `Commands` -15 %).
+
+- [x] **destroy all at once, one thread: +24 %** (823 → 1 020 µs). perf: `destroyMany` took twice as long, the chain
+  owner → table of areas → end of the list per entity. `destroyMany` and `giveMany` of indices remember the list of
+  the last page: 785 µs (800 before both steps), probe of `destroy(span)`, 100K entities.
+- [ ] **destroy on all threads: +33 %** (274 → 365 µs). Split up by phase (µs, 100K entities): `PageSort` counted
+  every item twice and looked its page up every time; now one pass that counts, the number of the last page kept,
+  per segment a list of the pages it numbered. In a world that destroyed before: sorting 42 / 55, placing 61 / 51,
+  the rest level. **Open:** in a new world still 42 / 64 and 79 / 92, presumably the first use of the table of
+  page numbers (`mmap`, first faults) and of the vectors per segment; the benchmark makes a new world per sample,
+  a game uses one. A small hash table instead of the table per page would avoid it, at a cost per page change.
+- [ ] **Looking up another entity: +10 % on one thread, +18 % on all** (1 061 → 1 164, 172 → 203 µs). Varies between
+  runs (+6 / +1 % in another one); `valid` now also reads the owner of the page. Measure with more runs first.
+- [ ] **create all at once: +15 %** (127 → 146 µs). Was there before the areas already (+16 % after `4766545`), not
+  looked into.
 
 ## Show the parallel advantage in numbers
 
