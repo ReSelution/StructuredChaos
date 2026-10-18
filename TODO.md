@@ -72,6 +72,24 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   chunk, also with no helper thread). The scheduler keeps other systems away, not the other threads of the same
   loop; reading with `get<const T>` stays allowed. Writing another entity's component there is for `modify`.
   `World::column<T>().get` gets past it.
+- [x] **`Commands::modify(entity, function)`:** the function is moved into the thread's `CommandList` and called after
+  the stage, in the order recorded with the thread's `emplace`/`erase`, without the bit (nothing runs then); does not
+  count as writing the component, so readers of it run in the same stage and see the old value. Same benchmark as
+  `modify` (ns per entity, all threads unless noted):
+
+  | | `Modify` (now) | `Commands::modify` (after the stage) |
+  |---|---|---|
+  | random target, 1 thread | 6.7 | 8.2 |
+  | random target | 1.4 | 6.3 |
+  | one of 1 000 targets | 14.6 | 3.4 |
+  | same target | 15.6 | 3.8 |
+
+  Few threads per target: `Modify`, which runs where the threads are; recording only pays off where they would
+  wait for each other. Applying is one thread for all lists.
+- [ ] **Apply recorded changes in parallel:** `CommandList::apply` runs the lists one after the other on one thread,
+  which is most of the 6.3 ns of a recorded change to a random target (assumed, not split up by measurement).
+  Changes to different pages could be applied by different threads if every page's changes go to one of them;
+  the order of the changes of one entity has to stay.
 - [ ] **Listeners declare their access:** `scheduler.on<Hit>([](const Hit &, Query<const Armor>, Commands) { ... })`
   with the same `SystemParam`s as systems, and an `Emit<Hit>` parameter for the emitter whose `declare` adds the
   `SystemAccess` of every listener of `Hit`. The stages are built in `run()`, so listeners only have to be registered
