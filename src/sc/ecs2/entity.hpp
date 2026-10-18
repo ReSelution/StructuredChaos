@@ -23,9 +23,8 @@ namespace sc::ecs2 {
   // generation of that index, which tells the entity apart from earlier ones
   // that had the same index.
   //
-  // The bits are split up here and nowhere else. The upper bits of the index
-  // are meant to name a room later, a range of indices that belongs to one
-  // system or thread.
+  // The bits are split up here and nowhere else. Where in the index an entity
+  // lies says which area it was made in, see EntityAllocator.
   enum class Entity : uint64_t {};
 
   inline constexpr unsigned INDEX_BITS = 32;
@@ -57,9 +56,9 @@ namespace sc::ecs2 {
   inline constexpr Entity null{~uint64_t{0}};
 
   // Says that an entity is unlike most others: world.create(rare). Such
-  // entities get their indices from the other end, where they are among
-  // themselves. A component that only they have then needs memory for their
-  // few pages and not for pages all over the world.
+  // entities get their indices from an area of their own, where they are
+  // among themselves. A component that only they have then needs memory for
+  // their few pages and not for pages all over the world.
   struct Rare {};
   inline constexpr Rare rare{};
 
@@ -69,32 +68,46 @@ namespace sc::ecs2::internal {
 
   // Hands out entities and knows which ones exist.
   //
-  // The indices come from both ends: from zero upwards for most entities and
-  // from INDEX_LIMIT downwards for the rare ones, a page at a time, until the
-  // two meet. Every thread has a page of its own to take new indices from,
-  // and takes another one when that is used up.
+  // The indices come a page at a time from areas: every set of components
+  // the world makes entities with gets an area of its own, so that entities
+  // with the same components lie together in the same pages. Area k starts
+  // at the page whose number is k with its PAGE_NUMBER_BITS bits in reverse
+  // order: 0, half of all pages, a quarter, three quarters, an eighth and so
+  // on. Every new area halves the largest gap left, so the areas lie as far
+  // apart as their count allows, without a fixed distance (the van der
+  // Corput sequence). An area that runs into a page of another one goes on
+  // with the next free page behind it, as the block groups of ext4 do.
+  // Area COMMON_AREA is that of entities made without components, RARE_AREA
+  // that of world.create(rare).
+  //
+  // Every thread has a page of its own per area to take new indices from,
+  // and takes another one when that is used up. Indices that destroy gives
+  // back go to the area of their page.
   //
   // create and valid are safe from any thread at any time. The threads of the
   // pool and the thread that set it up need no lock for it, every other thread
   // takes turns with the others of its kind for a new index. destroy must have
   // nothing running next to it.
   class EntityAllocator {
+  public:
+    static constexpr size_t MAX_THREADS = 128;
+
+  private:
     // The generations of this many indices are kept in one piece.
     static constexpr unsigned BLOCK_BITS = 16;
     static constexpr uint32_t BLOCK_SIZE = uint32_t{1} << BLOCK_BITS;
     // Also for the indices from INDEX_LIMIT on, which share a block with
     // those below it.
     static constexpr size_t BLOCK_COUNT = size_t{1} << (INDEX_BITS - BLOCK_BITS);
-    static constexpr size_t BLOCKS_BYTES = BLOCK_COUNT * sizeof(std::atomic<uint32_t *>);
+    // The bits of a page number, and how many pages may be handed out: all
+    // but the last one, see INDEX_LIMIT.
+    static constexpr unsigned PAGE_NUMBER_BITS = INDEX_BITS - PAGE_BITS;
     static constexpr uint32_t PAGE_COUNT = INDEX_LIMIT >> PAGE_BITS;
 
     // The indices a thread hands out next, which nobody else has.
     struct alignas(64) Share {
       uint32_t next = 0;
       uint32_t end = 0;
-      // And for the rare entities.
-      uint32_t rareNext = 0;
-      uint32_t rareEnd = 0;
     };
 
     // The indices destroy gave back, to be handed out again.
@@ -155,57 +168,91 @@ namespace sc::ecs2::internal {
       }
     };
 
-  public:
-    static constexpr size_t MAX_THREADS = 128;
+    // What an area has: where it looks for its next page, the indices
+    // destroy gave back and the page of every thread.
+    struct Area {
+      explicit Area(uint32_t start) : cursor(start) {}
 
-    // The addresses of the blocks get memory with their first use, all zero:
-    // 512 KiB for all of them, of which most worlds touch a page or two.
-    // Filled with nulls up front, all of it would be the process' at once.
-    // Reserving and giving them back takes about 4 µs per allocator, against
-    // 0.5 µs for the 2 KiB this was with 2^24 indices.
-    EntityAllocator() : m_blocks(static_cast<std::atomic<uint32_t *> *>(memory::reserve(BLOCKS_BYTES))) {
+      // The page to look at first for the next one. Only changed under
+      // m_pageMutex.
+      uint32_t cursor;
+      FreeList free;
+      // The last one for the threads without one of their own, see withShare.
+      std::array<Share, MAX_THREADS + 1> shares{};
+    };
+
+  public:
+    // Which area the entities made without components and the rare ones go
+    // to. The world numbers the areas of its sets of components from
+    // FIRST_AREA on.
+    static constexpr uint32_t COMMON_AREA = 0;
+    static constexpr uint32_t RARE_AREA = 1;
+    static constexpr uint32_t FIRST_AREA = 2;
+    // A page knows its area in 16 bits, and 0 is for no area.
+    static constexpr uint32_t AREA_LIMIT = 0xFFFF;
+
+  private:
+    // Where the tables lie in the range of the allocator, see m_reserved.
+    // Each one a whole number of OS pages, so that each starts at one.
+    static constexpr size_t BLOCKS_BYTES = BLOCK_COUNT * sizeof(std::atomic<uint32_t *>);
+    static constexpr size_t OWNERS_BYTES = (size_t{1} << PAGE_NUMBER_BITS) * sizeof(std::atomic<uint16_t>);
+    static constexpr size_t ORDER_BYTES = (size_t{1} << PAGE_NUMBER_BITS) * sizeof(uint32_t);
+    static constexpr size_t AREAS_BYTES = size_t{AREA_LIMIT + 1} * sizeof(std::atomic<Area *>);
+    static constexpr size_t OWNERS_AT = BLOCKS_BYTES;
+    static constexpr size_t ORDER_AT = OWNERS_AT + OWNERS_BYTES;
+    static constexpr size_t AREAS_AT = ORDER_AT + ORDER_BYTES;
+    static constexpr size_t RESERVED_BYTES = AREAS_AT + AREAS_BYTES;
+    static_assert(OWNERS_AT % memory::OS_PAGE_SIZE == 0 && ORDER_AT % memory::OS_PAGE_SIZE == 0 &&
+                  AREAS_AT % memory::OS_PAGE_SIZE == 0);
+
+  public:
+    // The tables get memory with their first use, all zero: 7 MiB of
+    // addresses in one range, of which most worlds touch a page or two of
+    // each.
+    //
+    // With pageBits below PAGE_NUMBER_BITS only the first 2^pageBits pages
+    // are handed out, for tests that use them all up; every area starts
+    // where it would, scaled down to them.
+    explicit EntityAllocator(unsigned pageBits = PAGE_NUMBER_BITS) :
+        m_pageLimit(pageBits >= PAGE_NUMBER_BITS ? PAGE_COUNT : uint32_t{1} << pageBits),
+        m_startShift(pageBits >= PAGE_NUMBER_BITS ? 0 : PAGE_NUMBER_BITS - pageBits),
+        m_reserved(static_cast<std::byte *>(memory::reserve(RESERVED_BYTES))) {
       try {
-        memory::commit(m_blocks, BLOCKS_BYTES);
+        memory::commit(m_reserved, RESERVED_BYTES);
       } catch (...) {
-        memory::release(m_blocks, BLOCKS_BYTES);
+        memory::release(m_reserved, RESERVED_BYTES);
         throw;
       }
+      areaTable()[COMMON_AREA].store(&m_common, std::memory_order_relaxed);
+      m_areaCount.store(COMMON_AREA + 1, std::memory_order_relaxed);
     }
 
-    // Only the blocks of pages handed out can have memory.
     ~EntityAllocator() {
-      const Pages pages = this->pages();
-      const size_t commonEnd = (size_t{pages.limit()} + BLOCK_SIZE - 1) >> BLOCK_BITS;
-      // Not below commonEnd: a block may have common and rare pages.
-      for (size_t block = std::max(commonEnd, size_t{pages.rareBegin()} >> BLOCK_BITS); block < BLOCK_COUNT; ++block) {
-        mi_free(m_blocks[block].load(std::memory_order_relaxed));
+      // Only the blocks of pages handed out have memory, a block may have
+      // several of them.
+      const uint32_t pages = pageCount();
+      for (uint32_t place = 0; place < pages; ++place) {
+        mi_free(blocks()[pageAt(place) >> (BLOCK_BITS - PAGE_BITS)].exchange(nullptr, std::memory_order_relaxed));
       }
-      for (size_t block = 0; block < commonEnd; ++block) {
-        mi_free(m_blocks[block].load(std::memory_order_relaxed));
+      const uint32_t areas = m_areaCount.load(std::memory_order_relaxed);
+      // m_common is the allocator's own.
+      for (uint32_t area = COMMON_AREA + 1; area < areas; ++area) {
+        delete areaTable()[area].load(std::memory_order_relaxed);
       }
-      memory::release(m_blocks, BLOCKS_BYTES);
+      memory::release(m_reserved, RESERVED_BYTES);
     }
 
     EntityAllocator(const EntityAllocator &) = delete;
     EntityAllocator &operator=(const EntityAllocator &) = delete;
 
-    // An index that was given back by destroy, or else the next one of the
-    // calling thread. Throws std::length_error if all indices below
-    // INDEX_LIMIT are taken.
-    [[nodiscard]] Entity create() {
-      if (uint32_t index = 0; m_free.take(index)) {
-        return makeEntity(index, *generation(index));
-      }
+    // An index of the area that was given back by destroy, or else the next
+    // one of the calling thread there. Throws std::length_error if all pages
+    // are taken, std::out_of_range for an area not below AREA_LIMIT.
+    [[nodiscard]] Entity create(uint32_t area) { return create(this->area(area), area); }
 
-      return withShare([this](Share &share) {
-        if (share.next == share.end) [[unlikely]] {
-          share.next = makePage(false);
-          share.end = share.next + PAGE_SIZE;
-        }
-        // Never handed out before.
-        return makeEntity(share.next++, 0);
-      });
-    }
+    // The same in COMMON_AREA, which the allocator holds itself: through the
+    // table of areas, 1M creates took 8.4 instead of 7.7 ms.
+    [[nodiscard]] Entity create() { return create(m_common, COMMON_AREA); }
 
     // An entity for every place of the span, as create makes them. Calls the
     // function with every run of indices it handed out, as (first index,
@@ -220,9 +267,38 @@ namespace sc::ecs2::internal {
     // given back in a row (BM_CreateEntitiesInBulk of ecs_benchmark, gcc);
     // in rows 2.1 ns at 1024 entities and 6.3 at 262144.
     template<typename Function>
+    void create(std::span<Entity> entities, uint32_t area, Function &&run) {
+      create(entities, this->area(area), area, run);
+    }
+
+    template<typename Function>
     void create(std::span<Entity> entities, Function &&run) {
+      create(entities, m_common, COMMON_AREA, run);
+    }
+
+    // An index among those of the rare entities.
+    [[nodiscard]] Entity create(Rare) { return create(RARE_AREA); }
+
+  private:
+    [[nodiscard]] Entity create(Area &in, uint32_t area) {
+      if (uint32_t index = 0; in.free.take(index)) {
+        return makeEntity(index, *generation(index));
+      }
+
+      return withShare(in, [&](Share &share) {
+        if (share.next == share.end) [[unlikely]] {
+          share.next = makePage(in, area);
+          share.end = share.next + PAGE_SIZE;
+        }
+        // Never handed out before.
+        return makeEntity(share.next++, 0);
+      });
+    }
+
+    template<typename Function>
+    void create(std::span<Entity> entities, Area &in, uint32_t area, Function &run) {
       size_t made = 0;
-      const std::span<const uint32_t> reused = m_free.takeMany(entities.size());
+      const std::span<const uint32_t> reused = in.free.takeMany(entities.size());
       for (size_t i = 0; i < reused.size();) {
         const uint32_t first = reused[i];
         uint32_t count = 1;
@@ -240,10 +316,10 @@ namespace sc::ecs2::internal {
       if (made == entities.size()) {
         return;
       }
-      withShare([&](Share &share) {
+      withShare(in, [&](Share &share) {
         while (made < entities.size()) {
           if (share.next == share.end) {
-            share.next = makePage(false);
+            share.next = makePage(in, area);
             share.end = share.next + PAGE_SIZE;
           }
           const auto count = static_cast<uint32_t>(std::min<size_t>(entities.size() - made, share.end - share.next));
@@ -257,25 +333,11 @@ namespace sc::ecs2::internal {
       });
     }
 
-    // The same from the other end: an index among those of the rare entities.
-    [[nodiscard]] Entity create(Rare) {
-      if (uint32_t index = 0; m_rareFree.take(index)) {
-        return makeEntity(index, *generation(index));
-      }
-
-      return withShare([this](Share &share) {
-        if (share.rareNext == share.rareEnd) [[unlikely]] {
-          share.rareNext = makePage(true);
-          share.rareEnd = share.rareNext + PAGE_SIZE;
-        }
-        return makeEntity(share.rareNext++, 0);
-      });
-    }
-
+  public:
     [[nodiscard]] bool valid(Entity entity) const noexcept {
       const uint32_t index = indexOf(entity);
-      const Pages pages = this->pages();
-      if (index >= pages.limit() && (index < pages.rareBegin() || index >= INDEX_LIMIT)) {
+      // Also for an index from INDEX_LIMIT on: its page is never handed out.
+      if (owners()[index >> PAGE_BITS].load(std::memory_order_acquire) == 0) {
         return false;
       }
       const uint32_t *current = generation(index);
@@ -288,7 +350,7 @@ namespace sc::ecs2::internal {
       const uint32_t index = indexOf(entity);
       ++*generation(index);
       // Back to where it came from.
-      (index >= pages().rareBegin() ? m_rareFree : m_free).give(index);
+      areaOf(index).free.give(index);
     }
 
     // destroy for every entity that exists: one given twice or no longer
@@ -297,9 +359,7 @@ namespace sc::ecs2::internal {
     // lists in one step each.
     template<typename Function>
     size_t destroyMany(std::span<const Entity> entities, Function &&function) {
-      const uint32_t rareBegin = pages().rareBegin();
-      m_free.open();
-      m_rareFree.open();
+      openAll();
       size_t destroyed = 0;
       for (const Entity entity: entities) {
         if (!valid(entity)) {
@@ -307,12 +367,11 @@ namespace sc::ecs2::internal {
         }
         const uint32_t index = indexOf(entity);
         ++*generation(index);
-        (index >= rareBegin ? m_rareFree : m_free).add(index);
+        areaOf(index).free.add(index);
         function(index);
         ++destroyed;
       }
-      m_free.close();
-      m_rareFree.close();
+      closeAll();
       return destroyed;
     }
 
@@ -320,20 +379,24 @@ namespace sc::ecs2::internal {
     // threads, less those the threads have not handed out yet and those
     // destroy gave back. Worked out, not counted by create and destroy: a
     // count would be one more locked instruction per create, on a cache line
-    // that every creating thread writes. Reads the Share of every thread, 129
-    // cache lines. Nothing may create or destroy next to it, as next to
-    // destroy: the shares are the threads' own and read without a lock.
+    // that every creating thread writes. Reads the Share of every thread in
+    // every area, 129 cache lines each. Nothing may create or destroy next to
+    // it, as next to destroy: the shares are the threads' own and read
+    // without a lock.
     [[nodiscard]] size_t alive() const noexcept {
-      const Pages pages = this->pages();
-      size_t count = size_t{pages.common + pages.rare} << PAGE_BITS;
-      const auto unused = [](const Share &share) {
-        return size_t{share.end - share.next} + size_t{share.rareEnd - share.rareNext};
-      };
-      for (const Share &share: m_shares) {
-        count -= unused(share);
+      size_t count = size_t{pageCount()} << PAGE_BITS;
+      const uint32_t areas = m_areaCount.load(std::memory_order_acquire);
+      for (uint32_t area = 0; area < areas; ++area) {
+        const Area *const in = areaTable()[area].load(std::memory_order_acquire);
+        if (in == nullptr) {
+          continue;
+        }
+        for (const Share &share: in->shares) {
+          count -= size_t{share.end - share.next};
+        }
+        count -= in->free.size();
       }
-      count -= unused(m_shared);
-      return count - m_free.size() - m_rareFree.size();
+      return count;
     }
 
     // destroyMany in two halves, for threads that take a page of entities
@@ -352,134 +415,212 @@ namespace sc::ecs2::internal {
     // The indices of entities kill ended, to the lists they came from in one
     // step each. Must have nothing running next to it.
     void giveMany(std::span<const uint32_t> indices) {
-      const uint32_t rareBegin = pages().rareBegin();
-      m_free.open();
-      m_rareFree.open();
+      openAll();
       for (const uint32_t index: indices) {
-        (index >= rareBegin ? m_rareFree : m_free).add(index);
+        areaOf(index).free.add(index);
       }
-      m_free.close();
-      m_rareFree.close();
+      closeAll();
     }
 
     // giveMany for the indices of many pages, each span those of one page,
     // on the calling thread and the pool: the lists get their final size
     // first, and every page is copied to its place by one thread. On one
     // thread giving 1M indices back took about 0.93 ms, a third of
-    // World::parallelDestroy. The indices of a page are all common or all
-    // rare, so a page goes to one list in one piece.
+    // World::parallelDestroy. The indices of a page all belong to its area,
+    // so a page goes to one list in one piece.
     void giveMany(std::span<const std::span<const uint32_t>> pages, size_t helpers) {
-      const uint32_t rareBegin = this->pages().rareBegin();
-      m_free.open();
-      m_rareFree.open();
+      openAll();
+      const uint32_t areas = m_areaCount.load(std::memory_order_relaxed);
+      m_fills.resize(areas);
+      for (uint32_t area = 0; area < areas; ++area) {
+        const Area *const in = areaTable()[area].load(std::memory_order_relaxed);
+        m_fills[area] = in != nullptr ? in->free.indices.size() : 0;
+      }
       m_places.resize(pages.size());
-      size_t common = m_free.indices.size();
-      size_t rare = m_rareFree.indices.size();
       for (size_t i = 0; i < pages.size(); ++i) {
         if (pages[i].empty()) {
           continue;
         }
-        size_t &at = pages[i].front() >= rareBegin ? rare : common;
+        size_t &at = m_fills[areaNumberOf(pages[i].front())];
         m_places[i] = at;
         at += pages[i].size();
       }
-      m_free.indices.resize(common);
-      m_rareFree.indices.resize(rare);
+      for (uint32_t area = 0; area < areas; ++area) {
+        if (Area *const in = areaTable()[area].load(std::memory_order_relaxed)) {
+          in->free.indices.resize(m_fills[area]);
+        }
+      }
       threading::parallelFor(pages.size(), 1, helpers, [&](size_t first, size_t last) {
         for (size_t i = first; i < last; ++i) {
           if (!pages[i].empty()) {
-            FreeList &list = pages[i].front() >= rareBegin ? m_rareFree : m_free;
+            FreeList &list = areaOf(pages[i].front()).free;
             std::ranges::copy(pages[i], list.indices.begin() + static_cast<std::ptrdiff_t>(m_places[i]));
           }
         }
       });
-      m_free.close();
-      m_rareFree.close();
+      closeAll();
     }
 
-    // Which pages have entities: the first so many, and the last so many for
-    // the rare ones.
-    struct Pages {
-      uint32_t common = 0;
-      uint32_t rare = 0;
+    // How many pages were handed out to threads, and the number of each, in
+    // the order they were handed out: a row that a loop can go through and
+    // split up between threads. A page stays in it for good.
+    [[nodiscard]] uint32_t pageCount() const noexcept { return m_pageCount.load(std::memory_order_acquire); }
+    [[nodiscard]] uint32_t pageAt(uint32_t place) const noexcept { return order()[place]; }
 
-      // No common entity has this index or a higher one.
-      [[nodiscard]] uint32_t limit() const noexcept { return common << PAGE_BITS; }
-      // No rare entity has an index below this.
-      [[nodiscard]] uint32_t rareBegin() const noexcept { return INDEX_LIMIT - (rare << PAGE_BITS); }
-    };
+    // The area of a page that was handed out.
+    [[nodiscard]] uint32_t areaNumberOf(uint32_t index) const noexcept {
+      return uint32_t{owners()[index >> PAGE_BITS].load(std::memory_order_relaxed)} - 1;
+    }
 
-    [[nodiscard]] Pages pages() const noexcept {
-      const uint64_t counts = m_pageCounts.load(std::memory_order_acquire);
-      return {.common = static_cast<uint32_t>(counts), .rare = static_cast<uint32_t>(counts >> 32)};
+    // The page area k starts at: k with its PAGE_NUMBER_BITS bits in reverse
+    // order, past the last page that may be handed out at 0 again.
+    [[nodiscard]] static constexpr uint32_t startOf(uint32_t area) noexcept {
+      uint32_t page = 0;
+      for (unsigned bit = 0; bit < PAGE_NUMBER_BITS; ++bit) {
+        page |= ((area >> bit) & 1u) << (PAGE_NUMBER_BITS - 1 - bit);
+      }
+      return page < PAGE_COUNT ? page : 0;
     }
 
     // The generation of an index, followed by those of the indices after it up
     // to the end of their page. Null if no entity ever had an index near it.
     [[nodiscard]] uint32_t *generation(uint32_t index) const noexcept {
-      uint32_t *block = m_blocks[index >> BLOCK_BITS].load(std::memory_order_acquire);
+      uint32_t *block = blocks()[index >> BLOCK_BITS].load(std::memory_order_acquire);
       return block != nullptr ? block + (index & (BLOCK_SIZE - 1)) : nullptr;
     }
 
   private:
-    // Calls the function with the Share of the calling thread. The threads
-    // without one of their own, those outside the pool (threading::NO_THREAD_ID)
-    // and pool threads beyond MAX_THREADS, use one together, one at a time.
-    template<typename Function>
-    std::invoke_result_t<Function &, Share &> withShare(Function &&function) {
-      const uint32_t thread = threading::threadId();
-      if (thread < MAX_THREADS) [[likely]] {
-        return function(m_shares[thread]);
-      }
-      const std::scoped_lock lock{m_sharedMutex};
-      return function(m_shared);
+    [[nodiscard]] std::atomic<uint32_t *> *blocks() const noexcept {
+      return reinterpret_cast<std::atomic<uint32_t *> *>(m_reserved);
+    }
+    [[nodiscard]] std::atomic<uint16_t> *owners() const noexcept {
+      return reinterpret_cast<std::atomic<uint16_t> *>(m_reserved + OWNERS_AT);
+    }
+    [[nodiscard]] uint32_t *order() const noexcept { return reinterpret_cast<uint32_t *>(m_reserved + ORDER_AT); }
+    [[nodiscard]] std::atomic<Area *> *areaTable() const noexcept {
+      return reinterpret_cast<std::atomic<Area *> *>(m_reserved + AREAS_AT);
     }
 
-    // The first index of a page no thread has indices of yet: the next one
-    // from below, or from above for the rare entities.
-    uint32_t makePage(bool rare) {
-      uint64_t counts = m_pageCounts.load(std::memory_order_relaxed);
-      uint32_t first = 0;
-      do {
-        const auto common = static_cast<uint32_t>(counts);
-        const auto rares = static_cast<uint32_t>(counts >> 32);
-        if (common + rares >= PAGE_COUNT) [[unlikely]] {
-          throw std::length_error("sc::ecs2: no entity index is left");
+    // The area with the number, made if it is not there yet.
+    [[nodiscard]] Area &area(uint32_t number) {
+      if (number >= AREA_LIMIT) [[unlikely]] {
+        throw std::out_of_range("sc::ecs2: area beyond EntityAllocator::AREA_LIMIT");
+      }
+      if (Area *const found = areaTable()[number].load(std::memory_order_acquire)) [[likely]] {
+        return *found;
+      }
+      return makeArea(number);
+    }
+
+    // The area of an index that was handed out.
+    [[nodiscard]] Area &areaOf(uint32_t index) const noexcept {
+      return *areaTable()[areaNumberOf(index)].load(std::memory_order_relaxed);
+    }
+
+    // The rest of area, for its first entity. Out of line, it is done once.
+    [[gnu::noinline, gnu::cold]] Area &makeArea(uint32_t number) {
+      const std::scoped_lock lock{m_pageMutex};
+      std::atomic<Area *> &slot = areaTable()[number];
+      if (Area *const found = slot.load(std::memory_order_relaxed)) {
+        return *found;
+      }
+      auto *const made = new Area{startOf(number) >> m_startShift};
+      slot.store(made, std::memory_order_release);
+      if (m_areaCount.load(std::memory_order_relaxed) <= number) {
+        m_areaCount.store(number + 1, std::memory_order_release);
+      }
+      return *made;
+    }
+
+    // open and close of the lists of all areas, see FreeList.
+    void openAll() {
+      const uint32_t areas = m_areaCount.load(std::memory_order_relaxed);
+      for (uint32_t area = 0; area < areas; ++area) {
+        if (Area *const in = areaTable()[area].load(std::memory_order_relaxed)) {
+          in->free.open();
         }
-        first = rare ? INDEX_LIMIT - ((rares + 1) << PAGE_BITS) : common << PAGE_BITS;
-      } while (!m_pageCounts.compare_exchange_weak(counts, counts + (rare ? uint64_t{1} << 32 : uint64_t{1}),
-                                                   std::memory_order_acq_rel, std::memory_order_relaxed));
-      makeBlock(first);
-      return first;
+      }
+    }
+    void closeAll() {
+      const uint32_t areas = m_areaCount.load(std::memory_order_relaxed);
+      for (uint32_t area = 0; area < areas; ++area) {
+        if (Area *const in = areaTable()[area].load(std::memory_order_relaxed)) {
+          in->free.close();
+        }
+      }
+    }
+
+    // Calls the function with the Share of the calling thread in the area.
+    // The threads without one of their own, those outside the pool
+    // (threading::NO_THREAD_ID) and pool threads beyond MAX_THREADS, use one
+    // together, one at a time.
+    template<typename Function>
+    std::invoke_result_t<Function &, Share &> withShare(Area &area, Function &&function) {
+      const uint32_t thread = threading::threadId();
+      if (thread < MAX_THREADS) [[likely]] {
+        return function(area.shares[thread]);
+      }
+      const std::scoped_lock lock{m_sharedMutex};
+      return function(area.shares[MAX_THREADS]);
+    }
+
+    // The first index of a page no thread has indices of yet, for the area:
+    // the first free one from its cursor on, past the last page at 0 again.
+    // Throws std::length_error if there is none.
+    // Under a lock: a page is handed out once per PAGE_SIZE entities, and the
+    // row of pages must not get a gap that a loop would find.
+    uint32_t makePage(Area &area, uint32_t number) {
+      const std::scoped_lock lock{m_pageMutex};
+      uint32_t page = area.cursor;
+      for (uint32_t tried = 0; tried < m_pageLimit; ++tried) {
+        if (owners()[page].load(std::memory_order_relaxed) == 0) {
+          const uint32_t first = page << PAGE_BITS;
+          makeBlock(first);
+          area.cursor = page + 1 < m_pageLimit ? page + 1 : 0;
+          const uint32_t place = m_pageCount.load(std::memory_order_relaxed);
+          order()[place] = page;
+          // After the generations: valid finds the page handed out only once
+          // they are there.
+          owners()[page].store(static_cast<uint16_t>(number + 1), std::memory_order_release);
+          m_pageCount.store(place + 1, std::memory_order_release);
+          return first;
+        }
+        page = page + 1 < m_pageLimit ? page + 1 : 0;
+      }
+      throw std::length_error("sc::ecs2: no entity index is left");
     }
 
     // Makes sure the generations of the index and its page have memory.
     void makeBlock(uint32_t index) {
-      std::atomic<uint32_t *> &slot = m_blocks[index >> BLOCK_BITS];
+      std::atomic<uint32_t *> &slot = blocks()[index >> BLOCK_BITS];
       if (slot.load(std::memory_order_acquire) != nullptr) [[likely]] {
         return;
       }
-      auto *fresh = static_cast<uint32_t *>(mi_zalloc_aligned(BLOCK_SIZE * sizeof(uint32_t), 64));
-      uint32_t *expected = nullptr;
-      if (!slot.compare_exchange_strong(expected, fresh, std::memory_order_acq_rel)) {
-        // Another thread was faster.
-        mi_free(fresh);
-      }
+      // Only under m_pageMutex, so no other thread makes it meanwhile.
+      slot.store(static_cast<uint32_t *>(mi_zalloc_aligned(BLOCK_SIZE * sizeof(uint32_t), 64)),
+                 std::memory_order_release);
     }
 
-    // One for every index block, null until an index of it is handed out.
-    std::atomic<uint32_t *> *m_blocks;
-    // How many pages were handed out to threads: from below in the lower half,
-    // from above in the upper half. Both in one, so that they never overlap.
-    alignas(64) std::atomic<uint64_t> m_pageCounts{0};
-    FreeList m_free;
-    FreeList m_rareFree;
-    std::array<Share, MAX_THREADS> m_shares{};
-    // For the threads that have none in m_shares, see withShare.
-    Share m_shared;
+    // The tables, at the offsets above: the generations of every index
+    // block, null until an index of it is handed out; the area of every page
+    // plus one, 0 for one not handed out; the pages in the order they were
+    // handed out; and every area, null until it is used.
+    // How many pages are handed out at most, and how far the start of an
+    // area is shifted down for that, see the constructor.
+    uint32_t m_pageLimit;
+    unsigned m_startShift;
+    std::byte *m_reserved;
+    Area m_common{startOf(COMMON_AREA)};
+    alignas(64) std::atomic<uint32_t> m_pageCount{0};
+    std::atomic<uint32_t> m_areaCount{0};
+    // Held while a page or an area is made.
+    std::mutex m_pageMutex;
+    // For the threads that have no Share of their own, see withShare.
     std::mutex m_sharedMutex;
-    // Where the indices of every page go in giveMany of pages.
+    // Where the indices of every page go in giveMany of pages, and how far
+    // the list of every area is filled meanwhile.
     std::vector<size_t> m_places;
+    std::vector<size_t> m_fills;
   };
 
 } // namespace sc::ecs2::internal

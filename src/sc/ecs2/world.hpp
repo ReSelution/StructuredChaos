@@ -98,17 +98,30 @@ namespace sc::ecs2::internal {
   // column then, and what happens to one entity keeps its order. For
   // World::destroy and CommandApplier.
   //
-  // A counting sort over the pages: count counts the items of every segment
-  // per page, a segment per thread, and finds the pages; place puts the items
-  // in order, again a thread per segment, each in the places the segments
-  // before it leave. Sorting 1M changes on one thread took about 2.8 ms, as
-  // long as applying them.
+  // A counting sort over the pages that have items: count gives each of them
+  // a number of its own and then counts the items of every segment per
+  // number, a thread per segment; place puts the items in order, again a
+  // thread per segment, each in the places the segments before it leave.
+  // Sorting 1M changes on one thread took about 2.8 ms, as long as applying
+  // them. Counted per page number instead, every segment had a count for
+  // every page there may be, 4 MiB each with 2^20 pages, and finding the
+  // pages went through all of them: add + remove through Commands took 19
+  // instead of 0.54 ms.
   template<typename Item>
   class PageSort {
   public:
     // The items are counted and placed in pieces of this many, so that one
     // long span of them does not leave the work to one thread.
     static constexpr size_t SEGMENT = size_t{1} << 16;
+
+    PageSort() = default;
+    ~PageSort() {
+      if (m_numbers != nullptr) {
+        memory::release(m_numbers, NUMBERS_BYTES);
+      }
+    }
+    PageSort(const PageSort &) = delete;
+    PageSort &operator=(const PageSort &) = delete;
 
     void clear() noexcept { m_segments.clear(); }
 
@@ -121,46 +134,70 @@ namespace sc::ecs2::internal {
 
     // indexOf gives the index of an item; one past INDEX_LIMIT (the null
     // entity) has no page and goes to none instead, on the thread that
-    // counts it.
+    // counts it. The pages come out by number.
     template<typename IndexOf, typename None>
     void count(size_t helpers, const IndexOf &indexOf, const None &none) {
-      if (m_counts.size() < m_segments.size() * PAGE_COUNT) {
-        m_counts.assign(m_segments.size() * PAGE_COUNT, 0);
+      if (m_numbers == nullptr) {
+        m_numbers = static_cast<std::atomic<uint32_t> *>(memory::reserve(NUMBERS_BYTES));
+        memory::commit(m_numbers, NUMBERS_BYTES);
       }
+      size_t items = 0;
+      for (const std::span<Item> segment: m_segments) {
+        items += segment.size();
+      }
+      // At most a number per item.
+      if (m_pageOf.size() < items) {
+        m_pageOf.resize(items);
+      }
+      m_used.store(0, std::memory_order_relaxed);
       threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
         for (size_t segment = first; segment < last; ++segment) {
-          uint32_t *const counts = m_counts.data() + (segment * PAGE_COUNT);
           for (Item &item: m_segments[segment]) {
             const uint32_t index = indexOf(item);
             if (index < INDEX_LIMIT) {
-              ++counts[index >> PAGE_BITS];
+              number(index >> PAGE_BITS);
             } else {
               none(item);
             }
           }
         }
       });
-      m_pages.clear();
-      for (uint32_t page = 0; page < PAGE_COUNT; ++page) {
-        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
-          if (m_counts[(segment * PAGE_COUNT) + page] != 0) {
-            m_pages.push_back(page);
-            break;
+      m_numberCount = m_used.load(std::memory_order_relaxed);
+      m_counts.assign(m_segments.size() * m_numberCount, 0);
+      threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
+        for (size_t segment = first; segment < last; ++segment) {
+          uint32_t *const counts = m_counts.data() + (segment * m_numberCount);
+          for (Item &item: m_segments[segment]) {
+            const uint32_t index = indexOf(item);
+            if (index < INDEX_LIMIT) {
+              ++counts[m_numbers[index >> PAGE_BITS].load(std::memory_order_relaxed) - 1];
+            }
           }
         }
+      });
+      m_found.clear();
+      for (uint32_t taken = 0; taken < m_numberCount; ++taken) {
+        if (m_pageOf[taken] != NO_PAGE) {
+          m_found.push_back({.page = m_pageOf[taken], .number = taken});
+        }
+      }
+      std::ranges::sort(m_found, {}, &Found::page);
+      m_pages.resize(m_found.size());
+      for (size_t i = 0; i < m_found.size(); ++i) {
+        m_pages[i] = m_found[i].page;
       }
     }
 
-    // After count, for the items of the pages; leaves the counts at zero.
-    // Without it, uncount does that.
+    // After count, for the items of the pages; leaves the numbers of the
+    // pages unused. Without it, uncount does that.
     template<typename IndexOf>
     void place(size_t helpers, const IndexOf &indexOf) {
-      m_offsets.resize(m_pages.size() + 1);
+      m_offsets.resize(m_found.size() + 1);
       uint32_t at = 0;
-      for (size_t i = 0; i < m_pages.size(); ++i) {
+      for (size_t i = 0; i < m_found.size(); ++i) {
         m_offsets[i] = at;
         for (size_t segment = 0; segment < m_segments.size(); ++segment) {
-          uint32_t &count = m_counts[(segment * PAGE_COUNT) + m_pages[i]];
+          uint32_t &count = m_counts[(segment * m_numberCount) + m_found[i].number];
           const uint32_t here = count;
           // From here on where the next item of the segment in the page goes.
           count = at;
@@ -171,11 +208,11 @@ namespace sc::ecs2::internal {
       m_order.resize(at);
       threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
         for (size_t segment = first; segment < last; ++segment) {
-          uint32_t *const places = m_counts.data() + (segment * PAGE_COUNT);
+          uint32_t *const places = m_counts.data() + (segment * m_numberCount);
           for (Item &item: m_segments[segment]) {
             const uint32_t index = indexOf(item);
             if (index < INDEX_LIMIT) {
-              m_order[places[index >> PAGE_BITS]++] = &item;
+              m_order[places[m_numbers[index >> PAGE_BITS].load(std::memory_order_relaxed) - 1]++] = &item;
             }
           }
         }
@@ -183,12 +220,10 @@ namespace sc::ecs2::internal {
       uncount();
     }
 
-    // Leaves the counts at zero for the next sort.
+    // Leaves the numbers of the pages unused for the next sort.
     void uncount() noexcept {
       for (const uint32_t page: m_pages) {
-        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
-          m_counts[(segment * PAGE_COUNT) + page] = 0;
-        }
+        m_numbers[page].store(0, std::memory_order_relaxed);
       }
     }
 
@@ -203,9 +238,39 @@ namespace sc::ecs2::internal {
     }
 
   private:
+    // For every page there may be, all zero from the OS and with memory only
+    // where pages are used.
+    static constexpr size_t NUMBERS_BYTES = (size_t{1} << (INDEX_BITS - PAGE_BITS)) * sizeof(std::atomic<uint32_t>);
+    // A number that went to no page: another thread gave the page one first.
+    static constexpr uint32_t NO_PAGE = ~uint32_t{0};
+
+    struct Found {
+      uint32_t page;
+      uint32_t number;
+    };
+
+    // Gives the page a number unless it has one. A thread that loses the
+    // race for a page leaves its number unused.
+    void number(uint32_t page) {
+      std::atomic<uint32_t> &slot = m_numbers[page];
+      if (slot.load(std::memory_order_relaxed) != 0) [[likely]] {
+        return;
+      }
+      const uint32_t taken = m_used.fetch_add(1, std::memory_order_relaxed);
+      uint32_t expected = 0;
+      m_pageOf[taken] = slot.compare_exchange_strong(expected, taken + 1, std::memory_order_relaxed) ? page : NO_PAGE;
+    }
+
     std::vector<std::span<Item>> m_segments;
-    // Per segment and page number, while sorting; zero in between.
+    // The number of every page plus one while sorting, zero in between.
+    std::atomic<uint32_t> *m_numbers = nullptr;
+    std::atomic<uint32_t> m_used{0};
+    uint32_t m_numberCount = 0;
+    // The page of every number, NO_PAGE for one that went to none.
+    std::vector<uint32_t> m_pageOf;
+    // Per segment and number, while sorting.
     std::vector<uint32_t> m_counts;
+    std::vector<Found> m_found;
     std::vector<uint32_t> m_pages;
     std::vector<uint32_t> m_offsets;
     std::vector<Item *> m_order;
@@ -240,6 +305,43 @@ namespace sc::ecs2::internal {
   template<typename Component>
   size_t componentIndex() {
     static const size_t index = makeComponentIndex();
+    return index;
+  }
+
+  // Far more sets of components than a program creates entities with, see
+  // setIndex.
+  inline constexpr size_t MAX_COMPONENT_SETS = size_t{1} << 16;
+
+  // The sets of components setIndex has numbered, each as its sorted
+  // component indices, at its number.
+  inline std::mutex componentSetMutex;
+  inline std::vector<std::vector<size_t>> componentSets;
+
+  // The first use of setIndex for a list of components: the number of the
+  // set, the one it already has if another list of the same components in
+  // another order came first. Out of line and cold, as makeComponentIndex.
+  [[gnu::noinline, gnu::cold]] inline size_t makeSetIndex(std::vector<size_t> components) {
+    std::ranges::sort(components);
+    const auto [last, end] = std::ranges::unique(components);
+    components.erase(last, end);
+    const std::scoped_lock lock{componentSetMutex};
+    const auto found = std::ranges::find(componentSets, components);
+    if (found != componentSets.end()) {
+      return static_cast<size_t>(found - componentSets.begin());
+    }
+    if (componentSets.size() >= MAX_COMPONENT_SETS) {
+      throw std::length_error("sc::ecs2: more sets of components to create entities with than MAX_COMPONENT_SETS");
+    }
+    componentSets.push_back(std::move(components));
+    return componentSets.size() - 1;
+  }
+
+  // A number for every set of components the program creates entities with,
+  // the same in all worlds and whatever the order of the types: where a
+  // world keeps the area of the set, found without a search.
+  template<typename... Components>
+  size_t setIndex() {
+    static const size_t index = makeSetIndex({componentIndex<Components>()...});
     return index;
   }
 
@@ -323,6 +425,8 @@ namespace sc::ecs2 {
       auto *const start = static_cast<std::byte *>(m_table);
       m_farColumns = {reinterpret_cast<std::atomic<internal::ColumnBase *> *>(start), FAR_COMPONENT_TYPES};
       m_columnList = {reinterpret_cast<internal::ColumnBase **>(start + FAR_BYTES), internal::MAX_COMPONENT_TYPES};
+      m_setAreas = {reinterpret_cast<std::atomic<uint32_t> *>(start + FAR_BYTES + LIST_BYTES),
+                    internal::MAX_COMPONENT_SETS};
     }
 
     ~World() {
@@ -331,6 +435,9 @@ namespace sc::ecs2 {
         delete m_columnList[i];
       }
       memory::release(m_table, TABLE_BYTES);
+      if (m_killPlace != nullptr) {
+        memory::release(m_killPlace, KILL_PLACE_BYTES);
+      }
     }
 
     World(const World &) = delete;
@@ -339,10 +446,31 @@ namespace sc::ecs2 {
     // What the columns of this world are backed with.
     [[nodiscard]] Pages pages() const noexcept { return m_pages; }
 
+    // An entity without components, in the area of those.
     [[nodiscard]] Entity create() { return m_entities.create(); }
 
+    // An entity with the components, in the area of its set of components:
+    // entities created with the same components, in whatever order, lie
+    // together in the same pages, and a column has pages only where its
+    // components are. What is added later does not move the entity.
+    //
+    //   const Entity player = world.create(Position{}, Velocity{}, Health{100});
+    //
+    // If making a component throws, the entity stays with those before it.
+    template<typename First, typename... Rest>
+      // Not for a span of entities, see the next one, which a std::vector
+      // only turns into when it is not const.
+      requires(!std::is_convertible_v<First &, std::span<Entity>> && !std::is_same_v<First, Rare>)
+    [[nodiscard]] Entity create(const First &first, const Rest &...rest) {
+      const Entity entity = m_entities.create(areaOf<First, Rest...>());
+      const uint32_t index = indexOf(entity);
+      column<First>().emplace(index, first);
+      (column<Rest>().emplace(index, rest), ...);
+      return entity;
+    }
+
     // An entity for every place of the span, each with a copy of every given
-    // component:
+    // component, in the area of the set as create of one:
     //
     //   std::vector<Entity> bullets(1000);
     //   world.create(bullets, Position{}, Velocity{1.0f, 0.0f});
@@ -353,13 +481,18 @@ namespace sc::ecs2 {
     template<typename... Components>
     void create(std::span<Entity> entities, const Components &...components) {
       (column<Components>().expect(entities.size()), ...);
-      m_entities.create(entities, [&]([[maybe_unused]] uint32_t first, [[maybe_unused]] uint32_t count) {
+      const auto fill = [&]([[maybe_unused]] uint32_t first, [[maybe_unused]] uint32_t count) {
         (column<Components>().fill(first, count, components), ...);
-      });
+      };
+      if constexpr (sizeof...(Components) == 0) {
+        m_entities.create(entities, fill);
+      } else {
+        m_entities.create(entities, areaOf<Components...>(), fill);
+      }
     }
 
     // An entity that is unlike most others, see Rare. It is an entity like any
-    // other, only with an index from the other end.
+    // other, only with an index from an area of its own.
     [[nodiscard]] Entity create(Rare) { return m_entities.create(rare); }
 
     [[nodiscard]] bool valid(Entity entity) const noexcept { return m_entities.valid(entity); }
@@ -393,8 +526,9 @@ namespace sc::ecs2 {
     // time (up to 64 entities with one change of the mask) and changes the
     // count once per page, instead of everything per entity and column.
     size_t destroy(std::span<const Entity> entities) {
-      if (m_killPlace.empty()) {
-        m_killPlace.assign(internal::PAGE_COUNT, 0);
+      if (m_killPlace == nullptr) {
+        m_killPlace = static_cast<uint32_t *>(memory::reserve(KILL_PLACE_BYTES));
+        memory::commit(m_killPlace, KILL_PLACE_BYTES);
       }
       const size_t destroyed = m_entities.destroyMany(entities, [&](uint32_t index) {
         const uint32_t number = index >> PAGE_BITS;
@@ -625,9 +759,8 @@ namespace sc::ecs2 {
     template<typename... Terms, typename Function>
     void each(Function &&function) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
-      const PageRange pages = pageRange();
-      eachInRange(typename Lists::GetList{}, typename Lists::ExcludedList{}, columnsOf(typename Lists::GetList{}),
-                  findColumns(typename Lists::ExcludedList{}), pages, 0, pages.count(), function);
+      eachInPages(typename Lists::GetList{}, typename Lists::ExcludedList{}, columnsOf(typename Lists::GetList{}),
+                  findColumns(typename Lists::ExcludedList{}), 0, m_entities.pageCount(), function);
     }
 
     // The same for a world that is only read: every component is a const one.
@@ -640,9 +773,8 @@ namespace sc::ecs2 {
         // No entity ever had one of the components.
         return;
       }
-      const PageRange pages = pageRange();
-      eachInRange(typename Lists::GetList{}, typename Lists::ExcludedList{}, columns,
-                  findColumns(typename Lists::ExcludedList{}), pages, 0, pages.count(), function);
+      eachInPages(typename Lists::GetList{}, typename Lists::ExcludedList{}, columns,
+                  findColumns(typename Lists::ExcludedList{}), 0, m_entities.pageCount(), function);
     }
 
     // The same on the calling thread and on every pool thread that has nothing
@@ -672,31 +804,37 @@ namespace sc::ecs2 {
                      findColumns(typename Lists::ExcludedList{}), function, grain);
     }
 
-    // No common entity is in a page with this number or a higher one. The
-    // rare ones are in the last pages there are.
-    [[nodiscard]] uint32_t pageLimit() const noexcept { return m_entities.pages().common; }
+    // How many pages were handed out to entities, in all areas.
+    [[nodiscard]] uint32_t pageCount() const noexcept { return m_entities.pageCount(); }
 
   private:
     // How many entities a loop needs before another thread helps with it.
     static constexpr size_t ENTITIES_PER_THREAD = 1024;
 
-    // The pages that may have entities, as one row: the common ones first and
-    // then the rare ones, which are the last pages there are.
-    struct PageRange {
-      uint32_t common = 0;
-      uint32_t rare = 0;
-
-      [[nodiscard]] uint32_t count() const noexcept { return common + rare; }
-      // The number of the page at a place in the row.
-      [[nodiscard]] uint32_t page(uint32_t place) const noexcept {
-        return place < common ? place : rareBegin() + (place - common);
+    // The area of a set of components in this world, given the next one free
+    // the first time.
+    template<typename... Components>
+    [[nodiscard]] uint32_t areaOf() {
+      std::atomic<uint32_t> &slot = m_setAreas[internal::setIndex<std::remove_cvref_t<Components>...>()];
+      if (const uint32_t area = slot.load(std::memory_order_acquire); area != 0) [[likely]] {
+        return area;
       }
-      [[nodiscard]] uint32_t rareBegin() const noexcept { return static_cast<uint32_t>(internal::PAGE_COUNT) - rare; }
-    };
+      return makeArea(slot);
+    }
 
-    [[nodiscard]] PageRange pageRange() const noexcept {
-      const auto pages = m_entities.pages();
-      return {.common = pages.common, .rare = pages.rare};
+    // The rest of areaOf, for the first entity of a set. Out of line and
+    // cold, as makeColumn.
+    [[gnu::noinline, gnu::cold]] uint32_t makeArea(std::atomic<uint32_t> &slot) {
+      const std::scoped_lock lock{m_columnMutex};
+      if (const uint32_t area = slot.load(std::memory_order_relaxed); area != 0) {
+        return area;
+      }
+      if (m_nextArea >= internal::EntityAllocator::AREA_LIMIT) {
+        throw std::length_error("sc::ecs2: more sets of components in a world than EntityAllocator::AREA_LIMIT");
+      }
+      const uint32_t area = m_nextArea++;
+      slot.store(area, std::memory_order_release);
+      return area;
     }
 
     // The columns of the components a loop names, as it uses them: a loop
@@ -728,42 +866,28 @@ namespace sc::ecs2 {
     template<typename... Get, typename... Excluded, typename Function>
     void parallelEachOf(internal::List<Get...> get, internal::List<Excluded...> without, const Columns<Get...> &columns,
                         const Columns<Excluded...> &excluded, Function &function, size_t grain) const {
-      const PageRange pages = pageRange();
+      const uint32_t pages = m_entities.pageCount();
       // A thread for every so many entities: a page with few entities in it
       // is not worth waking one up.
       const size_t helpers =
           countUpTo(columns, pages, threading::threadSlots() * ENTITIES_PER_THREAD) / ENTITIES_PER_THREAD;
-      threading::parallelFor(pages.count(), grain, helpers, [&](size_t first, size_t last) {
+      threading::parallelFor(pages, grain, helpers, [&](size_t first, size_t last) {
         // Also on the calling thread, and with no helper at all: whether
         // another thread takes part depends on the count, the mistake does
         // not.
         [[maybe_unused]] const internal::ParallelLoop loop;
-        eachInRange(get, without, columns, excluded, pages, static_cast<uint32_t>(first), static_cast<uint32_t>(last),
+        eachInPages(get, without, columns, excluded, static_cast<uint32_t>(first), static_cast<uint32_t>(last),
                     function);
       });
     }
 
-    // eachInPages for a part of the row of pages.
-    template<typename... Get, typename... Excluded, typename Function>
-    void eachInRange(internal::List<Get...> get, internal::List<Excluded...> without, const Columns<Get...> &columns,
-                     const Columns<Excluded...> &excluded, PageRange pages, uint32_t first, uint32_t last,
-                     Function &function) const {
-      if (first < pages.common) {
-        eachInPages(get, without, columns, excluded, first, std::min(last, pages.common), function);
-      }
-      if (last > pages.common) {
-        eachInPages(get, without, columns, excluded, pages.page(std::max(first, pages.common)),
-                    pages.rareBegin() + (last - pages.common), function);
-      }
-    }
-
-    // How many entities of the pages have all of the components, at most.
-    // Stops counting at the limit.
+    // How many entities of the first pages handed out have all of the
+    // components, at most. Stops counting at the limit.
     template<typename... Each>
-    static size_t countUpTo(const std::tuple<Each...> &columns, PageRange pages, size_t limit) {
+    size_t countUpTo(const std::tuple<Each...> &columns, uint32_t pages, size_t limit) const {
       size_t count = 0;
-      for (uint32_t place = 0; place < pages.count() && count < limit; ++place) {
-        const uint32_t number = pages.page(place);
+      for (uint32_t place = 0; place < pages && count < limit; ++place) {
+        const uint32_t number = m_entities.pageAt(place);
         count += std::apply(
             [number](const auto *...each) {
               return std::min({[&]() -> uint32_t { return each->page(number).count; }()...});
@@ -801,14 +925,16 @@ namespace sc::ecs2 {
       }
     }
 
-    // An excluded component the world never had is one no entity has.
+    // The pages from place first to before place last in the row of pages
+    // handed out, see EntityAllocator::pageAt. An excluded component the
+    // world never had is one no entity has.
     template<typename... Get, typename... Excluded, typename Function>
     void eachInPages(internal::List<Get...>, internal::List<Excluded...>, const Columns<Get...> &columns,
-                     const Columns<Excluded...> &excluded, uint32_t firstPage, uint32_t lastPage,
-                     Function &function) const {
+                     const Columns<Excluded...> &excluded, uint32_t first, uint32_t last, Function &function) const {
       static_assert(sizeof...(Get) != 0, "a loop needs a component to go through");
       [&]<size_t... G, size_t... X>(std::index_sequence<G...>, std::index_sequence<X...>) {
-        for (uint32_t number = firstPage; number < lastPage; ++number) {
+        for (uint32_t place = first; place < last; ++place) {
+          const uint32_t number = m_entities.pageAt(place);
           const std::tuple pages{std::get<G>(columns)->page(number)...};
           if ((!std::get<G>(pages) || ...)) {
             // No entity of this page has all of them.
@@ -892,27 +1018,38 @@ namespace sc::ecs2 {
     static_assert(sizeof(std::atomic<internal::ColumnBase *>) == sizeof(internal::ColumnBase *));
     static constexpr size_t FAR_COMPONENT_TYPES = internal::MAX_COMPONENT_TYPES - internal::NEAR_COMPONENT_TYPES;
     static constexpr size_t FAR_BYTES = sizeof(internal::ColumnBase *) * FAR_COMPONENT_TYPES;
-    static constexpr size_t TABLE_BYTES = FAR_BYTES + (sizeof(internal::ColumnBase *) * internal::MAX_COMPONENT_TYPES);
+    static constexpr size_t LIST_BYTES = sizeof(internal::ColumnBase *) * internal::MAX_COMPONENT_TYPES;
+    static constexpr size_t TABLE_BYTES =
+        FAR_BYTES + LIST_BYTES + (sizeof(std::atomic<uint32_t>) * internal::MAX_COMPONENT_SETS);
+    // For every page there may be.
+    static constexpr size_t KILL_PLACE_BYTES = (size_t{1} << (INDEX_BITS - PAGE_BITS)) * sizeof(uint32_t);
 
     // The column of every component type used with this world, at
     // internal::componentIndex. An entry is written once, under the mutex, and
     // read without a lock by all threads.
     std::array<std::atomic<internal::ColumnBase *>, internal::NEAR_COMPONENT_TYPES> m_columns{};
-    // Reserved addresses for the two below, one after the other. They have
-    // room for every component type there may be, but only the parts in use
-    // get memory: a world costs the same however high the limit is.
+    // Reserved addresses for the three below, one after the other. They have
+    // room for every component type and set there may be, but only the parts
+    // in use get memory: a world costs the same however high the limit is.
     void *m_table = nullptr;
     // The same for the types from NEAR_COMPONENT_TYPES on.
     std::span<std::atomic<internal::ColumnBase *>> m_farColumns;
     // All columns in the order they were made, for what goes through all.
     std::span<internal::ColumnBase *> m_columnList;
+    // The area of every set of components, at internal::setIndex; 0 for none
+    // yet. Written once, under m_columnMutex.
+    std::span<std::atomic<uint32_t>> m_setAreas;
     std::atomic<size_t> m_columnCount{0};
+    // Held while a column or the area of a set is made.
     std::mutex m_columnMutex;
+    // The area the next set of components gets.
+    uint32_t m_nextArea = internal::EntityAllocator::FIRST_AREA;
     // For destroy of many entities, kept from one to the next: the kill masks
     // of the pages it touches, and for every page its place among them plus
-    // one (made the first time, PAGE_COUNT entries).
+    // one, reserved for every page the first time and with memory only where
+    // pages are used. A std::vector of them filled 4 MiB with 2^20 pages.
     std::vector<internal::KillPage> m_killPages;
-    std::vector<uint32_t> m_killPlace;
+    uint32_t *m_killPlace = nullptr;
     // For destroy of many entities on the pool: the entities by page, the
     // indices each page gave back, and how many.
     internal::PageSort<const Entity> m_destroySort;

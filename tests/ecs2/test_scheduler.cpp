@@ -320,8 +320,10 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     });
     REQUIRE(scheduler.stages() == Stages{{0}, {1}});
 
-    // Far more runs than there are pages.
-    const size_t runs = size_t{2} * (sc::ecs2::INDEX_LIMIT / PAGE_SIZE);
+    // Far more runs than the pages below: an index lost per run would show
+    // as more pages. Not more runs than there are pages, which with 2^20
+    // of them took minutes.
+    const size_t runs = 8192;
     for (size_t run = 0; run < runs; ++run) {
       scheduler.run(world);
     }
@@ -330,7 +332,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     REQUIRE(spawned == spawners * 3);
     // A page for every thread at most, next to the first ones: after that
     // the indices of the destroyed entities do.
-    REQUIRE(world.pageLimit() <= 3 + sc::threading::threadSlots());
+    REQUIRE(world.pageCount() <= 3 + sc::threading::threadSlots());
     for (const Entity entity: entities) {
       REQUIRE(world.valid(entity));
     }
@@ -342,7 +344,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
       world.destroy(entities[i]);
     }
     const size_t left = (entities.size() + 1) / 2;
-    const uint32_t pages = world.pageLimit();
+    const uint32_t pages = world.pageCount();
     // Every thread adds the same components to its own entity and to the one
     // it creates, which is in the page of some thread or other.
     scheduler.addParallel([](Entity entity, Change<Frozen, Spawner> change, const Position &pos) {
@@ -360,7 +362,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     REQUIRE(scheduler.stages() == Stages{{0}, {1}});
     scheduler.run(world);
 
-    REQUIRE(world.pageLimit() == pages);
+    REQUIRE(world.pageCount() == pages);
     size_t created = 0;
     world.each<const Frozen, const Spawner>([&](Entity entity, const Spawner &spawner) {
       created += world.valid(entity) && !world.contains<Position>(entity) && spawner.count == -1;

@@ -24,6 +24,7 @@ namespace {
 
   using sc::ecs2::Emplaced;
   using sc::ecs2::Entity;
+  using Allocator = sc::ecs2::internal::EntityAllocator;
   using sc::ecs2::Exclude;
   using sc::ecs2::PAGE_SIZE;
   using sc::ecs2::Pages;
@@ -88,9 +89,6 @@ namespace {
   // unwanted ones, on one thread and on all, and requires that the function is
   // called once for exactly those entities of the model, with their own
   // components.
-  // Room for the rare entities of a test.
-  constexpr size_t RARE_PLACES = 2 * size_t{PAGE_SIZE};
-
   template<typename... Terms>
   void requireLoop(World &world, const Model &model, unsigned wanted, unsigned unwanted) {
     std::vector<uint64_t> expected;
@@ -111,12 +109,22 @@ namespace {
     REQUIRE(wrong == 0);
     REQUIRE(seen == expected);
 
-    // The rare entities, which have the highest indices, follow the others.
-    const size_t common = size_t{world.pageLimit()} * PAGE_SIZE;
-    const size_t places = common + RARE_PLACES;
+    // A place for every entity in the pages of the model, which lie
+    // anywhere in their areas.
+    std::vector<uint32_t> pages;
+    for (const auto &[entity, components]: model) {
+      pages.push_back(sc::ecs2::indexOf(Entity{entity}) >> sc::ecs2::PAGE_BITS);
+    }
+    std::ranges::sort(pages);
+    pages.erase(std::ranges::unique(pages).begin(), pages.end());
+    const size_t places = pages.size() * PAGE_SIZE;
     const auto placeOf = [&](Entity entity) {
-      const size_t index = sc::ecs2::indexOf(entity);
-      return index < common ? index : std::min(common + (sc::ecs2::INDEX_LIMIT - 1 - index), places);
+      const uint32_t index = sc::ecs2::indexOf(entity);
+      const auto page = std::ranges::lower_bound(pages, index >> sc::ecs2::PAGE_BITS);
+      if (page == pages.end() || *page != index >> sc::ecs2::PAGE_BITS) {
+        return places;
+      }
+      return (static_cast<size_t>(page - pages.begin()) * PAGE_SIZE) + (index & (PAGE_SIZE - 1));
     };
     // One more for what is out of place.
     std::vector<std::atomic<uint32_t>> visits(places + 1);
@@ -237,45 +245,140 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     REQUIRE_FALSE(world.contains<Position>(first));
   }
 
-  SECTION("There Are Never More Entities Than INDEX_LIMIT") {
-    // TODO: with INDEX_LIMIT at 2^32 - PAGE_SIZE this makes about 4 billion
-    // entities: 33 s and 21 GB in the release build, far more under TSan.
-    // Needs a way to start the allocator close to its limit, or a smaller
-    // limit for the test.
-    // The rare entities take their pages from the same indices.
-    const Entity special = world.create(sc::ecs2::rare);
-    REQUIRE(sc::ecs2::indexOf(special) == sc::ecs2::INDEX_LIMIT - PAGE_SIZE);
+  SECTION("An Area Goes On In The Next Free Page Until There Is None") {
+    // Four pages: the areas start at 0, 2, 1 and 3, as the first four of all
+    // pages would at 0, 2^19, 2^18 and 3 * 2^18.
+    Allocator entities{2};
+    const auto pageOf = [](Entity entity) { return sc::ecs2::indexOf(entity) >> sc::ecs2::PAGE_BITS; };
+    const Entity common = entities.create();
+    const Entity special = entities.create(sc::ecs2::rare);
+    const Entity first = entities.create(Allocator::FIRST_AREA);
+    REQUIRE(pageOf(common) == 0);
+    REQUIRE(pageOf(special) == 2);
+    REQUIRE(pageOf(first) == 1);
 
-    Entity last = sc::ecs2::null;
-    for (uint32_t i = 0; i < sc::ecs2::INDEX_LIMIT - PAGE_SIZE; ++i) {
-      last = world.create();
+    // The common area runs into the pages of the other two and goes on in
+    // the last one.
+    Entity last = common;
+    for (uint32_t i = 0; i < PAGE_SIZE; ++i) {
+      last = entities.create();
     }
-    REQUIRE(sc::ecs2::indexOf(last) == sc::ecs2::INDEX_LIMIT - PAGE_SIZE - 1);
-    world.emplace<Position>(last, 1.0f, 2.0f);
-    REQUIRE(world.get<Position>(last).y == 2.0f);
-
-    REQUIRE_THROWS_AS(world.create(), std::length_error);
-    // The page of the rare entities is not full yet.
-    Entity lastRare = special;
+    REQUIRE(pageOf(last) == 3);
+    REQUIRE(entities.pageCount() == 4);
+    // None is left for another area, nor for the first one once its page
+    // is full.
+    REQUIRE_THROWS_AS(entities.create(Allocator::FIRST_AREA + 1), std::length_error);
     for (uint32_t i = 1; i < PAGE_SIZE; ++i) {
-      lastRare = world.create(sc::ecs2::rare);
+      (void)entities.create(Allocator::FIRST_AREA);
     }
-    REQUIRE(sc::ecs2::indexOf(lastRare) == sc::ecs2::INDEX_LIMIT - 1);
-    REQUIRE_THROWS_AS(world.create(sc::ecs2::rare), std::length_error);
-    REQUIRE(world.alive() == sc::ecs2::INDEX_LIMIT);
-    REQUIRE(world.valid(special));
-    REQUIRE(world.valid(lastRare));
+    REQUIRE_THROWS_AS(entities.create(Allocator::FIRST_AREA), std::length_error);
     // Nothing is lost by trying.
-    REQUIRE(world.valid(last));
-    REQUIRE_FALSE(world.contains<Position>(sc::ecs2::null));
-    size_t found = 0;
-    world.each<const Position>([&](const Position &) { ++found; });
-    REQUIRE(found == 1);
+    REQUIRE(entities.valid(first));
+    REQUIRE(entities.valid(last));
+    REQUIRE(entities.valid(special));
+    REQUIRE(entities.alive() == (2 * size_t{PAGE_SIZE}) + 2);
 
-    // A destroyed entity makes room for another one of its kind.
-    REQUIRE(world.destroy(last));
-    REQUIRE_THROWS_AS(world.create(sc::ecs2::rare), std::length_error);
-    REQUIRE(sc::ecs2::indexOf(world.create()) == sc::ecs2::INDEX_LIMIT - PAGE_SIZE - 1);
+    // A destroyed entity makes room for another one of its area, and only
+    // there.
+    entities.destroy(first);
+    REQUIRE_THROWS_AS(entities.create(Allocator::FIRST_AREA + 1), std::length_error);
+    const Entity again = entities.create(Allocator::FIRST_AREA);
+    REQUIRE(sc::ecs2::indexOf(again) == sc::ecs2::indexOf(first));
+    REQUIRE_FALSE(entities.valid(first));
+    REQUIRE_THROWS_AS(entities.create(Allocator::FIRST_AREA), std::length_error);
+  }
+
+  SECTION("Entities Created With The Same Components Lie In An Area Of Their Own") {
+    const auto pageOf = [](Entity entity) { return sc::ecs2::indexOf(entity) >> sc::ecs2::PAGE_BITS; };
+    // Within the first pages of the area that starts at the page.
+    const auto inArea = [&](Entity entity, uint32_t start) { return pageOf(entity) - start < 3; };
+    const Entity plain = world.create();
+    const Entity moving = world.create(Position{1.0f, 2.0f}, Velocity{3.0f, 4.0f});
+    const Entity turned = world.create(Velocity{5.0f, 6.0f}, Position{7.0f, 8.0f});
+    const Entity still = world.create(Position{});
+    const Entity special = world.create(sc::ecs2::rare);
+    // The areas in the order of the van der Corput sequence, whatever the
+    // order of the components.
+    REQUIRE(pageOf(plain) == 0);
+    REQUIRE(pageOf(special) == 1u << 19);
+    REQUIRE(pageOf(moving) == 1u << 18);
+    REQUIRE(pageOf(turned) == pageOf(moving));
+    REQUIRE(pageOf(still) == 3u << 18);
+    REQUIRE(world.pageCount() == 4);
+    REQUIRE(world.get<Position>(turned).x == 7.0f);
+    REQUIRE(world.get<Velocity>(turned).dx == 5.0f);
+    REQUIRE_FALSE(world.contains<Velocity>(still));
+
+    // All at once, the same set goes to the same area.
+    std::vector<Entity> many(PAGE_SIZE + 10);
+    world.create(std::span<Entity>{many}, Velocity{}, Position{});
+    size_t inMoving = 0;
+    for (const Entity entity: many) {
+      inMoving += inArea(entity, 1u << 18);
+    }
+    REQUIRE(inMoving == many.size());
+
+    // A destroyed index comes back in its own area only.
+    REQUIRE(world.destroy(moving));
+    REQUIRE(inArea(world.create(Position{}), 3u << 18));
+    REQUIRE(pageOf(world.create()) == 0);
+    const Entity again = world.create(Position{}, Velocity{});
+    REQUIRE(sc::ecs2::indexOf(again) == sc::ecs2::indexOf(moving));
+
+    // The same after a destroy of many, on one thread and on the pool.
+    const std::vector<Entity> gone(many.begin(), many.begin() + 100);
+    REQUIRE(world.destroy(std::span<const Entity>{gone}) == gone.size());
+    size_t back = 0;
+    for (size_t i = 0; i < gone.size(); ++i) {
+      back += inArea(world.create(Position{}, Velocity{}), 1u << 18);
+    }
+    REQUIRE(back == gone.size());
+    const std::vector<Entity> goneOnPool(many.begin() + 100, many.end());
+    REQUIRE(world.parallelDestroy(goneOnPool) == goneOnPool.size());
+    REQUIRE(pageOf(world.create(Position{})) == pageOf(still));
+    back = 0;
+    for (size_t i = 0; i < goneOnPool.size(); ++i) {
+      back += inArea(world.create(Velocity{}, Position{}), 1u << 18);
+    }
+    REQUIRE(back == goneOnPool.size());
+    REQUIRE(world.alive() == 8 + many.size());
+  }
+
+  SECTION("Threads Create Entities Of Several Sets Without Sharing A Page") {
+    constexpr size_t perChunk = 2000;
+    constexpr size_t chunks = 32;
+    std::vector<Entity> moving(perChunk * chunks);
+    std::vector<Entity> still(perChunk * chunks);
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        for (size_t i = 0; i < perChunk; ++i) {
+          moving[(chunk * perChunk) + i] = world.create(Position{}, Velocity{});
+          still[(chunk * perChunk) + i] = world.create(Position{});
+        }
+      }
+    });
+
+    // The set of every page, which must be the only one in it.
+    std::unordered_map<uint32_t, int> setOfPage;
+    std::unordered_set<uint32_t> indices;
+    size_t mixed = 0;
+    const auto record = [&](Entity entity, int set) {
+      REQUIRE(world.valid(entity));
+      indices.insert(sc::ecs2::indexOf(entity));
+      mixed += setOfPage.emplace(sc::ecs2::indexOf(entity) >> sc::ecs2::PAGE_BITS, set).first->second != set;
+    };
+    for (const Entity entity: moving) {
+      record(entity, 1);
+    }
+    for (const Entity entity: still) {
+      record(entity, 2);
+    }
+    REQUIRE(mixed == 0);
+    REQUIRE(indices.size() == moving.size() + still.size());
+    REQUIRE(world.alive() == indices.size());
+    size_t withVelocity = 0;
+    world.each<const Position, const Velocity>([&](const Position &, const Velocity &) { ++withVelocity; });
+    REQUIRE(withVelocity == moving.size());
   }
 
   SECTION("Rare Entities Have Indices Of Their Own") {
@@ -283,11 +386,11 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     const Entity first = world.create(sc::ecs2::rare);
     const Entity second = world.create(sc::ecs2::rare);
     REQUIRE(sc::ecs2::indexOf(common) < PAGE_SIZE);
-    REQUIRE(sc::ecs2::indexOf(first) >= sc::ecs2::INDEX_LIMIT - PAGE_SIZE);
+    REQUIRE(sc::ecs2::indexOf(first) >> sc::ecs2::PAGE_BITS == Allocator::startOf(Allocator::RARE_AREA));
     REQUIRE(sc::ecs2::indexOf(second) == sc::ecs2::indexOf(first) + 1);
     REQUIRE(world.valid(first));
     REQUIRE(world.valid(second));
-    // Between the two ends there is nothing.
+    // Between the areas there is nothing.
     REQUIRE_FALSE(world.valid(sc::ecs2::makeEntity(sc::ecs2::INDEX_LIMIT / 2, 0)));
     REQUIRE_FALSE(world.valid(sc::ecs2::makeEntity(sc::ecs2::INDEX_LIMIT, 0)));
 
@@ -954,7 +1057,8 @@ TEST_CASE("World Components", "[ecs2][world]") {
     // The indices come back, each once, to the kind they came from.
     std::unordered_set<uint32_t> indices;
     for (size_t i = 0; i < freed; ++i) {
-      const bool rare = sc::ecs2::indexOf(gone[i]) >= sc::ecs2::INDEX_LIMIT - (4 * PAGE_SIZE);
+      const bool rare =
+          (sc::ecs2::indexOf(gone[i]) >> sc::ecs2::PAGE_BITS) - Allocator::startOf(Allocator::RARE_AREA) < 4;
       indices.insert(sc::ecs2::indexOf(rare ? world.create(sc::ecs2::rare) : world.create()));
     }
     REQUIRE(indices.size() == freed);
@@ -1189,7 +1293,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
     column.emplace(near, 3.0f, 4.0f);
     REQUIRE(column.headerBlocks() == 1);
     REQUIRE(column.chunks() == 1);
-    // The last index there is, which is a rare entity's.
+    // The last index there is.
     const uint32_t last = sc::ecs2::INDEX_LIMIT - 1;
     column.emplace(last, 5.0f, 6.0f);
     REQUIRE(column.headerBlocks() == 2);
@@ -1432,11 +1536,9 @@ TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Bef
   Model model;
   std::vector<Entity> alive;
 
-  size_t rares = 0;
   const auto spawn = [&](bool common = false) {
-    // Now and then a rare one, as long as the test has room for them.
-    const bool rare = !common && rares < RARE_PLACES && below(4) == 0;
-    rares += rare;
+    // Now and then a rare one.
+    const bool rare = !common && below(4) == 0;
     const Entity entity = rare ? world.create(sc::ecs2::rare) : world.create();
     REQUIRE(model.emplace(static_cast<uint64_t>(entity), 0u).second);
     alive.push_back(entity);
