@@ -119,7 +119,7 @@ namespace sc::ecs2 {
   // every thread keeps to other entities, which is what the functions of
   // parallelEach do with their own entity and the ones they create. For an
   // entity that several threads may go for there is tryEmplace, and erase:
-  // one of them does it. The value of a component is another matter: it is
+  // one of them does it; emplaceOrReplace makes them wait for each other. The value of a component is another matter: it is
   // written by one thread, or read by any number. destroy must have nothing
   // running next to it.
   //
@@ -254,19 +254,32 @@ namespace sc::ecs2 {
 
     // The entity must exist and not have the component yet. An entity that
     // was destroyed has its index no longer: the component would be that of
-    // whichever entity gets the index next.
+    // whichever entity gets the index next. Always Emplaced::Made, see
+    // Emplaced for why there is no reference to the component.
     template<typename Component, typename... Args>
-    decltype(auto) emplace(Entity entity, Args &&...args) {
+    Emplaced emplace(Entity entity, Args &&...args) {
       assert(valid(entity));
       return column<Component>().emplace(indexOf(entity), std::forward<Args>(args)...);
     }
 
-    // Gives the entity the component unless it has it, and says whether it
-    // did. Several threads may do this for the same entity at the same time,
-    // also next to threads that erase it: the component is made once, by the
-    // first of them, and the entity has it only when it is made in full.
+    // Gives the entity the component, or a new one made from the arguments
+    // in place of the one it has; that one stays if making it throws.
+    // Emplaced::Made or Emplaced::Replaced. One step with the component
+    // locked, see Column::emplaceOrReplace for which other threads may go for
+    // it at the same time.
     template<typename Component, typename... Args>
-    bool tryEmplace(Entity entity, Args &&...args) {
+    Emplaced emplaceOrReplace(Entity entity, Args &&...args) {
+      assert(valid(entity));
+      return column<Component>().emplaceOrReplace(indexOf(entity), std::forward<Args>(args)...);
+    }
+
+    // Gives the entity the component unless it has it: Emplaced::Made, or
+    // Emplaced::There if it had it or another thread was first. Several
+    // threads may do this for the same entity at the same time, also next to
+    // threads that erase it: the component is made once, by the first of
+    // them, and the entity has it only when it is made in full.
+    template<typename Component, typename... Args>
+    Emplaced tryEmplace(Entity entity, Args &&...args) {
       assert(valid(entity));
       return column<Component>().tryEmplace(indexOf(entity), std::forward<Args>(args)...);
     }

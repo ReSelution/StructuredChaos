@@ -276,7 +276,7 @@ namespace sc::ecs2 {
 
     template<typename Component, typename... Args>
       requires named<Component>
-    decltype(auto) emplace(Entity entity, Args &&...args) const {
+    Emplaced emplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
       return m_world->template emplace<Component>(entity, std::forward<Args>(args)...);
     }
 
@@ -285,7 +285,7 @@ namespace sc::ecs2 {
     // interest.
     template<typename Component, typename... Args>
       requires named<Component>
-    bool tryEmplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
+    Emplaced tryEmplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
       return m_world->template tryEmplace<Component>(entity, std::forward<Args>(args)...);
     }
 

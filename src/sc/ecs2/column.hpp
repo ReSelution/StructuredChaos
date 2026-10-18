@@ -53,6 +53,19 @@ namespace sc::ecs2 {
     Small,
   };
 
+  // What emplace, tryEmplace and emplaceOrReplace did. None of them hands
+  // out a reference to the component: another thread may erase it as soon
+  // as it is made. get it afterwards if it is needed.
+  enum class Emplaced : uint8_t {
+    // The component was made.
+    Made,
+    // There was one, and it got a new value (emplaceOrReplace).
+    Replaced,
+    // There was one, or another thread was first, and it was left as it is
+    // (tryEmplace).
+    There,
+  };
+
   // From which size on a component gets huge pages from the start in a world
   // of Pages::Auto. At this size a huge page holds the components of 8 pages
   // of a column.
@@ -142,9 +155,9 @@ namespace sc::ecs2::internal {
   // whether an index has the component: what a page says about its entities
   // is changed in single steps that no thread sees half done.
   //
-  // Several threads may also go for the same index, with tryEmplace and with
-  // erase, in any mix: one of them does it and the others are told that they
-  // did not. An index has the component from when it is made in full until
+  // Several threads may also go for the same index, with tryEmplace,
+  // emplaceOrReplace and erase, in any mix: one of them does it and the
+  // others are told that they did not. An index has the component from when it is made in full until
   // just before it is destroyed, for every thread that asks.
   template<typename T>
   class Column final : public ColumnBase {
@@ -161,7 +174,8 @@ namespace sc::ecs2::internal {
       // Which of them a thread is making the component for with tryEmplace:
       // it is that thread's to make, and not in the mask before it is made.
       // Also set while erase destroys a component, so that the next one is
-      // not made in its place before it is gone.
+      // not made in its place before it is gone, and while emplaceOrReplace
+      // makes or assigns one.
       std::array<std::atomic<uint64_t>, PAGE_WORDS> making;
       // Which words of the mask may have a bit set: a loop only looks at
       // these. Set with the first bit of a word, but only cleared when the
@@ -298,11 +312,11 @@ namespace sc::ecs2::internal {
     }
 
     // There must be no component at the index yet, and no other thread that
-    // adds or removes the component of this index. Returns the new component,
-    // or nothing for a component without members. If making the component
-    // throws, there is none at the index afterwards, as before.
+    // adds or removes the component of this index. Always Emplaced::Made. If
+    // making the component throws, there is none at the index afterwards, as
+    // before.
     template<typename... Args>
-    decltype(auto) emplace(uint32_t index, Args &&...args) {
+    Emplaced emplace(uint32_t index, [[maybe_unused]] Args &&...args) {
       assert(index < INDEX_LIMIT);
       const uint32_t number = index >> PAGE_BITS;
       Header &header = makeHeader(number);
@@ -310,47 +324,43 @@ namespace sc::ecs2::internal {
       assert(!has(header, slot));
       occupy(header, number, 1);
       if constexpr (HAS_VALUE) {
-        T *made = nullptr;
         try {
-          made = ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
+          ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
         } catch (...) {
           forsake(header, number, 1);
           throw;
         }
-        // Only now: an index that has the component has one that was made.
-        header.mask[slot / 64].fetch_or(uint64_t{1} << (slot % 64), std::memory_order_relaxed);
-        markWord(header, slot / 64);
-        return *made;
-      } else {
-        header.mask[slot / 64].fetch_or(uint64_t{1} << (slot % 64), std::memory_order_relaxed);
-        markWord(header, slot / 64);
       }
+      // Only now: an index that has the component has one that was made.
+      header.mask[slot / 64].fetch_or(uint64_t{1} << (slot % 64), std::memory_order_relaxed);
+      markWord(header, slot / 64);
+      return Emplaced::Made;
     }
 
     // The same for an index that may have the component already, and that
     // other threads may be giving it or taking it from at the same time:
-    // false if it had the component or another thread was first. The
-    // component is that thread's then, with its arguments.
+    // Emplaced::There if it had the component or another thread was first.
+    // The component is that thread's then, with its arguments.
     template<typename... Args>
-    bool tryEmplace(uint32_t index, [[maybe_unused]] Args &&...args) {
+    Emplaced tryEmplace(uint32_t index, [[maybe_unused]] Args &&...args) {
       assert(index < INDEX_LIMIT);
       const uint32_t number = index >> PAGE_BITS;
       Header &header = makeHeader(number);
       const uint32_t slot = index & (PAGE_SIZE - 1);
       if (has(header, slot)) {
-        return false;
+        return Emplaced::There;
       }
       // The index is this thread's to make the component for, or another
       // thread is at it.
       std::atomic<uint64_t> &making = header.making[slot / 64];
       const uint64_t bit = uint64_t{1} << (slot % 64);
       if ((making.fetch_or(bit, std::memory_order_acq_rel) & bit) != 0) {
-        return false;
+        return Emplaced::There;
       }
       // Asked again: a thread may have made it and be done since.
       if (has(header, slot)) {
         making.fetch_and(~bit, std::memory_order_release);
-        return false;
+        return Emplaced::There;
       }
       try {
         occupy(header, number, 1);
@@ -371,7 +381,62 @@ namespace sc::ecs2::internal {
       header.mask[slot / 64].fetch_or(bit, std::memory_order_acq_rel);
       markWord(header, slot / 64);
       making.fetch_and(~bit, std::memory_order_release);
-      return true;
+      return Emplaced::Made;
+    }
+
+    // The same for an index that keeps the component it has: it gets a new
+    // one, made from the arguments and assigned to the one there, which stays
+    // as it was if making it throws: Emplaced::Made or Emplaced::Replaced.
+    // The making bit is held from the look at the mask until the component
+    // is made or assigned, so another thread that goes for the index with
+    // tryEmplace is told it was not first, and one with emplaceOrReplace
+    // waits, as does erase of a component that DESTROYS.
+    template<typename... Args>
+    Emplaced emplaceOrReplace(uint32_t index, Args &&...args) {
+      assert(index < INDEX_LIMIT);
+      const uint32_t number = index >> PAGE_BITS;
+      Header &header = makeHeader(number);
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      std::atomic<uint64_t> &making = header.making[slot / 64];
+      const uint64_t bit = uint64_t{1} << (slot % 64);
+      // Not for long, as in erase.
+      while ((making.fetch_or(bit, std::memory_order_acq_rel) & bit) != 0) {
+        std::this_thread::yield();
+      }
+      bool made = false;
+      try {
+        // Counted before the look at the mask, also for a component that is
+        // there: erase of one that does not DESTROYS takes no making bit, and
+        // if it took the last of the page, the page could give its memory
+        // back under the assignment. Counted, it keeps it.
+        occupy(header, number, 1);
+        try {
+          if (has(header, slot)) {
+            if constexpr (HAS_VALUE) {
+              *valueAt(index) = T{std::forward<Args>(args)...};
+            }
+          } else {
+            if constexpr (HAS_VALUE) {
+              ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
+            }
+            header.mask[slot / 64].fetch_or(bit, std::memory_order_acq_rel);
+            markWord(header, slot / 64);
+            made = true;
+          }
+        } catch (...) {
+          forsake(header, number, 1);
+          throw;
+        }
+        if (!made) {
+          // The one there is counted already.
+          forsake(header, number, 1);
+        }
+      } catch (...) {
+        making.fetch_and(~bit, std::memory_order_release);
+        throw;
+      }
+      making.fetch_and(~bit, std::memory_order_release);
+      return made ? Emplaced::Made : Emplaced::Replaced;
     }
 
     // Says that so many components are about to be added. In a world of

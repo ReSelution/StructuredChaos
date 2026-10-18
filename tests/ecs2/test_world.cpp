@@ -22,6 +22,7 @@
 
 namespace {
 
+  using sc::ecs2::Emplaced;
   using sc::ecs2::Entity;
   using sc::ecs2::Exclude;
   using sc::ecs2::PAGE_SIZE;
@@ -508,8 +509,8 @@ TEST_CASE("World Components", "[ecs2][world]") {
       for (size_t chunk = first; chunk < last; ++chunk) {
         // Every chunk goes for every entity.
         for (const Entity entity: entities) {
-          added += world.tryEmplace<Named>(entity, std::to_string(chunk), alive);
-          tagged += world.tryEmplace<Tag>(entity);
+          added += world.tryEmplace<Named>(entity, std::to_string(chunk), alive) == Emplaced::Made;
+          tagged += world.tryEmplace<Tag>(entity) == Emplaced::Made;
         }
       }
     });
@@ -524,7 +525,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
       const std::string &name = world.get<Named>(entities[i]).name;
       REQUIRE((i % 7 == 0 ? name == "before" : std::stoul(name) < chunks));
     }
-    REQUIRE_FALSE(world.tryEmplace<Named>(entities[1], "late", alive));
+    REQUIRE(world.tryEmplace<Named>(entities[1], "late", alive) == Emplaced::There);
 
     std::atomic<size_t> removed = 0;
     sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
@@ -560,7 +561,7 @@ TEST_CASE("World Components", "[ecs2][world]") {
         for (int round = 0; round < 4; ++round) {
           for (const Entity entity: entities) {
             if ((chunk + static_cast<size_t>(round)) % 2 == 0) {
-              made += world.tryEmplace<Named>(entity, std::string(100, 'm'), alive);
+              made += world.tryEmplace<Named>(entity, std::string(100, 'm'), alive) == Emplaced::Made;
             } else {
               gone += world.erase<Named>(entity);
             }
@@ -583,8 +584,65 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE_THROWS_AS(world.tryEmplace<Fragile>(entities[0], "no", true), std::runtime_error);
     REQUIRE_FALSE(world.contains<Fragile>(entities[0]));
     REQUIRE(usedPages(world.column<Fragile>()) == 0);
-    REQUIRE(world.tryEmplace<Fragile>(entities[0], "yes", false));
+    REQUIRE(world.tryEmplace<Fragile>(entities[0], "yes", false) == Emplaced::Made);
     REQUIRE(world.get<Fragile>(entities[0]).text == "yes");
+  }
+
+  SECTION("Threads Replace The Same Components While Others Give And Take Them") {
+    const auto alive = std::make_shared<int>(0);
+    // Few entities, so that the threads keep meeting at the same ones.
+    std::vector<Entity> entities(64);
+    for (Entity &entity: entities) {
+      entity = world.create();
+    }
+
+    constexpr size_t chunks = 16;
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        for (int round = 0; round < 200; ++round) {
+          for (const Entity entity: entities) {
+            switch ((chunk + static_cast<size_t>(round)) % 3) {
+              case 0:
+                world.emplaceOrReplace<Named>(entity, std::string(100, 'r'), alive);
+                world.emplaceOrReplace<Tag>(entity);
+                // erase of it takes no making bit: the page must keep its
+                // memory by the count alone.
+                world.emplaceOrReplace<Position>(entity, 1.0f, 2.0f);
+                break;
+              case 1:
+                world.tryEmplace<Named>(entity, std::string(100, 't'), alive);
+                world.tryEmplace<Position>(entity, 1.0f, 2.0f);
+                break;
+              default:
+                world.erase<Named>(entity);
+                world.erase<Tag>(entity);
+                world.erase<Position>(entity);
+                break;
+            }
+          }
+        }
+      }
+    });
+    // Every component there is a whole one, and the count says how many.
+    size_t named = 0;
+    world.each<const Named>([&](const Named &component) {
+      named += component.name == std::string(100, 'r') || component.name == std::string(100, 't');
+    });
+    REQUIRE(alive.use_count() == 1 + static_cast<long>(named));
+    REQUIRE(world.column<Named>().page(0).count == named);
+    size_t tags = 0;
+    world.each<const Tag>([&](Entity) { ++tags; });
+    REQUIRE(world.column<Tag>().page(0).count == tags);
+    size_t positions = 0;
+    world.each<const Position>([&](const Position &position) { positions += position.x == 1.0f && position.y == 2.0f; });
+    REQUIRE(world.column<Position>().page(0).count == positions);
+    for (const Entity entity: entities) {
+      world.erase<Named>(entity);
+      world.erase<Position>(entity);
+    }
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE(usedPages(world.column<Named>()) == 0);
+    REQUIRE(usedPages(world.column<Position>()) == 0);
   }
 
   SECTION("Threads Add The First And Remove The Last Component Of A Page") {
@@ -702,9 +760,9 @@ TEST_CASE("World Components", "[ecs2][world]") {
   SECTION("Added, Read, Changed And Removed") {
     const Entity entity = world.create();
     REQUIRE_FALSE(world.contains<Position>(entity));
-    auto &position = world.emplace<Position>(entity, 1.0f, 2.0f);
+    REQUIRE(world.emplace<Position>(entity, 1.0f, 2.0f) == Emplaced::Made);
     REQUIRE(world.contains<Position>(entity));
-    REQUIRE(&world.get<Position>(entity) == &position);
+    REQUIRE(world.get<Position>(entity).y == 2.0f);
     world.get<Position>(entity).x = 5.0f;
     REQUIRE(world.get<const Position>(entity).x == 5.0f);
     STATIC_REQUIRE(std::is_same_v<decltype(world.get<const Position>(entity)), const Position &>);
@@ -717,6 +775,47 @@ TEST_CASE("World Components", "[ecs2][world]") {
     REQUIRE(world.erase<Position>(entity));
     REQUIRE_FALSE(world.contains<Position>(entity));
     REQUIRE(world.valid(entity));
+  }
+
+  SECTION("A Component Is Added Or Replaced") {
+    const Entity entity = world.create();
+    REQUIRE(world.emplaceOrReplace<Position>(entity, 1.0f, 2.0f) == Emplaced::Made);
+    const Position *const added = &world.get<Position>(entity);
+    REQUIRE(added->x == 1.0f);
+    REQUIRE(world.emplaceOrReplace<Position>(entity, 3.0f) == Emplaced::Replaced);
+    REQUIRE(&world.get<Position>(entity) == added);
+    // Made from the arguments, not changed member by member.
+    REQUIRE(world.get<Position>(entity).x == 3.0f);
+    REQUIRE(world.get<Position>(entity).y == 0.0f);
+    REQUIRE(world.column<Position>().page(0).count == 1);
+
+    REQUIRE(world.emplaceOrReplace<Tag>(entity) == Emplaced::Made);
+    REQUIRE(world.emplaceOrReplace<Tag>(entity) == Emplaced::Replaced);
+    REQUIRE(world.contains<Tag>(entity));
+    REQUIRE(world.column<Tag>().page(0).count == 1);
+
+    // The one there gives back what it owned, and stays if the new one cannot
+    // be made.
+    const auto alive = std::make_shared<int>(0);
+    REQUIRE(world.emplaceOrReplace<Named>(entity, std::string(100, 'a'), alive) == Emplaced::Made);
+    REQUIRE(world.emplaceOrReplace<Named>(entity, std::string(100, 'b'), nullptr) == Emplaced::Replaced);
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE(world.get<Named>(entity).name == std::string(100, 'b'));
+
+    REQUIRE(world.emplaceOrReplace<Fragile>(entity, "kept", false) == Emplaced::Made);
+    REQUIRE_THROWS_AS(world.emplaceOrReplace<Fragile>(entity, "lost", true), std::runtime_error);
+    REQUIRE(world.get<Fragile>(entity).text == "kept");
+    REQUIRE(world.column<Fragile>().page(0).count == 1);
+
+    // One that cannot be made where there was none leaves none, and the page
+    // without memory.
+    const Entity other = world.create();
+    REQUIRE(world.erase<Fragile>(entity));
+    REQUIRE_THROWS_AS(world.emplaceOrReplace<Fragile>(other, "no", true), std::runtime_error);
+    REQUIRE_FALSE(world.contains<Fragile>(other));
+    REQUIRE(usedPages(world.column<Fragile>()) == 0);
+
+    REQUIRE(world.destroy(entity));
   }
 
   SECTION("A World That Is Only Read") {
