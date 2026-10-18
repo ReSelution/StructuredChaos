@@ -250,6 +250,11 @@ namespace compare {
     inline constexpr const char *MODIFY_RANDOM = "1 system, damages its target";
     inline constexpr const char *MODIFY_FEW = "1 system, damages 1 of 1 000 entities";
     inline constexpr const char *MODIFY_ONE = "1 system, damages the same entity";
+    // The same recorded and done once the system is over, one change after
+    // the other: sc::ecs2 Commands::modify.
+    inline constexpr const char *RECORD_RANDOM = "1 system, damages its target, recorded";
+    inline constexpr const char *RECORD_FEW = "1 system, damages 1 of 1 000 entities, recorded";
+    inline constexpr const char *RECORD_ONE = "1 system, damages the same entity, recorded";
     // Not the ECS: every entity adds 1 to one std::atomic, what the hardware
     // takes at least when all threads go for the same cache line.
     inline constexpr const char *ATOMIC_ONE = "1 system, adds to the same atomic";

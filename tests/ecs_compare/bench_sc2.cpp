@@ -402,6 +402,36 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     };
     BENCHMARK(name::parallel(name::MODIFY_ONE)) { one.run(ecs); };
     BENCHMARK(name::parallel(name::ATOMIC_ONE)) { atomic.run(ecs); };
+
+    // Recorded, and done one after the other once the system is over.
+    Scheduler recordRandomSerial;
+    recordRandomSerial.add([&](Query<const Target> query, Commands commands) {
+      query.each([&](const Target &target) { commands.modify(target.entity, damage); });
+    });
+    Scheduler recordRandom;
+    recordRandom.addParallel([&](Commands commands, const Target &target) { commands.modify(target.entity, damage); });
+    Scheduler recordFew;
+    recordFew.addParallel([&](Entity entity, Commands commands, const Target &) {
+      commands.modify(world.entities[sc::ecs2::indexOf(entity) % FEW], damage);
+    });
+    Scheduler recordOne;
+    recordOne.addParallel([&](Commands commands, const Target &) { commands.modify(boss, damage); });
+
+    for (size_t i = 0; i < FEW; ++i) {
+      ecs.get<Health>(world.entities[i]).value = 0.0f;
+    }
+    recordFew.run(ecs);
+    for (size_t i = 0; i < FEW; ++i) {
+      REQUIRE(ecs.get<const Health>(world.entities[i]).value == -static_cast<float>(HITS_EACH));
+    }
+    ecs.get<Health>(boss).value = 0.0f;
+    recordOne.run(ecs);
+    REQUIRE(ecs.get<const Health>(boss).value == -static_cast<float>(PARALLEL_ENTITY_COUNT));
+
+    BENCHMARK(name::serial(name::RECORD_RANDOM)) { recordRandomSerial.run(ecs); };
+    BENCHMARK(name::parallel(name::RECORD_RANDOM)) { recordRandom.run(ecs); };
+    BENCHMARK(name::parallel(name::RECORD_FEW)) { recordFew.run(ecs); };
+    BENCHMARK(name::parallel(name::RECORD_ONE)) { recordOne.run(ecs); };
   }
 }
 
