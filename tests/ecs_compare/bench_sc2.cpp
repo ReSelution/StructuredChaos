@@ -1,7 +1,9 @@
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <utility>
 #include <vector>
@@ -23,6 +25,7 @@ namespace {
   using sc::ecs2::Change;
   using sc::ecs2::Commands;
   using sc::ecs2::Entity;
+  using sc::ecs2::Modify;
   using sc::ecs2::Query;
   using sc::ecs2::Scheduler;
 
@@ -353,6 +356,52 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     const Entity last = world.entities.back();
     REQUIRE(steered(ecs.get<const Velocity>(last), ecs.get<const Position>(last),
                     ecs.get<const Position>(world.entities[order.back()])));
+  }
+
+  {
+    constexpr size_t FEW = 1000;
+    constexpr size_t HITS_EACH = PARALLEL_ENTITY_COUNT / FEW;
+    static_assert(HITS_EACH * FEW == PARALLEL_ENTITY_COUNT);
+    const Entity boss = world.entities.front();
+    const auto damage = [](Health &health) { health.value -= 1.0f; };
+
+    Scheduler random;
+    random.addParallel([&](Modify<Health> modify, const Target &target) { modify(target.entity, damage); });
+    Scheduler few;
+    few.addParallel([&](Entity entity, Modify<Health> modify, const Target &) {
+      modify(world.entities[sc::ecs2::indexOf(entity) % FEW], damage);
+    });
+    Scheduler one;
+    one.addParallel([&](Modify<Health> modify, const Target &) { modify(boss, damage); });
+    std::atomic<uint32_t> counter = 0;
+    Scheduler atomic;
+    atomic.addParallel([&](const Target &) { counter.fetch_add(1, std::memory_order_relaxed); });
+
+    // Every hit arrives, on all threads. From 0, where the floats are exact.
+    for (size_t i = 0; i < FEW; ++i) {
+      ecs.get<Health>(world.entities[i]).value = 0.0f;
+    }
+    few.run(ecs);
+    for (size_t i = 0; i < FEW; ++i) {
+      REQUIRE(ecs.get<const Health>(world.entities[i]).value == -static_cast<float>(HITS_EACH));
+    }
+    ecs.get<Health>(boss).value = 0.0f;
+    one.run(ecs);
+    REQUIRE(ecs.get<const Health>(boss).value == -static_cast<float>(PARALLEL_ENTITY_COUNT));
+
+    BENCHMARK(name::serial(name::WRITE_RANDOM)) {
+      ecs.each<const Target>([&](const Target &target) { damage(ecs.get<Health>(target.entity)); });
+    };
+    BENCHMARK(name::serial(name::MODIFY_RANDOM)) {
+      ecs.each<const Target>([&](const Target &target) { ecs.modify<Health>(target.entity, damage); });
+    };
+    BENCHMARK(name::parallel(name::MODIFY_RANDOM)) { random.run(ecs); };
+    BENCHMARK(name::parallel(name::MODIFY_FEW)) { few.run(ecs); };
+    BENCHMARK(name::serial(name::MODIFY_ONE)) {
+      ecs.each<const Target>([&](const Target &) { ecs.modify<Health>(boss, damage); });
+    };
+    BENCHMARK(name::parallel(name::MODIFY_ONE)) { one.run(ecs); };
+    BENCHMARK(name::parallel(name::ATOMIC_ONE)) { atomic.run(ecs); };
   }
 }
 

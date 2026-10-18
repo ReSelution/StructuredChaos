@@ -242,6 +242,17 @@ namespace compare {
     // Every entity has a Target component, defined by each executable with the
     // entity type of its library, that names another entity in no order.
     inline constexpr const char *LOOP_LOOKUP = "1 system, looks up another entity";
+    // The same entities damage the Health of others: by 1 each, which must
+    // all arrive when several threads damage the same one. So far only
+    // sc::ecs2 has a means for that (modify); WRITE_RANDOM is the same
+    // without a lock, which only one thread may do.
+    inline constexpr const char *WRITE_RANDOM = "1 system, damages its target, no lock";
+    inline constexpr const char *MODIFY_RANDOM = "1 system, damages its target";
+    inline constexpr const char *MODIFY_FEW = "1 system, damages 1 of 1 000 entities";
+    inline constexpr const char *MODIFY_ONE = "1 system, damages the same entity";
+    // Not the ECS: every entity adds 1 to one std::atomic, what the hardware
+    // takes at least when all threads go for the same cache line.
+    inline constexpr const char *ATOMIC_ONE = "1 system, adds to the same atomic";
 
     // ENTITY_COUNT entities with Transform and Body, see run_heavy.
     inline constexpr const char *CREATE_HEAVY = "create entities with 2 components";
