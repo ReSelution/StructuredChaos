@@ -86,6 +86,24 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
 
   Few threads per target: `Modify`, which runs where the threads are; recording only pays off where they would
   wait for each other. Applying is one thread for all lists.
+- [x] **Tried and dropped: `Modify` that records instead of waiting.** `Column::tryModify` took the bit once; if
+  another thread had it, the function went to the thread's `CommandList` for after the stage (`Modify` then had
+  the system's lists). Meant to bring the contended cases down to `Commands::modify`; it did not (all threads, ns
+  per hit, waiting / record on a failed `fetch_or` / record on a set bit seen by a plain load first):
+
+  | | waiting | `fetch_or` once | load first |
+  |---|---|---|---|
+  | random target | 1.41 | 1.64 | 1.85 |
+  | one of 1 000 targets | 14.6 | 14.4 | 17.2 |
+  | same target | 15.6 | 16.6 | 13.0 |
+
+  The cost is not the waiting but the cache line of the making word: every attempt brings it to the core, a
+  failed one as well, and every thread that gets the bit writes it twice, which takes it away from all readers
+  again. Reading first saves the exclusive fetch only while the bit stays set (same target) and adds a second
+  transfer where it is mostly free. A making word covers 64 entities, so with one of 1 000 targets the threads
+  also fight over 16 words for different entities. Anything that asks at the target during the stage stays at
+  about one contended atomic (10.8 ns); only not touching it, `Commands::modify`, gets below. Kept apart instead:
+  `Modify` for few hits per entity, `Commands::modify` for many, as their comments say.
 - [ ] **Apply recorded changes in parallel:** `CommandList::apply` runs the lists one after the other on one thread,
   which is most of the 6.3 ns of a recorded change to a random target (assumed, not split up by measurement).
   Changes to different pages could be applied by different threads if every page's changes go to one of them;
