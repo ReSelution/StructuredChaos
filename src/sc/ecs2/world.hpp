@@ -99,9 +99,9 @@ namespace sc::ecs2::internal {
   // World::destroy and CommandApplier.
   //
   // A counting sort over the pages that have items: count gives each of them
-  // a number of its own and then counts the items of every segment per
-  // number, a thread per segment; place puts the items in order, again a
-  // thread per segment, each in the places the segments before it leave.
+  // a number of its own and counts the items of every segment per number, a
+  // thread per segment; place puts the items in order, again a thread per
+  // segment, each in the places the segments before it leave.
   // Sorting 1M changes on one thread took about 2.8 ms, as long as applying
   // them. Counted per page number instead, every segment had a count for
   // every page there may be, 4 MiB each with 2^20 pages, and finding the
@@ -141,45 +141,34 @@ namespace sc::ecs2::internal {
         m_numbers = static_cast<std::atomic<uint32_t> *>(memory::reserve(NUMBERS_BYTES));
         memory::commit(m_numbers, NUMBERS_BYTES);
       }
-      size_t items = 0;
-      for (const std::span<Item> segment: m_segments) {
-        items += segment.size();
-      }
-      // At most a number per item.
-      if (m_pageOf.size() < items) {
-        m_pageOf.resize(items);
+      if (m_counts.size() < m_segments.size()) {
+        m_counts.resize(m_segments.size());
+        m_numbered.resize(m_segments.size());
       }
       m_used.store(0, std::memory_order_relaxed);
       threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
         for (size_t segment = first; segment < last; ++segment) {
+          std::vector<uint32_t> &counts = m_counts[segment];
+          counts.clear();
+          m_numbered[segment].clear();
+          Last last;
           for (Item &item: m_segments[segment]) {
             const uint32_t index = indexOf(item);
-            if (index < INDEX_LIMIT) {
-              number(index >> PAGE_BITS);
-            } else {
+            if (index >= INDEX_LIMIT) {
               none(item);
+              continue;
             }
-          }
-        }
-      });
-      m_numberCount = m_used.load(std::memory_order_relaxed);
-      m_counts.assign(m_segments.size() * m_numberCount, 0);
-      threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
-        for (size_t segment = first; segment < last; ++segment) {
-          uint32_t *const counts = m_counts.data() + (segment * m_numberCount);
-          for (Item &item: m_segments[segment]) {
-            const uint32_t index = indexOf(item);
-            if (index < INDEX_LIMIT) {
-              ++counts[m_numbers[index >> PAGE_BITS].load(std::memory_order_relaxed) - 1];
+            const uint32_t taken = numberOf(index >> PAGE_BITS, last, &m_numbered[segment]);
+            if (taken >= counts.size()) [[unlikely]] {
+              counts.resize(taken + 1, 0);
             }
+            ++counts[taken];
           }
         }
       });
       m_found.clear();
-      for (uint32_t taken = 0; taken < m_numberCount; ++taken) {
-        if (m_pageOf[taken] != NO_PAGE) {
-          m_found.push_back({.page = m_pageOf[taken], .number = taken});
-        }
+      for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+        m_found.insert(m_found.end(), m_numbered[segment].begin(), m_numbered[segment].end());
       }
       std::ranges::sort(m_found, {}, &Found::page);
       m_pages.resize(m_found.size());
@@ -197,7 +186,12 @@ namespace sc::ecs2::internal {
       for (size_t i = 0; i < m_found.size(); ++i) {
         m_offsets[i] = at;
         for (size_t segment = 0; segment < m_segments.size(); ++segment) {
-          uint32_t &count = m_counts[(segment * m_numberCount) + m_found[i].number];
+          std::vector<uint32_t> &counts = m_counts[segment];
+          if (m_found[i].number >= counts.size()) {
+            // The segment has no item in the page.
+            continue;
+          }
+          uint32_t &count = counts[m_found[i].number];
           const uint32_t here = count;
           // From here on where the next item of the segment in the page goes.
           count = at;
@@ -208,11 +202,12 @@ namespace sc::ecs2::internal {
       m_order.resize(at);
       threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
         for (size_t segment = first; segment < last; ++segment) {
-          uint32_t *const places = m_counts.data() + (segment * m_numberCount);
+          uint32_t *const places = m_counts[segment].data();
+          Last last;
           for (Item &item: m_segments[segment]) {
             const uint32_t index = indexOf(item);
             if (index < INDEX_LIMIT) {
-              m_order[places[m_numbers[index >> PAGE_BITS].load(std::memory_order_relaxed) - 1]++] = &item;
+              m_order[places[numberOf(index >> PAGE_BITS, last, nullptr)]++] = &item;
             }
           }
         }
@@ -241,7 +236,7 @@ namespace sc::ecs2::internal {
     // For every page there may be, all zero from the OS and with memory only
     // where pages are used.
     static constexpr size_t NUMBERS_BYTES = (size_t{1} << (INDEX_BITS - PAGE_BITS)) * sizeof(std::atomic<uint32_t>);
-    // A number that went to no page: another thread gave the page one first.
+    // No page, for Last before the first item.
     static constexpr uint32_t NO_PAGE = ~uint32_t{0};
 
     struct Found {
@@ -249,27 +244,46 @@ namespace sc::ecs2::internal {
       uint32_t number;
     };
 
-    // Gives the page a number unless it has one. A thread that loses the
-    // race for a page leaves its number unused.
-    void number(uint32_t page) {
-      std::atomic<uint32_t> &slot = m_numbers[page];
-      if (slot.load(std::memory_order_relaxed) != 0) [[likely]] {
-        return;
+    // The page and number of the item before, which the next one mostly
+    // shares: looking the number up for every item, count and place took 80
+    // and 74 instead of 51 and 45 µs for 100 000 items in 25 pages.
+    struct Last {
+      uint32_t page = NO_PAGE;
+      uint32_t number = 0;
+    };
+
+    // The number of the page, given to it if it has none; a page that gets
+    // one here goes to numbered. Of threads that race for a page, the ones
+    // that lose leave the number they took unused.
+    uint32_t numberOf(uint32_t page, Last &last, std::vector<Found> *numbered) {
+      if (page == last.page) [[likely]] {
+        return last.number;
       }
-      const uint32_t taken = m_used.fetch_add(1, std::memory_order_relaxed);
-      uint32_t expected = 0;
-      m_pageOf[taken] = slot.compare_exchange_strong(expected, taken + 1, std::memory_order_relaxed) ? page : NO_PAGE;
+      std::atomic<uint32_t> &slot = m_numbers[page];
+      uint32_t found = slot.load(std::memory_order_relaxed);
+      if (found == 0) {
+        const uint32_t taken = m_used.fetch_add(1, std::memory_order_relaxed);
+        if (slot.compare_exchange_strong(found, taken + 1, std::memory_order_relaxed)) {
+          found = taken + 1;
+          numbered->push_back({.page = page, .number = taken});
+        }
+      }
+      last = {.page = page, .number = found - 1};
+      return last.number;
     }
 
     std::vector<std::span<Item>> m_segments;
     // The number of every page plus one while sorting, zero in between.
     std::atomic<uint32_t> *m_numbers = nullptr;
     std::atomic<uint32_t> m_used{0};
-    uint32_t m_numberCount = 0;
-    // The page of every number, NO_PAGE for one that went to none.
-    std::vector<uint32_t> m_pageOf;
-    // Per segment and number, while sorting.
-    std::vector<uint32_t> m_counts;
+    // Per segment the pages it gave a number, with it. A list of the page of
+    // every number, as long as there are items, was 400 KiB to fill with
+    // zeros for 100 000 items in a sort that had not sorted as many before:
+    // World::parallelDestroy in a new world took 300 instead of 240 µs.
+    std::vector<std::vector<Found>> m_numbered;
+    // Per segment and number, while sorting; as long as the highest number
+    // the segment has an item of.
+    std::vector<std::vector<uint32_t>> m_counts;
     std::vector<Found> m_found;
     std::vector<uint32_t> m_pages;
     std::vector<uint32_t> m_offsets;
