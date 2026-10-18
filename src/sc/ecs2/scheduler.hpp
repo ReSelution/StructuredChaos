@@ -218,11 +218,15 @@ namespace sc::ecs2 {
     }
 
     // The component of any entity that exists and has it, named the way the
-    // query names it.
+    // query names it. In the function of a parallel loop only a const one:
+    // the scheduler keeps other systems from writing it, but not the other
+    // threads of the same loop.
     template<typename Component>
       requires named<Component>
     [[nodiscard]] Component &get(Entity entity) const {
       assert(m_world->valid(entity));
+      assert(internal::mayGet<Component>() &&
+             "sc::ecs2: get for writing in a parallel loop, where another thread of it may write the same component");
       return std::get<World::ColumnOf<Component> *>(m_columns)->get(indexOf(entity));
     }
 

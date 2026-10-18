@@ -31,6 +31,44 @@ namespace sc::ecs2 {
 
 namespace sc::ecs2::internal {
 
+#ifndef NDEBUG
+  // Set while a thread runs the function of a parallel loop, for the assert
+  // in get: what get hands out for writing, another thread of the same loop
+  // may be writing at the same time, as the scheduler keeps only other
+  // systems away. Only in debug builds.
+  inline thread_local bool inParallelLoop = false;
+#endif
+
+  // Has inParallelLoop set for as long as it exists, and then as it was
+  // before. Nothing in release builds.
+  class ParallelLoop {
+  public:
+#ifndef NDEBUG
+    ParallelLoop() noexcept : m_before(inParallelLoop) { inParallelLoop = true; }
+    ~ParallelLoop() { inParallelLoop = m_before; }
+#else
+    ParallelLoop() noexcept = default;
+#endif
+    ParallelLoop(const ParallelLoop &) = delete;
+    ParallelLoop &operator=(const ParallelLoop &) = delete;
+
+#ifndef NDEBUG
+  private:
+    bool m_before;
+#endif
+  };
+
+  // Whether get may hand out a component of this type here: for reading
+  // always, for writing not in a parallel loop.
+  template<typename Component>
+  [[nodiscard]] bool mayGet() noexcept {
+#ifndef NDEBUG
+    return std::is_const_v<Component> || !inParallelLoop;
+#else
+    return true;
+#endif
+  }
+
   // Far more than a program has: a world only reserves the addresses for
   // them, see World::m_table.
   inline constexpr size_t MAX_COMPONENT_TYPES = size_t{1} << 16;
@@ -305,10 +343,14 @@ namespace sc::ecs2 {
       return found != nullptr && found->contains(indexOf(entity)) && valid(entity);
     }
 
-    // The entity must exist and have the component.
+    // The entity must exist and have the component. In the function of a
+    // parallel loop only for reading, get<const Component>: another thread of
+    // the loop may write the same component.
     template<typename Component>
     [[nodiscard]] Component &get(Entity entity) {
       assert(valid(entity));
+      assert(internal::mayGet<Component>() &&
+             "sc::ecs2: get for writing in a parallel loop, where another thread of it may write the same component");
       return column<Component>().get(indexOf(entity));
     }
 
@@ -471,6 +513,10 @@ namespace sc::ecs2 {
       const size_t helpers =
           countUpTo(columns, pages, threading::threadSlots() * ENTITIES_PER_THREAD) / ENTITIES_PER_THREAD;
       threading::parallelFor(pages.count(), grain, helpers, [&](size_t first, size_t last) {
+        // Also on the calling thread, and with no helper at all: whether
+        // another thread takes part depends on the count, the mistake does
+        // not.
+        [[maybe_unused]] const internal::ParallelLoop loop;
         eachInRange(get, without, columns, excluded, pages, static_cast<uint32_t>(first), static_cast<uint32_t>(last),
                     function);
       });

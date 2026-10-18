@@ -1234,6 +1234,26 @@ TEST_CASE("World Loops", "[ecs2][world][threading]") {
     });
     REQUIRE(alphas == (entities.size() + 1) / 2);
   }
+
+#ifndef NDEBUG
+  SECTION("A Parallel Loop Gets Components Of Other Entities Only For Reading") {
+    using sc::ecs2::internal::mayGet;
+    // What the assert in get asks.
+    std::atomic<size_t> writable = 0;
+    std::atomic<size_t> readable = 0;
+    world.parallelEach<const Position>([&](const Position &) {
+      writable += mayGet<Velocity>();
+      readable += mayGet<const Velocity>();
+    });
+    REQUIRE(writable == 0);
+    REQUIRE(readable == entities.size());
+    // Outside of it, and in a loop of one thread, both.
+    REQUIRE(mayGet<Velocity>());
+    size_t serial = 0;
+    world.each<const Position>([&](const Position &) { serial += mayGet<Velocity>(); });
+    REQUIRE(serial == entities.size());
+  }
+#endif
 }
 
 TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Before", "[ecs2][world][threading]") {
