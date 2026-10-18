@@ -621,6 +621,91 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     REQUIRE_FALSE(world.valid(entities[1]));
   }
 
+  SECTION("Recorded Changes Of Values Are Done In Their Order") {
+    world.emplace<Spawner>(entities[0], 1);
+    const Entity gone = entities[2];
+    world.emplace<Spawner>(gone, 1);
+    Entity made = sc::ecs2::null;
+    int called = 0;
+    scheduler.add([&](Commands commands) {
+      // In the order recorded with the other changes of the component.
+      commands.modify(entities[0], [](Spawner &spawner) { spawner.count *= 10; });
+      commands.erase<Spawner>(entities[0]);
+      commands.emplace<Spawner>(entities[0], 2);
+      commands.modify(entities[0], [](Spawner &spawner) { spawner.count += 1; });
+      made = commands.create();
+      commands.emplace<Spawner>(made, 4);
+      commands.modify(made, [](Spawner &spawner) { spawner.count += 1; });
+      // Nothing for an entity without the component, or one that is no more.
+      commands.modify(entities[1], [&](Spawner &) { ++called; });
+      commands.modify(gone, [&](Spawner &) { ++called; });
+    });
+    world.destroy(gone);
+    scheduler.run(world);
+
+    REQUIRE(world.get<Spawner>(entities[0]).count == 3);
+    REQUIRE(world.get<Spawner>(made).count == 5);
+    REQUIRE(called == 0);
+  }
+
+  SECTION("Threads Record Changes For The Same Components, Done Once The Stage Is Over") {
+    // Every entity hits one of a few, as do many on other threads, and
+    // every hit counts.
+    constexpr size_t targets = 10;
+    scheduler.addParallel([&](Commands commands, const Position &pos) {
+      commands.modify(entities[static_cast<size_t>(pos.x) % targets], [](Health &health) { health.value -= 1; });
+    });
+    // Runs at the same time, as recording does not count as writing, and
+    // sees the values as they were.
+    std::atomic<size_t> changed = 0;
+    scheduler.addParallel([&](const Health &health) { changed += health.value != 100; });
+    REQUIRE(scheduler.stages() == Stages{{0, 1}});
+    scheduler.run(world);
+    REQUIRE(changed == 0);
+    scheduler.run(world);
+    REQUIRE(changed == targets);
+
+    for (size_t i = 0; i < entities.size(); ++i) {
+      // How many entities hit it, twice each.
+      const int hits = i < targets ? static_cast<int>((entities.size() - i + targets - 1) / targets) : 0;
+      REQUIRE(world.get<Health>(entities[i]).value == 100 - (2 * hits));
+    }
+  }
+
+  SECTION("A Recorded Change That Throws Ends The Run") {
+    const auto alive = std::make_shared<int>(0);
+    int ran = 0;
+    bool throws = true;
+    scheduler.add([&](Commands commands) {
+      commands.modify(entities[0], [](Health &health) { health.value = 1; });
+      commands.modify(entities[0], [&throws](Health &health) {
+        health.value += 1;
+        if (throws) {
+          throw std::runtime_error("modify");
+        }
+      });
+      commands.modify(entities[0], [alive](Health &health) { health.value += 10; });
+      commands.destroy(entities[1]);
+    });
+    scheduler.add([&](World &) { ++ran; });
+
+    REQUIRE_THROWS_AS(scheduler.run(world), std::runtime_error);
+    // What came before it is done, also what it did itself, the rest is
+    // dropped along with what it holds.
+    REQUIRE(ran == 0);
+    REQUIRE(world.get<Health>(entities[0]).value == 2);
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE(world.valid(entities[1]));
+
+    // And nothing of it is left over for the next run.
+    throws = false;
+    scheduler.run(world);
+    REQUIRE(ran == 1);
+    REQUIRE(world.get<Health>(entities[0]).value == 12);
+    REQUIRE(alive.use_count() == 1);
+    REQUIRE_FALSE(world.valid(entities[1]));
+  }
+
   SECTION("A System That Takes The World May Do Anything") {
     scheduler.add([&](World &all) {
       for (size_t i = 0; i < entities.size(); i += 2) {

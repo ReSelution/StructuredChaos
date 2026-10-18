@@ -24,7 +24,8 @@
 
 namespace sc::ecs2::internal {
 
-  // Memory for the components a thread wants added later. What is made in it
+  // Memory for the components a thread wants added later, and the functions
+  // it wants to modify components with. What is made in it
   // stays where it is until clear, which keeps the memory for the next time.
   class ValueStore {
   public:
@@ -93,6 +94,20 @@ namespace sc::ecs2::internal {
     }
   }
 
+  // Calls the recorded function with the component at the index if there is
+  // one, or only drops the function. Nothing runs next to it, see
+  // CommandList::apply, so without the making bit. The function is gone
+  // afterwards either way, also if it throws.
+  template<typename T, typename Function>
+  void finishModify(ColumnBase &column, uint32_t index, void *value, bool give) {
+    auto &typed = static_cast<Column<T> &>(column);
+    const auto drop = [](Function *function) { std::destroy_at(function); };
+    const std::unique_ptr<Function, decltype(drop)> function{static_cast<Function *>(value), drop};
+    if (give && typed.contains(index)) {
+      (*function)(typed.get(index));
+    }
+  }
+
   // What one thread wants done once its stage is over. On cache lines of its
   // own, the threads next to it write theirs at the same time.
   class alignas(64) CommandList {
@@ -104,13 +119,13 @@ namespace sc::ecs2::internal {
     CommandList &operator=(CommandList &&) = delete;
 
     void erase(Entity entity, ColumnBase &column) {
-      m_changes.push_back({.entity = entity, .column = &column, .emplace = nullptr, .value = nullptr});
+      m_changes.push_back({.entity = entity, .column = &column, .finish = nullptr, .value = nullptr});
     }
 
     template<typename T, typename... Args>
     void emplace(Entity entity, Column<T> &column, Args &&...args) {
       // First, so that a value that was made is always one of a change.
-      m_changes.push_back({.entity = entity, .column = &column, .emplace = &finishEmplace<T>, .value = nullptr});
+      m_changes.push_back({.entity = entity, .column = &column, .finish = &finishEmplace<T>, .value = nullptr});
       if constexpr (Column<T>::HAS_VALUE) {
         try {
           m_changes.back().value = ::new (m_values.allocate(sizeof(T), alignof(T))) T{std::forward<Args>(args)...};
@@ -121,24 +136,39 @@ namespace sc::ecs2::internal {
       }
     }
 
+    template<typename T, typename Function>
+    void modify(Entity entity, Column<T> &column, Function &&function) {
+      using Stored = std::decay_t<Function>;
+      // First, as in emplace.
+      m_changes.push_back({.entity = entity, .column = &column, .finish = &finishModify<T, Stored>, .value = nullptr});
+      try {
+        m_changes.back().value =
+            ::new (m_values.allocate(sizeof(Stored), alignof(Stored))) Stored(std::forward<Function>(function));
+      } catch (...) {
+        m_changes.pop_back();
+        throw;
+      }
+    }
+
     void destroy(Entity entity) { m_destroyed.push_back(entity); }
 
     // Taken by the threads outside the pool around every change they record:
     // they all share one list, see Commands::withList.
     [[nodiscard]] std::mutex &mutex() noexcept { return m_mutex; }
 
-    // Does what was recorded: the components in the order they were added and
-    // removed, then the entities. Nothing may be running next to it. If
-    // making a component throws, the rest is dropped.
+    // Does what was recorded: the components in the order they were added,
+    // removed and modified, then the entities. Nothing may be running next
+    // to it. If making a component or a function of modify throws, the rest
+    // is dropped.
     void apply(World &world) {
       for (; m_done < m_changes.size(); ++m_done) {
         const Change change = m_changes[m_done];
         // Not that of an entity that got the index since.
         const bool valid = world.valid(change.entity);
-        if (change.emplace != nullptr) {
+        if (change.finish != nullptr) {
           // Counted before: the value is gone after this, whatever happens.
           ++m_done;
-          change.emplace(*change.column, indexOf(change.entity), change.value, valid);
+          change.finish(*change.column, indexOf(change.entity), change.value, valid);
           --m_done;
         } else if (valid) {
           change.column->erase(indexOf(change.entity));
@@ -154,8 +184,8 @@ namespace sc::ecs2::internal {
     void clear() noexcept {
       for (; m_done < m_changes.size(); ++m_done) {
         const Change &change = m_changes[m_done];
-        if (change.emplace != nullptr) {
-          change.emplace(*change.column, indexOf(change.entity), change.value, false);
+        if (change.finish != nullptr) {
+          change.finish(*change.column, indexOf(change.entity), change.value, false);
         }
       }
       m_changes.clear();
@@ -165,13 +195,15 @@ namespace sc::ecs2::internal {
     }
 
   private:
-    // A component to add or remove: the entity and the column of the
+    // A component to add, remove or modify: the entity and the column of the
     // component.
     struct Change {
       Entity entity;
       ColumnBase *column;
-      // finishEmplace of the component to add, null for one to remove.
-      void (*emplace)(ColumnBase &column, uint32_t index, void *value, bool give);
+      // finishEmplace of a component to add or finishModify of one to
+      // modify, which also drop the value; null for one to remove.
+      void (*finish)(ColumnBase &column, uint32_t index, void *value, bool give);
+      // The component to add, or the function of modify.
       void *value;
     };
 
@@ -366,7 +398,9 @@ namespace sc::ecs2 {
   // Records what a system cannot do right away: destroying entities, which
   // touches every component, and removing a component another thread may be
   // using. Adding a component is recorded for a system that would otherwise
-  // have to write it with Change, and keep the systems that use it waiting.
+  // have to write it with Change, and keep the systems that use it waiting;
+  // changing its value, for one that would otherwise use Modify, for the same
+  // reason and to need no lock.
   // It is done once all systems that run at the same time are done, so
   // nothing an entity has goes away or turns up while they run. Safe to use
   // from the function of a parallel loop, for any entity and from several
@@ -410,6 +444,34 @@ namespace sc::ecs2 {
     void erase(Entity entity) const {
       auto &column = m_world->template column<Component>();
       withList([&](internal::CommandList &list) { list.erase(entity, column); });
+    }
+
+    // Calls the function with the component of the entity later, as
+    // Modify does now:
+    //
+    //   commands.modify(target, [](Health &health) { health.value -= 10; });
+    //
+    // The component is the one the function takes. The function is moved
+    // into the list now and called once the stage is over, with nothing else
+    // running, so without a lock; what it refers to must still be there then.
+    // Nothing happens if the entity does not exist any more by then or does
+    // not have the component. Like erase, this does not count as writing the
+    // component: the systems that use it run at the same time and see it as
+    // it was.
+    //
+    // Of two threads that record a change for the same component, both
+    // happen, one after the other: in the order of the threads, which entities
+    // a thread gets in a parallel loop is not fixed, so the order is only the
+    // same from run to run for one thread. The result is the same where the
+    // order does not matter, as with damage that is subtracted.
+    template<typename Function>
+    void modify(Entity entity, Function &&function) const {
+      using Component = internal::ModifiedBy<std::decay_t<Function>>;
+      static_assert(std::is_invocable_v<std::decay_t<Function> &, Component &>,
+                    "the function takes the component by reference");
+      static_assert(internal::Column<Component>::HAS_VALUE, "a component without members has no value to modify");
+      auto &column = m_world->template column<Component>();
+      withList([&](internal::CommandList &list) { list.modify(entity, column, std::forward<Function>(function)); });
     }
 
   private:
