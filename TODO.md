@@ -19,8 +19,15 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
 
 ## Missing API in ecs2
 
-- [ ] **No `emplace_or_replace`:** the benchmark's `addComponents` checks with `contains` and otherwise assigns `T{}`,
-  like EnTT.
+- [x] **No `emplace_or_replace`:** `Column::emplaceOrReplace` now (`World` only passes it on): one step with the
+  `making` bit held from the look at the mask until the component is made or assigned; the one there gets a new
+  value assigned, made from the arguments, and stays as it was if making it throws (as EnTT's). It counts itself in
+  the page with `occupy` also when it replaces, since `erase` of a component without `DESTROYS` takes no `making`
+  bit and could otherwise empty the page under the assignment. Returns `Emplaced::Made` or `Emplaced::Replaced`,
+  not a reference, which could outlive the bit; `emplace` and `tryEmplace` return `Emplaced` as well (`Made`,
+  `There`) instead of a reference and a bool. Having `erase` always take the bit instead cost +38 % in add + remove
+  (`tests/ecs_compare`, 100K entities: 898 → 1238 µs) and would not have covered the reference. The benchmark's
+  `addComponents` still checks with `contains` and otherwise assigns `T{}`.
 - [x] **No bulk destroy:** `World::destroy(std::span<const Entity>)` since `fa865dc`; the factory of ecs_benchmark
   uses it since its commit `9bf8775`.
 - [ ] **No entity count:** the benchmark tests check with `valid()` instead.
