@@ -144,6 +144,11 @@ namespace sc::ecs2::internal {
       }
       void add(uint32_t index) { indices.push_back(index); }
       void close() { left.store(static_cast<int64_t>(indices.size()), std::memory_order_release); }
+
+      // How many indices are left to hand out.
+      [[nodiscard]] size_t size() const noexcept {
+        return static_cast<size_t>(std::max<int64_t>(left.load(std::memory_order_acquire), 0));
+      }
     };
 
   public:
@@ -285,6 +290,26 @@ namespace sc::ecs2::internal {
       m_free.close();
       m_rareFree.close();
       return destroyed;
+    }
+
+    // How many entities exist: every index of the pages handed out to the
+    // threads, less those the threads have not handed out yet and those
+    // destroy gave back. Worked out, not counted by create and destroy: a
+    // count would be one more locked instruction per create, on a cache line
+    // that every creating thread writes. Reads the Share of every thread, 129
+    // cache lines. Nothing may create or destroy next to it, as next to
+    // destroy: the shares are the threads' own and read without a lock.
+    [[nodiscard]] size_t alive() const noexcept {
+      const Pages pages = this->pages();
+      size_t count = size_t{pages.common + pages.rare} << PAGE_BITS;
+      const auto unused = [](const Share &share) {
+        return size_t{share.end - share.next} + size_t{share.rareEnd - share.rareNext};
+      };
+      for (const Share &share: m_shares) {
+        count -= unused(share);
+      }
+      count -= unused(m_shared);
+      return count - m_free.size() - m_rareFree.size();
     }
 
     // Which pages have entities: the first so many, and the last so many for

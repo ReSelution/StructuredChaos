@@ -184,6 +184,10 @@ namespace sc::ecs2 {
 
     [[nodiscard]] bool valid(Entity entity) const noexcept { return m_entities.valid(entity); }
 
+    // How many entities exist. Nothing may create or destroy entities next
+    // to it, see EntityAllocator::alive.
+    [[nodiscard]] size_t alive() const noexcept { return m_entities.alive(); }
+
     // Removes the entity with all of its components. False if it does not
     // exist (any more). Nothing may run next to it, as next to
     // CommandList::apply, which calls it for Commands::destroy: it takes the

@@ -186,6 +186,39 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     REQUIRE_FALSE(world.destroy(first));
   }
 
+  SECTION("The Entities That Exist Are Counted") {
+    REQUIRE(world.alive() == 0);
+    std::vector<Entity> common;
+    for (int i = 0; i < 10; ++i) {
+      common.push_back(world.create());
+    }
+    const Entity special = world.create(sc::ecs2::rare);
+    REQUIRE(world.alive() == 11);
+
+    REQUIRE(world.destroy(common[3]));
+    REQUIRE(world.destroy(special));
+    REQUIRE_FALSE(world.destroy(special));
+    REQUIRE(world.alive() == 9);
+    // Indices given back count again once they are handed out again.
+    common[3] = world.create();
+    REQUIRE(world.alive() == 10);
+
+    // Created all at once over a page border, partly with an index given
+    // back.
+    REQUIRE(world.destroy(common[5]));
+    std::vector<Entity> batch(PAGE_SIZE + 100);
+    world.create(std::span<Entity>{batch});
+    REQUIRE(world.alive() == 9 + batch.size());
+
+    // Destroyed all at once; one given twice and one gone already are left
+    // out.
+    std::vector<Entity> gone(batch.begin(), batch.begin() + 200);
+    gone.push_back(gone.front());
+    gone.push_back(common[5]);
+    REQUIRE(world.destroy(std::span<const Entity>{gone}) == 200);
+    REQUIRE(world.alive() == 9 + batch.size() - 200);
+  }
+
   SECTION("An Index Comes Back With Another Generation") {
     const Entity first = world.create();
     world.emplace<Position>(first, 1.0f, 2.0f);
@@ -225,6 +258,7 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     }
     REQUIRE(sc::ecs2::indexOf(lastRare) == sc::ecs2::INDEX_LIMIT - 1);
     REQUIRE_THROWS_AS(world.create(sc::ecs2::rare), std::length_error);
+    REQUIRE(world.alive() == sc::ecs2::INDEX_LIMIT);
     REQUIRE(world.valid(special));
     REQUIRE(world.valid(lastRare));
     // Nothing is lost by trying.
@@ -296,6 +330,8 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     for (const Entity entity: earlier) {
       REQUIRE_FALSE(world.valid(entity));
     }
+    // With what the threads have left of their pages not among them.
+    REQUIRE(world.alive() == created.size());
   }
 
   SECTION("Threads Outside The Pool Create Other Entities") {
@@ -329,6 +365,7 @@ TEST_CASE("World Entities", "[ecs2][world]") {
       indices.insert(sc::ecs2::indexOf(entity));
     }
     REQUIRE(indices.size() == created.size() + createdRare.size());
+    REQUIRE(world.alive() == created.size() + createdRare.size());
   }
 }
 
