@@ -342,10 +342,39 @@ level or faster (random `get` -4 %, damage without lock -34 %, add + remove thro
   the rest level. **Open:** in a new world still 42 / 64 and 79 / 92, presumably the first use of the table of
   page numbers (`mmap`, first faults) and of the vectors per segment; the benchmark makes a new world per sample,
   a game uses one. A small hash table instead of the table per page would avoid it, at a cost per page change.
-- [ ] **Looking up another entity: +10 % on one thread, +18 % on all** (1 061 → 1 164, 172 → 203 µs). Varies between
-  runs (+6 / +1 % in another one); `valid` now also reads the owner of the page. Measure with more runs first.
-- [ ] **create all at once: +15 %** (127 → 146 µs). Was there before the areas already (+16 % after `4766545`), not
-  looked into.
+- [ ] **Looking up another entity and plain iteration, only in the benchmark binary:** 9 runs alternating, `5e57280`
+  / `6825041`: lookup +5 % on one thread (997 → 1 047 µs), +12 % on all (171 → 191); light work +8 % (193 → 208),
+  +15 % on all (44 → 51). Not `valid` (the benchmark's `Query::get` does not call it) and not the areas (the
+  benchmark creates with `create()`, area 0). A probe with the benchmark's setup (1M entities one by one, six
+  components, targets in random order) shows none of it: `each` 168–171 / 166–167 µs, `parallelEach` 35–37 / 35–36,
+  lookup 2 832–2 850 / 2 673–2 705 (-5 %), in area 0 and in an area at page 2^18 alike. The serial light work is the
+  same `World::each` in both. Presumably the binary again (code placement, or what ran before in the same process),
+  as the open "+3 to 5 %" entry above; not shown. Not covered by the probe: the parallel benchmarks go through
+  `Scheduler::run` and `Query::parallelEach`, the probe calls `World::parallelEach`.
+- [x] **create all at once: +15 %** (127 → 146 µs): first use, not slower code. A probe like the benchmark (a new
+  world per run, made outside the timing, the memory of the one before back in `rangeCache`): 95.7 µs at `5e57280`,
+  102.8 at `4766545`, 115.8 now, with 15 / 21 / 30 page faults inside `create(span)`, about 1.3 µs per fault. Every
+  table that gets memory with its first use costs a fault there in a new world: the chunk table of each column (a
+  zeroed `std::array` before, touched in the constructor), the owners, the row of pages, the table of areas, the
+  `Area` itself, the areas of the sets in the world; with the areas their entries lie at page 2^18, on pages of
+  their own. A game pays it once per world and area (~20 µs); see below for the benchmarks.
+- [ ] **First use in the benchmarks:** every measured run of the create and destroy benchmarks gets a world of its
+  own (`make_worlds`, made outside the timing), for every framework alike. They measure the first fill and the
+  first destroy of a world, with every first touch of its tables: create all at once +15 % (above),
+  `parallelDestroy` +35 µs (above, the table of page numbers of `PageSort`). Not made to look better by touching
+  the tables in the constructor, which the benchmarks do not time. The variants in a world emptied before
+  (`CREATE_AGAIN`, `CREATE_BATCH_AGAIN`, so far only for sc2) were meant to show the other case and showed
+  something else, see the next one.
+- [x] **Emptied pages gave their memory back at once:** a world filled, emptied with `destroy` and filled again took
+  5 times as long as a new one (522 instead of 95 µs, 336 page faults: `vacate` gave every emptied page but the 4
+  spares back with `MADV_DONTNEED`, and every piece came back zeroed). Since `5e57280` at least, not a regression.
+  `memory::decommit` uses `MADV_FREE` on Linux now (the memory stays until the OS needs it, as with `offer`), and
+  `startPage` no longer populates a page that gave its memory back. `ecs_compare_sc2`, 5 runs: create in an
+  emptied world 1 512 → 1 095 µs, all at once 539 → 174; destroy 852 → 761, all at once 752 → 674; add + remove
+  904 → 795, on all threads 142 → 118; create in a new world level. Memory: the emptied pages count as Rss
+  (`LazyFree`) until taken, the world after 2 200 frames 4.89 → 4.95 MB. Windows unchanged (`MEM_DECOMMIT`).
+- [ ] **create one by one in an emptied world still slower than in a new one:** 1 095 against 929 µs. Not looked
+  into; the free list hands the indices out from the back, so in falling order, perhaps that.
 
 ## Show the parallel advantage in numbers
 
