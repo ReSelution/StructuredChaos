@@ -322,7 +322,7 @@ namespace sc::ecs2::internal {
       Header &header = makeHeader(number);
       const uint32_t slot = index & (PAGE_SIZE - 1);
       assert(!has(header, slot));
-      occupy(header, number, 1);
+      occupy(header, number, slot, 1);
       if constexpr (HAS_VALUE) {
         try {
           ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
@@ -363,7 +363,7 @@ namespace sc::ecs2::internal {
         return Emplaced::There;
       }
       try {
-        occupy(header, number, 1);
+        occupy(header, number, slot, 1);
         if constexpr (HAS_VALUE) {
           try {
             ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
@@ -408,7 +408,7 @@ namespace sc::ecs2::internal {
             *valueAt(index) = T{std::forward<Args>(args)...};
           }
         } else {
-          occupy(header, number, 1);
+          occupy(header, number, slot, 1);
           if constexpr (HAS_VALUE) {
             try {
               ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
@@ -491,7 +491,7 @@ namespace sc::ecs2::internal {
         Header &header = makeHeader(number);
         const uint32_t slot = index & (PAGE_SIZE - 1);
         const uint32_t here = std::min(count, PAGE_SIZE - slot);
-        occupy(header, number, here);
+        occupy(header, number, slot, here);
         if constexpr (HAS_VALUE) {
           try {
             std::uninitialized_fill_n(valueAt(index), here, value);
@@ -861,33 +861,33 @@ namespace sc::ecs2::internal {
       return fresh;
     }
 
-    // Counts so many components more in a page, which is all there is to it
-    // unless the page has no memory: the values get it then. A spare has it,
-    // also for its first component.
+    // Counts so many components more in a page, from slot on, which is all
+    // there is to it unless the page has no memory: the values get it then. A
+    // spare has it, also for its first component.
     //
     // Other threads may add to the page and remove from it at the same time.
     // A thread that finds the memory missing waits here for the one that
     // fetches it, or that is taking it back, see vacate. One that finds it
     // there may use it: vacate marks it as gone before it looks at the count,
     // which it finds raised then.
-    void occupy(Header &header, uint32_t number, uint32_t count) {
+    void occupy(Header &header, uint32_t number, uint32_t slot, uint32_t count) {
       header.count.fetch_add(count, std::memory_order_seq_cst);
       if (header.started.load(std::memory_order_seq_cst)) [[likely]] {
         return;
       }
-      start(header, number, count);
+      start(header, number, slot, count);
     }
 
     // The rest of occupy, for the first components of a page. Out of line, as
     // makeHeaderBlock.
-    [[gnu::noinline]] void start(Header &header, uint32_t number, uint32_t count) {
+    [[gnu::noinline]] void start(Header &header, uint32_t number, uint32_t slot, uint32_t count) {
       const Busy busy{header};
       if (header.started.load(std::memory_order_relaxed)) {
         return;
       }
       if constexpr (HAS_VALUE) {
         try {
-          startPage(number, header.vacated);
+          startPage(number, slot, count, header.vacated);
         } catch (...) {
           header.count.fetch_sub(count, std::memory_order_seq_cst);
           throw;
@@ -1009,15 +1009,20 @@ namespace sc::ecs2::internal {
     // nobody waits for anybody: a page that gets memory again after it gave
     // its own back only fetches that.
     //
-    // With small pages the memory of the page is its own, and it is fetched
-    // in one go: left to the first accesses, the OS would be asked once for
-    // every OS_PAGE_SIZE of it. Not in a chunk that memory::rangeCache kept,
+    // With small pages the memory of the page is its own. What the page
+    // starts with, the count components from slot on, is fetched in one go
+    // when it spans more than one OS_PAGE_SIZE: left to the first accesses,
+    // the OS would be asked once for every OS_PAGE_SIZE of it, 1.5 instead of
+    // 2.5 ms to create 100 000 entities with 320 bytes of components each in
+    // small pages. The rest of the page comes with its first accesses: all of
+    // it in one go held as much memory for one component in every page as for
+    // a full column, 63 MB instead of 1.3 MB for 245 components of 64 bytes
+    // spread over 1M entities. Not in a chunk that memory::rangeCache kept,
     // until the page gave its memory back: the memory is there already, or
     // offered to the OS and still there unless it took it. Writing to it is
     // all it takes then, while fetching it in one go has the OS go through
-    // every piece of it: 1.5 instead of 2.5 ms to create 100 000 entities
-    // with 320 bytes of components each in small pages.
-    void startPage(uint32_t number, bool vacated) {
+    // every piece of it.
+    void startPage(uint32_t number, uint32_t slot, uint32_t count, bool vacated) {
       const size_t chunk = number / CHUNK_PAGES;
       auto *const base = reinterpret_cast<std::byte *>(makeChunk(chunk));
       // Within the chunk.
@@ -1036,8 +1041,9 @@ namespace sc::ecs2::internal {
           for (size_t region = firstRegion; region <= lastRegion; ++region) {
             m_regions[region].store(STARTED, std::memory_order_release);
           }
-          if (vacated || !m_chunkKept[chunk]) {
-            memory::populate(first, PAGE_BYTES);
+          const size_t bytes = size_t{count} * sizeof(T);
+          if ((vacated || !m_chunkKept[chunk]) && bytes > memory::OS_PAGE_SIZE) {
+            memory::populate(first + (size_t{slot} * sizeof(T)), bytes);
           }
           return;
         }
