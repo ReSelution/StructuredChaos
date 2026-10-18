@@ -423,11 +423,11 @@ namespace sc::ecs2 {
     // The same on the calling thread and on every pool thread that has
     // nothing else to do, for many entities: sorted by page with PageSort,
     // and every page on one thread, which ends its entities and takes their
-    // components away in every column; only giving the indices back to the
-    // free lists is left to the calling thread. Ending the entities was most
-    // of it on one thread: 6.6 ns per entity without components, and 0.4 to
-    // 0.6 ns more per column. Fewer than ENTITIES_PER_THREAD, or all in one
-    // page, are done as destroy does.
+    // components away in every column. Giving the indices back to the free
+    // lists is spread as well (EntityAllocator::giveMany of pages).
+    // Ending the entities was most of it on one thread: 6.6 ns per entity
+    // without components, and 0.4 to 0.6 ns more per column. Fewer than
+    // ENTITIES_PER_THREAD, or all in one page, are done as destroy does.
     size_t parallelDestroy(std::span<const Entity> entities) {
       const size_t helpers = entities.size() / ENTITIES_PER_THREAD;
       if (helpers == 0) {
@@ -469,13 +469,13 @@ namespace sc::ecs2 {
           }
         }
       });
-      // Together at the front, in the order of the pages.
       size_t destroyed = 0;
+      m_freedPages.resize(pages.size());
       for (size_t i = 0; i < pages.size(); ++i) {
-        std::copy_n(m_freed.data() + m_destroySort.offset(i), m_freedCounts[i], m_freed.data() + destroyed);
+        m_freedPages[i] = {m_freed.data() + m_destroySort.offset(i), m_freedCounts[i]};
         destroyed += m_freedCounts[i];
       }
-      m_entities.giveMany(std::span<const uint32_t>{m_freed.data(), destroyed});
+      m_entities.giveMany(std::span<const std::span<const uint32_t>>{m_freedPages}, helpers);
       return destroyed;
     }
 
@@ -918,6 +918,7 @@ namespace sc::ecs2 {
     internal::PageSort<const Entity> m_destroySort;
     std::vector<uint32_t> m_freed;
     std::vector<uint32_t> m_freedCounts;
+    std::vector<std::span<const uint32_t>> m_freedPages;
   };
 
 } // namespace sc::ecs2

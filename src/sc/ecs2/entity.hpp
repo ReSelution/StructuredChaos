@@ -338,6 +338,41 @@ namespace sc::ecs2::internal {
       m_rareFree.close();
     }
 
+    // giveMany for the indices of many pages, each span those of one page,
+    // on the calling thread and the pool: the lists get their final size
+    // first, and every page is copied to its place by one thread. On one
+    // thread giving 1M indices back took about 0.93 ms, a third of
+    // World::parallelDestroy. The indices of a page are all common or all
+    // rare, so a page goes to one list in one piece.
+    void giveMany(std::span<const std::span<const uint32_t>> pages, size_t helpers) {
+      const uint32_t rareBegin = this->pages().rareBegin();
+      m_free.open();
+      m_rareFree.open();
+      m_places.resize(pages.size());
+      size_t common = m_free.indices.size();
+      size_t rare = m_rareFree.indices.size();
+      for (size_t i = 0; i < pages.size(); ++i) {
+        if (pages[i].empty()) {
+          continue;
+        }
+        size_t &at = pages[i].front() >= rareBegin ? rare : common;
+        m_places[i] = at;
+        at += pages[i].size();
+      }
+      m_free.indices.resize(common);
+      m_rareFree.indices.resize(rare);
+      threading::parallelFor(pages.size(), 1, helpers, [&](size_t first, size_t last) {
+        for (size_t i = first; i < last; ++i) {
+          if (!pages[i].empty()) {
+            FreeList &list = pages[i].front() >= rareBegin ? m_rareFree : m_free;
+            std::ranges::copy(pages[i], list.indices.begin() + static_cast<std::ptrdiff_t>(m_places[i]));
+          }
+        }
+      });
+      m_free.close();
+      m_rareFree.close();
+    }
+
     // Which pages have entities: the first so many, and the last so many for
     // the rare ones.
     struct Pages {
@@ -419,6 +454,8 @@ namespace sc::ecs2::internal {
     // For the threads that have none in m_shares, see withShare.
     Share m_shared;
     std::mutex m_sharedMutex;
+    // Where the indices of every page go in giveMany of pages.
+    std::vector<size_t> m_places;
   };
 
 } // namespace sc::ecs2::internal
