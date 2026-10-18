@@ -25,6 +25,28 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
   uses it since its commit `9bf8775`.
 - [ ] **No entity count:** the benchmark tests check with `valid()` instead.
 
+## Limits
+
+- [ ] **`INDEX_LIMIT` beyond 2^24:** the limit comes from the version before the chunks, which reserved the address
+  space of every column for all indices (2^32 × 256 bytes = 1 TiB per column). With values in chunks, what is left
+  that grows with the limit (looked at in the code, nothing measured):
+  - The entity handle already has 32 bits of index (`INDEX_BITS = 32`), and the values only take address space for
+    the chunks in use: no work.
+  - The page headers lie in reserved address space and are found from the index: at 2^32 about 1.1 GB of address
+    space per column (`PAGE_COUNT × 1088 B`), untouched where unused; with 128 TiB that is room for ~100 000 columns.
+    No problem.
+  - **The one hard limit:** `m_headerBlocks` is a single `uint64_t`, one bit per committed header block, so that
+    `findHeader` never reads a reservation without memory (needed on Windows); `static_assert(HEADER_BLOCK_COUNT <=
+    64)`. At 2^32 there are 16 384 blocks: an array of masks (256 words), or a second level as with the summary.
+  - Real memory instead of address space: `m_chunks`, `m_chunkMemory`, `m_chunkKept` are `std::array`s in the
+    `Column` object, sized `INDEX_LIMIT / CHUNK_SIZE` and zeroed when it is made; at 2^32 and 256-byte components
+    ~9 MB per column. In reserved address space like the headers, a table would only cost what is touched.
+  - The same for `m_killPlace` of the bulk destroy (`fa865dc`): a `std::vector` of `PAGE_COUNT` entries, 16 KB per
+    world now, 4 MB at 2^32. Reserved instead, only the entries of the touched pages get memory, and destroy sets
+    them back to 0 anyway.
+  - A middle way: 2^28 (268 M entities) needs 1024 header blocks, 16 words instead of one, and nothing else changes
+    much.
+
 ## Events with immediate delivery
 
 Goal: a system emits an event and its listeners run right away, on the emitting thread, also from `addParallel`.
