@@ -390,7 +390,8 @@ namespace sc::ecs2::internal {
     // The making bit is held from the look at the mask until the component
     // is made or assigned, so another thread that goes for the index with
     // tryEmplace is told it was not first, and one with emplaceOrReplace
-    // waits, as does erase of a component that DESTROYS.
+    // waits, as does erase of a component that DESTROYS. The page keeps its
+    // memory under the assignment for the bit, see heldHas.
     template<typename... Args>
     Emplaced emplaceOrReplace(uint32_t index, Args &&...args) {
       assert(index < INDEX_LIMIT);
@@ -399,37 +400,26 @@ namespace sc::ecs2::internal {
       const uint32_t slot = index & (PAGE_SIZE - 1);
       std::atomic<uint64_t> &making = header.making[slot / 64];
       const uint64_t bit = uint64_t{1} << (slot % 64);
-      // Not for long, as in erase.
-      while ((making.fetch_or(bit, std::memory_order_acq_rel) & bit) != 0) {
-        std::this_thread::yield();
-      }
+      take(making, bit);
       bool made = false;
       try {
-        // Counted before the look at the mask, also for a component that is
-        // there: erase of one that does not DESTROYS takes no making bit, and
-        // if it took the last of the page, the page could give its memory
-        // back under the assignment. Counted, it keeps it.
-        occupy(header, number, 1);
-        try {
-          if (has(header, slot)) {
-            if constexpr (HAS_VALUE) {
-              *valueAt(index) = T{std::forward<Args>(args)...};
-            }
-          } else {
-            if constexpr (HAS_VALUE) {
-              ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
-            }
-            header.mask[slot / 64].fetch_or(bit, std::memory_order_acq_rel);
-            markWord(header, slot / 64);
-            made = true;
+        if (heldHas(header, slot)) {
+          if constexpr (HAS_VALUE) {
+            *valueAt(index) = T{std::forward<Args>(args)...};
           }
-        } catch (...) {
-          forsake(header, number, 1);
-          throw;
-        }
-        if (!made) {
-          // The one there is counted already.
-          forsake(header, number, 1);
+        } else {
+          occupy(header, number, 1);
+          if constexpr (HAS_VALUE) {
+            try {
+              ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
+            } catch (...) {
+              forsake(header, number, 1);
+              throw;
+            }
+          }
+          header.mask[slot / 64].fetch_or(bit, std::memory_order_acq_rel);
+          markWord(header, slot / 64);
+          made = true;
         }
       } catch (...) {
         making.fetch_and(~bit, std::memory_order_release);
@@ -443,10 +433,8 @@ namespace sc::ecs2::internal {
     // making bit. Another thread that modifies the same index waits, as do
     // emplaceOrReplace and erase of a component that DESTROYS, so of two
     // threads that change the same component, the second sees what the first
-    // did. False, without a call, if the index has no component. Counted in
-    // the page while the function runs, as in emplaceOrReplace: erase of a
-    // component without DESTROYS takes no bit, and if it took the last one of
-    // the page, the page could give its memory back under the function.
+    // did. False, without a call, if the index has no component. The page
+    // keeps its memory under the function for the bit, see heldHas.
     //
     // Loops and get do not take the bit, so nothing may read or write the
     // component at the index past modify while it may run.
@@ -465,24 +453,14 @@ namespace sc::ecs2::internal {
       Header &header = *found;
       std::atomic<uint64_t> &making = header.making[slot / 64];
       const uint64_t bit = uint64_t{1} << (slot % 64);
-      // Not for long, as in erase.
-      while ((making.fetch_or(bit, std::memory_order_acq_rel) & bit) != 0) {
-        std::this_thread::yield();
-      }
+      take(making, bit);
       bool called = false;
       try {
-        occupy(header, number, 1);
-        try {
-          // Asked again under the bit: an erase may have taken it meanwhile.
-          if (has(header, slot)) {
-            function(*valueAt(index));
-            called = true;
-          }
-        } catch (...) {
-          forsake(header, number, 1);
-          throw;
+        // Asked again under the bit: an erase may have taken it meanwhile.
+        if (heldHas(header, slot)) {
+          function(*valueAt(index));
+          called = true;
         }
-        forsake(header, number, 1);
       } catch (...) {
         making.fetch_and(~bit, std::memory_order_release);
         throw;
@@ -564,7 +542,8 @@ namespace sc::ecs2::internal {
           // Another thread removed it just now.
           return false;
         }
-      } else if ((header.mask[slot / 64].fetch_and(~bit, std::memory_order_acq_rel) & bit) == 0) {
+      } else if ((header.mask[slot / 64].fetch_and(~bit, std::memory_order_seq_cst) & bit) == 0) {
+        // seq_cst for heldHas: no bit taken here.
         return false;
       }
       forsake(header, number, 1);
@@ -744,6 +723,46 @@ namespace sc::ecs2::internal {
 
     [[nodiscard]] static bool has(const Header &header, uint32_t slot) noexcept {
       return ((header.mask[slot / 64].load(std::memory_order_relaxed) >> (slot % 64)) & 1u) != 0;
+    }
+
+    // has for an index whose making bit this thread took with take, in
+    // emplaceOrReplace and modify, which then use the value without counting
+    // it in the page. Counting it, with occupy and forsake, made modify 2.6
+    // times slower where threads hit different entities of the same page:
+    // all of them wrote the count of that page (one of 1 000 entities, all
+    // threads, 37.8 instead of 14.5 ns per modify, ecs_compare). What keeps
+    // the page from giving its memory back under them is the bit instead:
+    // vacate looks at the making bits after it found the count at zero, and
+    // keeps the memory if one is set.
+    //
+    // erase of a component without DESTROYS takes no bit, so it may take the
+    // component meanwhile. Then either vacate sees the bit, or this sees the
+    // component gone and leaves the value alone. Here the bit is set before
+    // the mask is read; there the mask is cleared before the count, which
+    // vacate reads before the bits. All of them are seq_cst, so they are in
+    // one order that agrees with each thread's, and the two reads cannot both
+    // come before the other side's write. On x86 the same instructions as
+    // with weaker orders.
+    [[nodiscard]] static bool heldHas(const Header &header, uint32_t slot) noexcept {
+      return ((header.mask[slot / 64].load(std::memory_order_seq_cst) >> (slot % 64)) & 1u) != 0;
+    }
+
+    // Whether a thread holds a making bit of the page, for vacate: one in
+    // emplaceOrReplace or modify may be using a value it does not count, see
+    // heldHas. After the count, and seq_cst for that. 64 loads, on the rare
+    // way of a page that gives its memory back.
+    [[nodiscard]] static bool anyHeld(const Header &header) noexcept {
+      return std::ranges::any_of(header.making, [](const std::atomic<uint64_t> &word) {
+        return word.load(std::memory_order_seq_cst) != 0;
+      });
+    }
+
+    // Takes the making bit of an index, waiting while another thread has it,
+    // which is about to be done with the index. seq_cst for heldHas.
+    static void take(std::atomic<uint64_t> &making, uint64_t bit) noexcept {
+      while ((making.fetch_or(bit, std::memory_order_seq_cst) & bit) != 0) {
+        std::this_thread::yield();
+      }
     }
 
     // Notes in the summary that a word of the mask has a bit now. Only
@@ -947,12 +966,18 @@ namespace sc::ecs2::internal {
     }
 
     // A page has no component: its memory goes back, unless a thread has
-    // added one since.
+    // added one since, or holds a making bit of it (see heldHas).
     //
     // Whoever adds one counts it first and looks for the memory after, and
     // here the memory is marked as gone first and the count looked at after.
     // So either the count seen here is not zero and the memory stays, or the
     // other thread finds the memory gone and waits in occupy until it is.
+    //
+    // A page that keeps its memory for a held bit has no component and is not
+    // among the spares any more: it keeps it until it gets a component and
+    // is emptied again. One page at most each time an erase empties a page
+    // while modify or emplaceOrReplace holds a bit of it, and the page leaves
+    // the spares before that thread is done.
     //
     // On Windows the promise of memory goes back with it, see
     // memory::decommit. On Linux with vm.overcommit_memory=2 that promise is
@@ -966,7 +991,7 @@ namespace sc::ecs2::internal {
         // Another thread that removed a last component was here already.
         return;
       }
-      if (header.count.load(std::memory_order_seq_cst) != 0) {
+      if (header.count.load(std::memory_order_seq_cst) != 0 || anyHeld(header)) {
         header.started.store(true, std::memory_order_seq_cst);
         return;
       }
