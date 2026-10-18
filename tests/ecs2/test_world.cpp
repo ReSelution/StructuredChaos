@@ -309,6 +309,26 @@ TEST_CASE("World Entities", "[ecs2][world]") {
     REQUIRE(world.get<Velocity>(turned).dx == 5.0f);
     REQUIRE_FALSE(world.contains<Velocity>(still));
 
+    // Named as template arguments, the set only picks the area: the entity
+    // gets no component yet.
+    const Entity planned = world.create<Velocity, Position>();
+    REQUIRE(pageOf(planned) == pageOf(moving));
+    REQUIRE_FALSE(world.contains<Position>(planned));
+    REQUIRE_FALSE(world.contains<Velocity>(planned));
+    world.emplace<Position>(planned, 9.0f, 9.0f);
+    REQUIRE(world.get<Position>(planned).x == 9.0f);
+    // A set of its own, the 5th area, which starts at 2^17: the indices it
+    // gives back stay out of the areas the checks below take from.
+    std::vector<Entity> plannedMany(PAGE_SIZE + 10);
+    world.create<Tag>(std::span<Entity>{plannedMany});
+    size_t inFifth = 0;
+    for (const Entity entity: plannedMany) {
+      inFifth += inArea(entity, 1u << 17) && world.valid(entity);
+    }
+    REQUIRE(inFifth == plannedMany.size());
+    REQUIRE(world.destroy(planned));
+    REQUIRE(world.destroy(std::span<const Entity>{plannedMany}) == plannedMany.size());
+
     // All at once, the same set goes to the same area.
     std::vector<Entity> many(PAGE_SIZE + 10);
     world.create(std::span<Entity>{many}, Velocity{}, Position{});

@@ -463,6 +463,27 @@ namespace sc::ecs2 {
     // An entity without components, in the area of those.
     [[nodiscard]] Entity create() { return m_entities.create(); }
 
+    // An entity in the area of a set of components, without them: entities
+    // created for the same components, in whatever order, lie together in the
+    // same pages, and a column has pages only where its components are. The
+    // components are added afterwards, with emplace; what is added later
+    // than planned or not at all does not move the entity.
+    //
+    //   const Entity player = world.create<Position, Velocity, Health>();
+    //   world.emplace<Position>(player, 0.0f, 0.0f);
+    template<typename... Components>
+      requires(sizeof...(Components) != 0)
+    [[nodiscard]] Entity create() {
+      return m_entities.create(areaOf<Components...>());
+    }
+
+    // The same for every place of the span.
+    template<typename... Components>
+      requires(sizeof...(Components) != 0)
+    void create(std::span<Entity> entities) {
+      m_entities.create(entities, areaOf<Components...>(), [](uint32_t, uint32_t) {});
+    }
+
     // An entity with the components, in the area of its set of components:
     // entities created with the same components, in whatever order, lie
     // together in the same pages, and a column has pages only where its
