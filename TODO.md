@@ -35,6 +35,34 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
   per create on a line all creating threads write). Nothing may create or destroy next to it. Its own cost (129
   `Share`s read) not measured. The benchmark tests still check with `valid()`.
 
+## Resource cache
+
+`ResourceCache<T>` in `src/sc/ecs2/resource.hpp`: load once by key, handles with a count, given back only by
+`collect(owner)` of the owner of the resource (a system at the end of the frame), loaded without waiting by
+`loadAsync`.
+
+- [ ] **One mutex for every load:** also a load that finds its resource takes it. Not measured how much threads
+  that load many small resources at once wait for it. If they do, a map split by hash with a mutex each.
+- [ ] **The last handle of a resource takes a CAS loop:** the count and the queued bit are one word, so that a
+  handle never touches the entry after its last change (collect may free it right after). Every other drop is
+  one CAS as well, not a `fetch_sub`. Not measured against `shared_ptr`.
+- [ ] **Not a parameter of systems yet:** systems get the cache through captures. A `SystemParam` for it once SAA
+  shows how it is used; the scheduler would not need to know about it for stages, a load is safe from anywhere.
+- [x] **GPU resources:** the cache knows no frames. The destructor of a GPU resource only puts it into a
+  `memory::DeletionQueue` (`src/sc/memory/deferred.hpp`), which frees it with `beginFrame` once the fence of its
+  frame has signalled. Chosen over a frame delay in the cache (more state in load, find and collect, and only for
+  cached objects) and over the frame holding handles (an atomic add and a CAS per resource and frame).
+- [x] **Loading without waiting:** `loadAsync` runs the loader on the pool, the handle comes right away,
+  `ready()` / `failed()` / `wait()`. Whoever waits for a load whose task has not started runs the loader itself, so
+  that workers that all wait do not wait for a task none of them is free to run.
+- [ ] **A task of loadAsync that shutdown drops:** its resource fails with an error. Not tested: dropping a task
+  that has not started needs a pool whose workers are all busy at the moment of shutdown.
+- [ ] **One allocation per push in `DeletionQueue`:** the function with its captures, plus one per `loadAsync`
+  (the copy of the loader). Not measured; typed lists (`VkImage` + `VmaAllocation`) if thousands per frame show.
+- [ ] **Frames overlapping without a render thread:** `Scheduler::run` must not be called from a pool thread, so a
+  render world cannot run its systems next to the simulation of the next frame yet (as Bevy's extract or Naughty
+  Dog's fiber jobs do). Only matters once a CPU-bound frame shows it.
+
 ## Limits
 
 - [x] **`INDEX_LIMIT` beyond 2^24 (`4766545`):** now `2^32 - PAGE_SIZE`, the index stays a `uint32_t` (the last
@@ -326,9 +354,9 @@ it already (own pages at the top of the index space).
 - [x] **A throw in a create of a span:** `EntityAllocator::create` stopped there, handed the new indices of that
   run out once more and lost the reused ones after it (also `create(span, values...)` when a copy threw). Now
   every entity is made, the exception goes on afterwards.
-- [ ] **`create(rare)` next to the areas:** rare is a fixed area (1) without a set. With sets it is mostly not
+- [x] **`create(rare)` next to the areas:** rare is a fixed area (1) without a set. With sets it is mostly not
   needed (`create<Player>()` keeps players together); it stays for entities whose components are not known at
-  create. The documentation of `Rare` should say so.
+  create. The documentation of `Rare` says so now.
 - [x] **Reused indices:** a free list per area; a page knows its area in 16 bits. Was: one free list for common and
   one for rare entities. For a destroyed hero to make room
   for a hero again, every layout needs its own free list; otherwise the index space mixes again over time (the state
