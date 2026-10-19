@@ -20,13 +20,13 @@ else
   test_timeout = 30
 endif
 
-# The prototype of an ECS of our own, see src/sc/ecs2.
-test_ecs2 = executable(
-  'test_ecs2',
+# The ECS, see src/sc/ecs.
+test_ecs = executable(
+  'test_ecs',
   sources: [
-    'ecs2/test_resource.cpp',
-    'ecs2/test_scheduler.cpp',
-    'ecs2/test_world.cpp',
+    'ecs/test_resource.cpp',
+    'ecs/test_scheduler.cpp',
+    'ecs/test_world.cpp',
   ],
   dependencies: [
     catch2_dep,
@@ -34,7 +34,7 @@ test_ecs2 = executable(
   ],
 )
 
-test('ECS2 Tests', test_ecs2, env: test_env, timeout: test_timeout)
+test('ECS Tests', test_ecs, env: test_env, timeout: test_timeout)
 
 test_threading = executable(
   'test_threading',

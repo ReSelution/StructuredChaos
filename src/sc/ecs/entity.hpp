@@ -18,7 +18,7 @@
 #include "sc/memory/virtual_memory.hpp"
 #include "sc/threading/threading.hpp"
 
-namespace sc::ecs2 {
+namespace sc::ecs {
 
   // An entity: the index its components are stored at and, above it, the
   // generation of that index, which tells the entity apart from earlier ones
@@ -71,9 +71,9 @@ namespace sc::ecs2 {
   struct Rare {};
   inline constexpr Rare rare{};
 
-} // namespace sc::ecs2
+} // namespace sc::ecs
 
-namespace sc::ecs2::internal {
+namespace sc::ecs::internal {
 
   // Hands out entities and knows which ones exist.
   //
@@ -532,7 +532,7 @@ namespace sc::ecs2::internal {
     // The area with the number, made if it is not there yet.
     [[nodiscard]] Area &area(uint32_t number) {
       if (number >= AREA_LIMIT) [[unlikely]] {
-        throw std::out_of_range("sc::ecs2: area beyond EntityAllocator::AREA_LIMIT");
+        throw std::out_of_range("sc::ecs: area beyond EntityAllocator::AREA_LIMIT");
       }
       if (Area *const found = areaTable()[number].load(std::memory_order_acquire)) [[likely]] {
         return *found;
@@ -632,7 +632,7 @@ namespace sc::ecs2::internal {
         }
         page = page + 1 < m_pageLimit ? page + 1 : 0;
       }
-      throw std::length_error("sc::ecs2: no entity index is left");
+      throw std::length_error("sc::ecs: no entity index is left");
     }
 
     // Makes sure the generations of the index and its page have memory.
@@ -668,4 +668,4 @@ namespace sc::ecs2::internal {
     std::vector<size_t> m_fills;
   };
 
-} // namespace sc::ecs2::internal
+} // namespace sc::ecs::internal

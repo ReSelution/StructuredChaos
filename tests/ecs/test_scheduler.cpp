@@ -9,21 +9,21 @@
 #include <thread>
 #include <vector>
 
-#include "sc/ecs2/scheduler.hpp"
-#include "sc/ecs2/world.hpp"
+#include "sc/ecs/scheduler.hpp"
+#include "sc/ecs/world.hpp"
 #include "sc/threading/threading.hpp"
 
 namespace {
 
-  using sc::ecs2::Change;
-  using sc::ecs2::Commands;
-  using sc::ecs2::Entity;
-  using sc::ecs2::Exclude;
-  using sc::ecs2::Modify;
-  using sc::ecs2::PAGE_SIZE;
-  using sc::ecs2::Query;
-  using sc::ecs2::Scheduler;
-  using sc::ecs2::World;
+  using sc::ecs::Change;
+  using sc::ecs::Commands;
+  using sc::ecs::Entity;
+  using sc::ecs::Exclude;
+  using sc::ecs::Modify;
+  using sc::ecs::PAGE_SIZE;
+  using sc::ecs::Query;
+  using sc::ecs::Scheduler;
+  using sc::ecs::World;
 
   struct Position {
     float x{0.0f};
@@ -88,7 +88,7 @@ namespace {
 
 } // namespace
 
-TEST_CASE("ECS2 Scheduler Stages", "[ecs2][scheduler]") {
+TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
   Scheduler scheduler;
 
   SECTION("Nothing To Run") { REQUIRE(scheduler.stages().empty()); }
@@ -168,7 +168,7 @@ TEST_CASE("ECS2 Scheduler Stages", "[ecs2][scheduler]") {
   }
 }
 
-TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
+TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
   sc::threading::init();
 
   World world;
@@ -200,7 +200,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
   SECTION("Loops On Several Threads") {
     scheduler.addParallel([](Position &pos, const Velocity &vel) { pos.y += vel.dy; }, "move");
     scheduler.addParallel([](Entity entity, Health &health, Velocity vel) {
-      health.value += static_cast<int>(vel.dx) + static_cast<int>(sc::ecs2::indexOf(entity) % 2);
+      health.value += static_cast<int>(vel.dx) + static_cast<int>(sc::ecs::indexOf(entity) % 2);
     });
     scheduler.addParallel<Query<Position, Exclude<Velocity>>>([](Position &pos) { pos.y -= 1.0f; });
     REQUIRE(scheduler.stages() == Stages{{0, 1}, {2}});
@@ -209,7 +209,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
       const bool moving = i % 3 != 0;
       REQUIRE(world.get<Position>(entities[i]).y == (moving ? 2.0f : -1.0f));
       REQUIRE(world.get<Health>(entities[i]).value ==
-              (moving ? 101 + static_cast<int>(sc::ecs2::indexOf(entities[i]) % 2) : 100));
+              (moving ? 101 + static_cast<int>(sc::ecs::indexOf(entities[i]) % 2) : 100));
     }
   }
 
@@ -329,7 +329,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     // first: the two systems run side by side. So per set the pages it
     // has, which must be a few near each other, apart from the other set's
     // and from the pages of the entities before.
-    const auto pageOf = [](Entity entity) { return sc::ecs2::indexOf(entity) >> sc::ecs2::PAGE_BITS; };
+    const auto pageOf = [](Entity entity) { return sc::ecs::indexOf(entity) >> sc::ecs::PAGE_BITS; };
     std::vector<uint32_t> spawnerPages;
     std::vector<uint32_t> targetPages;
     size_t right = 0;
@@ -571,7 +571,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     world.emplace<Spawner>(entities[0], 1);
     world.emplace<Spawner>(entities[1], 1);
     const Entity gone = entities[2];
-    Entity made = sc::ecs2::null;
+    Entity made = sc::ecs::null;
     scheduler.add([&](Commands commands) {
       // Replaced, gone again, and of an entity that is there right away.
       commands.erase<Spawner>(entities[0]);
@@ -675,7 +675,7 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
     world.emplace<Spawner>(entities[0], 1);
     const Entity gone = entities[2];
     world.emplace<Spawner>(gone, 1);
-    Entity made = sc::ecs2::null;
+    Entity made = sc::ecs::null;
     int called = 0;
     scheduler.add([&](Commands commands) {
       // In the order recorded with the other changes of the component.
@@ -690,8 +690,8 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
       // or none at all.
       commands.modify(entities[1], [&](Spawner &) { ++called; });
       commands.modify(gone, [&](Spawner &) { ++called; });
-      commands.modify(sc::ecs2::null, [&, alive](Spawner &) { ++called; });
-      commands.emplace<Named>(sc::ecs2::null, "nobody", alive);
+      commands.modify(sc::ecs::null, [&, alive](Spawner &) { ++called; });
+      commands.emplace<Named>(sc::ecs::null, "nobody", alive);
     });
     world.destroy(gone);
     scheduler.run(world);
@@ -711,8 +711,8 @@ TEST_CASE("ECS2 Scheduler Runs Systems", "[ecs2][scheduler][threading]") {
       const auto i = static_cast<size_t>(pos.x);
       if (i % 97 == 0) {
         // Nobody's: only dropped, also what the function holds.
-        commands.emplace<Named>(sc::ecs2::null, "nobody", alive);
-        commands.modify(sc::ecs2::null, [alive](Health &health) { health.value = -2; });
+        commands.emplace<Named>(sc::ecs::null, "nobody", alive);
+        commands.modify(sc::ecs::null, [alive](Health &health) { health.value = -2; });
       }
       switch (i % 5) {
         case 0:

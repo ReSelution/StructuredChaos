@@ -16,7 +16,7 @@ namespace sc::memory {
   // in full, up to the limit.
   //
   // Memory fresh from the OS is cleared by it on the first access, which
-  // costs about as much as writing it: a world of sc::ecs2 that was made
+  // costs about as much as writing it: a world of sc::ecs that was made
   // anew for each run spent 38 % of creating 100 000 entities with 320 bytes
   // of components each in the kernel clearing huge pages, while libraries
   // that allocate with mimalloc get the memory of the world before back
@@ -182,7 +182,7 @@ namespace sc::memory {
     size_t m_limit;
   };
 
-  // The one of the process, which the columns of sc::ecs2 take the ranges of
+  // The one of the process, which the columns of sc::ecs take the ranges of
   // their values from. Never destroyed: a column that goes after the end of
   // main, with a world that is a static, still finds it. The OS takes back
   // what is kept when the process ends. In storage of its own, so that

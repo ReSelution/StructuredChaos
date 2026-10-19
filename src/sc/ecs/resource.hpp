@@ -19,7 +19,7 @@
 #include "sc/hash/hash.hpp"
 #include "sc/threading/threading.hpp"
 
-namespace sc::ecs2 {
+namespace sc::ecs {
 
   template<typename T>
   class ResourceHandle;
@@ -32,9 +32,9 @@ namespace sc::ecs2 {
   concept ResourceLoader = std::invocable<Loader &> && (std::same_as<std::invoke_result_t<Loader &>, T> ||
                                                         std::constructible_from<T, std::invoke_result_t<Loader &>>);
 
-} // namespace sc::ecs2
+} // namespace sc::ecs
 
-namespace sc::ecs2::internal {
+namespace sc::ecs::internal {
 
   enum class ResourceState : uint8_t { Loading, Ready, Failed };
 
@@ -147,9 +147,9 @@ namespace sc::ecs2::internal {
     }
   };
 
-} // namespace sc::ecs2::internal
+} // namespace sc::ecs::internal
 
-namespace sc::ecs2 {
+namespace sc::ecs {
 
   template<typename T, typename Key, typename Hash>
   class ResourceCache;
@@ -624,4 +624,4 @@ namespace sc::ecs2 {
     std::condition_variable m_tasksDone;
   };
 
-} // namespace sc::ecs2
+} // namespace sc::ecs

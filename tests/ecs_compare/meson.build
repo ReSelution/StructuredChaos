@@ -1,4 +1,4 @@
-# sc::ecs2 next to other ECS libraries: one executable per library, all of them
+# sc::ecs next to other ECS libraries: one executable per library, all of them
 # doing the same work, see common.hpp. scripts/ecs_compare.py builds them in
 # a build directory of its own, runs them and puts the results side by side.
 # The target does the same for this build directory:
@@ -21,8 +21,8 @@ mustache_dep = dependency(
 
 # The source, what it needs and what it is compiled with.
 ecs_compare_libraries = {
-  # The prototype of an ECS of our own, see src/sc/ecs2.
-  'sc2': ['bench_sc2.cpp', [sc_dep], []],
+  # The ECS of this library, see src/sc/ecs.
+  'sc': ['bench_sc.cpp', [sc_dep], []],
   'entt': ['bench_entt.cpp', [entt_dep], []],
   'flecs': ['bench_flecs.cpp', [flecs_dep], []],
   'gaia': ['bench_gaia.cpp', [gaia_ecs_dep], []],

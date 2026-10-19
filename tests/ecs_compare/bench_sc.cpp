@@ -8,8 +8,8 @@
 #include <utility>
 #include <vector>
 
-#include "sc/ecs2/scheduler.hpp"
-#include "sc/ecs2/world.hpp"
+#include "sc/ecs/scheduler.hpp"
+#include "sc/ecs/world.hpp"
 #include "sc/threading/threading.hpp"
 
 #include "common.hpp"
@@ -22,22 +22,22 @@ using namespace compare;
 
 namespace {
 
-  using sc::ecs2::Change;
-  using sc::ecs2::Commands;
-  using sc::ecs2::Entity;
-  using sc::ecs2::Modify;
-  using sc::ecs2::Query;
-  using sc::ecs2::Scheduler;
+  using sc::ecs::Change;
+  using sc::ecs::Commands;
+  using sc::ecs::Entity;
+  using sc::ecs::Modify;
+  using sc::ecs::Query;
+  using sc::ecs::Scheduler;
 
   // The default, which each column chooses its pages with.
-  constexpr sc::ecs2::Pages PAGES = sc::ecs2::Pages::Auto;
+  constexpr sc::ecs::Pages PAGES = sc::ecs::Pages::Auto;
 
   struct Target {
     Entity entity;
   };
 
   struct World {
-    sc::ecs2::World world{PAGES};
+    sc::ecs::World world{PAGES};
     std::vector<Entity> entities;
 
     explicit World(size_t count) : entities(count) {
@@ -81,7 +81,7 @@ namespace {
 
   // All entities and their components in one call.
   template<typename First, typename Second>
-  void create_all(sc::ecs2::World &world, size_t count, const First &first, const Second &second) {
+  void create_all(sc::ecs::World &world, size_t count, const First &first, const Second &second) {
     std::vector<Entity> entities(count);
     world.create(entities, first, second);
   }
@@ -94,7 +94,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
   sc::threading::init(static_cast<uint32_t>(workers) - 1);
 
   BENCHMARK_ADVANCED(name::serial(name::CREATE))(Catch::Benchmark::Chronometer meter) {
-    auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
+    auto worlds = make_worlds<sc::ecs::World>(meter.runs(), PAGES);
     meter.measure([&](int run) {
       auto &world = *worlds[static_cast<size_t>(run)];
       for (size_t i = 0; i < ENTITY_COUNT; ++i) {
@@ -106,7 +106,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
   };
 
   {
-    sc::ecs2::World world{PAGES};
+    sc::ecs::World world{PAGES};
     create_all(world, ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
     size_t count = 0;
     world.each<const Position, const Velocity>(
@@ -114,7 +114,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     REQUIRE(count == ENTITY_COUNT);
   }
   BENCHMARK_ADVANCED(name::serial(name::CREATE_BATCH))(Catch::Benchmark::Chronometer meter) {
-    auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
+    auto worlds = make_worlds<sc::ecs::World>(meter.runs(), PAGES);
     meter.measure([&](int run) {
       create_all(*worlds[static_cast<size_t>(run)], ENTITY_COUNT, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
     });
@@ -123,7 +123,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
   // Filled and emptied the way the benchmark fills them, so that the indices
   // come back from the same free list.
   BENCHMARK_ADVANCED(name::serial(name::CREATE_AGAIN))(Catch::Benchmark::Chronometer meter) {
-    auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
+    auto worlds = make_worlds<sc::ecs::World>(meter.runs(), PAGES);
     std::vector<Entity> entities(ENTITY_COUNT);
     for (auto &world: worlds) {
       for (Entity &entity: entities) {
@@ -143,7 +143,7 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     });
   };
   BENCHMARK_ADVANCED(name::serial(name::CREATE_BATCH_AGAIN))(Catch::Benchmark::Chronometer meter) {
-    auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
+    auto worlds = make_worlds<sc::ecs::World>(meter.runs(), PAGES);
     std::vector<Entity> entities(ENTITY_COUNT);
     for (auto &world: worlds) {
       world->create(entities, Position{0.0f, 1.0f}, Velocity{1.0f, 2.0f});
@@ -171,14 +171,14 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
       });
     });
     {
-      sc::ecs2::World world{PAGES};
+      sc::ecs::World world{PAGES};
       spawner.run(world);
       size_t count = 0;
       world.each<const Position, const Velocity>([&](const Position &, const Velocity &) { ++count; });
       REQUIRE(count == ENTITY_COUNT);
     }
     BENCHMARK_ADVANCED(name::parallel(name::CREATE))(Catch::Benchmark::Chronometer meter) {
-      auto worlds = make_worlds<sc::ecs2::World>(meter.runs(), PAGES);
+      auto worlds = make_worlds<sc::ecs::World>(meter.runs(), PAGES);
       meter.measure([&](int run) { spawner.run(*worlds[static_cast<size_t>(run)]); });
     };
   }
@@ -346,7 +346,7 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
 
   World world{PARALLEL_ENTITY_COUNT};
   world.fill();
-  sc::ecs2::World &ecs = world.world;
+  sc::ecs::World &ecs = world.world;
 
   BENCHMARK(name::serial(name::LOOP_LIGHT)) {
     ecs.each<Position, const Velocity>([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
@@ -419,7 +419,7 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     random.addParallel([&](Modify<Health> modify, const Target &target) { modify(target.entity, damage); });
     Scheduler few;
     few.addParallel([&](Entity entity, Modify<Health> modify, const Target &) {
-      modify(world.entities[sc::ecs2::indexOf(entity) % FEW], damage);
+      modify(world.entities[sc::ecs::indexOf(entity) % FEW], damage);
     });
     Scheduler one;
     one.addParallel([&](Modify<Health> modify, const Target &) { modify(boss, damage); });
@@ -462,7 +462,7 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     recordRandom.addParallel([&](Commands commands, const Target &target) { commands.modify(target.entity, damage); });
     Scheduler recordFew;
     recordFew.addParallel([&](Entity entity, Commands commands, const Target &) {
-      commands.modify(world.entities[sc::ecs2::indexOf(entity) % FEW], damage);
+      commands.modify(world.entities[sc::ecs::indexOf(entity) % FEW], damage);
     });
     Scheduler recordOne;
     recordOne.addParallel([&](Commands commands, const Target &) { commands.modify(boss, damage); });
@@ -489,7 +489,7 @@ namespace {
 
   struct Steady {
     using Handle = Entity;
-    sc::ecs2::World world{PAGES};
+    sc::ecs::World world{PAGES};
 
     Handle spawn(size_t number) {
       const Entity entity = world.create();
@@ -525,7 +525,7 @@ namespace {
 
   struct Heavy {
     using Handle = Entity;
-    sc::ecs2::World world{PAGES};
+    sc::ecs::World world{PAGES};
 
     Handle spawn() {
       const Entity entity = world.create();
@@ -559,8 +559,8 @@ namespace {
   // Entity i gets set i % 3, see SETS_AFTER_WORLD: with create and emplace,
   // or created with its components, which puts every set in an area of its
   // own.
-  std::unique_ptr<sc::ecs2::World> make_sets(bool with) {
-    auto world = std::make_unique<sc::ecs2::World>(PAGES);
+  std::unique_ptr<sc::ecs::World> make_sets(bool with) {
+    auto world = std::make_unique<sc::ecs::World>(PAGES);
     for (size_t i = 0; i < ENTITY_COUNT; ++i) {
       const Position pos{static_cast<float>(i), 1.0f};
       if (with) {
@@ -584,7 +584,7 @@ namespace {
 
   void run_sets(bool with) {
     const auto made = make_sets(with);
-    sc::ecs2::World &world = *made;
+    sc::ecs::World &world = *made;
     size_t first = 0;
     size_t second = 0;
     size_t all = 0;

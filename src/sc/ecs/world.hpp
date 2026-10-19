@@ -22,16 +22,16 @@
 #include "column.hpp"
 #include "entity.hpp"
 
-namespace sc::ecs2 {
+namespace sc::ecs {
 
   // Names components the entities of a loop must not have:
   // world.each<Position, Exclude<Frozen>>(...).
   template<typename... Components>
   struct Exclude {};
 
-} // namespace sc::ecs2
+} // namespace sc::ecs
 
-namespace sc::ecs2::internal {
+namespace sc::ecs::internal {
 
 #ifndef NDEBUG
   // Set while a thread runs the function of a parallel loop, for the assert
@@ -73,7 +73,7 @@ namespace sc::ecs2::internal {
   public:
 #ifndef NDEBUG
     Modifying() noexcept {
-      assert(!inModify && "sc::ecs2: modify within modify, which can wait for a thread that waits for this one");
+      assert(!inModify && "sc::ecs: modify within modify, which can wait for a thread that waits for this one");
       inModify = true;
     }
     ~Modifying() { inModify = false; }
@@ -308,7 +308,7 @@ namespace sc::ecs2::internal {
   [[gnu::noinline, gnu::cold]] inline size_t makeComponentIndex() {
     const size_t next = nextComponentIndex.fetch_add(1, std::memory_order_relaxed);
     if (next >= MAX_COMPONENT_TYPES) [[unlikely]] {
-      throw std::length_error("sc::ecs2: more component types than MAX_COMPONENT_TYPES");
+      throw std::length_error("sc::ecs: more component types than MAX_COMPONENT_TYPES");
     }
     return next;
   }
@@ -346,7 +346,7 @@ namespace sc::ecs2::internal {
       return static_cast<size_t>(found - componentSets.begin());
     }
     if (componentSets.size() >= MAX_COMPONENT_SETS) {
-      throw std::length_error("sc::ecs2: more sets of components to create entities with than MAX_COMPONENT_SETS");
+      throw std::length_error("sc::ecs: more sets of components to create entities with than MAX_COMPONENT_SETS");
     }
     componentSets.push_back(std::move(components));
     return componentSets.size() - 1;
@@ -401,9 +401,9 @@ namespace sc::ecs2::internal {
   inline constexpr bool takesEntity<Function, std::tuple<Components...>> =
       std::is_invocable_v<Function &, Entity, Components...>;
 
-} // namespace sc::ecs2::internal
+} // namespace sc::ecs::internal
 
-namespace sc::ecs2 {
+namespace sc::ecs {
 
   // Entities and their components.
   //
@@ -774,7 +774,7 @@ namespace sc::ecs2 {
     [[nodiscard]] Component &get(Entity entity) {
       assert(valid(entity));
       assert(internal::mayGet<Component>() &&
-             "sc::ecs2: get for writing in a parallel loop, where another thread of it may write the same component");
+             "sc::ecs: get for writing in a parallel loop, where another thread of it may write the same component");
       return column<Component>().get(indexOf(entity));
     }
 
@@ -929,7 +929,7 @@ namespace sc::ecs2 {
         return area;
       }
       if (m_nextArea >= internal::EntityAllocator::AREA_LIMIT) {
-        throw std::length_error("sc::ecs2: more sets of components in a world than EntityAllocator::AREA_LIMIT");
+        throw std::length_error("sc::ecs: more sets of components in a world than EntityAllocator::AREA_LIMIT");
       }
       const uint32_t area = m_nextArea++;
       slot.store(area, std::memory_order_release);
@@ -1157,4 +1157,4 @@ namespace sc::ecs2 {
     std::vector<std::span<const uint32_t>> m_freedPages;
   };
 
-} // namespace sc::ecs2
+} // namespace sc::ecs

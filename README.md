@@ -18,12 +18,109 @@ management, logging, statistics, localization and hashing.
 
 | Module | Header | What it does |
 | --- | --- | --- |
+| [ECS](#ecs) | `sc/ecs/scheduler.hpp` | Components in index-addressed columns, a scheduler that runs the systems that do not conflict at the same time, and a cache of shared resources |
 | [Threading](#threading) | `sc/threading/threading.hpp` | Thread pool with priorities, futures, batches and parallel loops |
 | [Memory](#memory) | `sc/memory/heap.hpp` | mimalloc heap that frees everything at once, usable as a `std::pmr` resource |
 | [Logger](#logger) | `sc/logger/logger.hpp` | Compile-time named loggers on top of spdlog, one file per module |
 | [Stats](#stats) | `sc/stats/stats.hpp` | Counters and throughput meters that compile to nothing when disabled |
 | [Localization](#localization) | `sc/localizations/magpie_string.hpp` | *Magpie*: translated strings looked up by a key hashed at compile time |
 | [Hash](#hash) | `sc/hash/hash.hpp` | rapidhash with identical results at compile time and at run time |
+
+### ECS
+
+Every component type has a column: the component of an entity lies at the
+index of the entity, in address space reserved up front. Getting at one is an
+array access, and creating and destroying entities is safe from any thread.
+Entities created with the same set of components lie together in the same
+pages, so a loop over them touches little memory.
+
+```cpp
+#include "sc/ecs/scheduler.hpp"
+#include "sc/ecs/world.hpp"
+#include "sc/threading/threading.hpp"
+
+using namespace sc::ecs;
+
+struct Position { float x{0.0f}; float y{0.0f}; };
+struct Velocity { float dx{0.0f}; float dy{0.0f}; };
+struct Health { float value{100.0f}; };
+struct Frozen {};
+
+sc::threading::init(); // the scheduler runs its systems on the thread pool
+
+World world;
+const Entity e = world.create(Position{1.0f, 2.0f}, Velocity{0.5f, -0.5f}, Health{});
+
+Scheduler scheduler;
+
+// Writes Position, reads Velocity: a const component is only read.
+scheduler.add([](Query<Position, const Velocity, Exclude<Frozen>> query) {
+  query.each([](Position &pos, const Velocity &vel) {
+    pos.x += vel.dx;
+    pos.y += vel.dy;
+  });
+});
+
+// The body of a loop, called for every entity on several threads at once.
+// Touches other components than the system above and runs next to it.
+scheduler.addParallel([](Health &health) { health.value = std::min(100.0f, health.value + 1.0f); });
+
+// Adds and removes Frozen right away; destroying is recorded and done once the
+// systems running at the same time are finished.
+scheduler.addParallel([](Entity entity, Change<Frozen> change, Commands commands, const Health &health) {
+  if (health.value <= 0.0f) {
+    commands.destroy(entity);
+  } else if (health.value < 10.0f) {
+    change.emplace<Frozen>(entity);
+  }
+});
+
+scheduler.run(world); // once per frame
+```
+
+A system says through its parameters what it uses: queries, `Change` to add
+and remove components, `Modify` to change components of other entities under a
+lock, `Commands` for what is done after the stage. One that takes `World &`, or
+nothing, runs alone. Systems that cannot run together keep the order in which
+they were added.
+
+Without the scheduler, the world is used directly:
+
+```cpp
+world.get<Position>(e).x = 0.0f;
+world.emplace<Frozen>(e);
+world.each<Position, const Velocity>([](Position &pos, const Velocity &vel) { pos.x += vel.dx; });
+world.parallelEach<Health>([](Health &health) { health.value -= 1.0f; });
+world.destroy(e);
+```
+
+`create<Set...>()` puts an entity into the pages of a set before its components
+come with `emplace`, and `create<Set...>(entities, make)` makes many at once,
+each with values of its own.
+
+Resources that many entities share, such as textures, live in a
+`ResourceCache`: loaded once by key however many threads ask for it, held by
+components through handles of one pointer, and given back only when `collect`
+is called, never where the last component that had one was destroyed.
+
+```cpp
+#include "sc/ecs/resource.hpp"
+
+struct Material { ResourceHandle<Texture> albedo; };
+
+ResourceCache<Texture> textures;
+world.create(Material{textures.load(assetId, [&] { return Texture(path); })});
+
+// In a frame, where waiting would be a hitch: the loader runs on the pool.
+ResourceHandle<Texture> later = textures.loadAsync(otherId, [&] { return Texture(otherPath); });
+if (later.ready()) { /* ... */ }
+
+scheduler.add([&textures] { textures.collect(); }, "collect textures"); // the last system of the frame
+```
+
+What the GPU may still use goes from its destructor into a
+`sc::memory::DeletionQueue`, which calls it once the fence of its frame has
+signalled (`sc/memory/deferred.hpp`).
 
 ### Threading
 
@@ -193,7 +290,7 @@ meson test -C build --benchmark
 | `enable_chaos_stats` | `false` | Compiles the stats in instead of leaving them out |
 | `dump_magpie` | `false` | Keeps namespace and key of every text, for `Magpie::dump()` |
 | `mimalloc_new_delete` | `true` | On Windows, routes `new`/`delete` of every executable that uses `sc_dep` to mimalloc |
-| `ecs_comparison` | `false` | Fetches other ECS libraries and builds the benchmarks that compare `sc::ecs2` with them |
+| `ecs_comparison` | `false` | Fetches other ECS libraries and builds the benchmarks that compare `sc::ecs` with them |
 
 ```bash
 meson setup build -Denable_chaos_stats=true
@@ -202,7 +299,7 @@ meson setup build -Denable_chaos_stats=true
 ### ECS comparison
 
 With `ecs_comparison`, `tests/ecs_compare` builds one executable per library
-that does the same work on one thread and on all of them: `sc::ecs2`,
+that does the same work on one thread and on all of them: `sc::ecs`,
 [EnTT](https://github.com/skypjack/entt),
 [Flecs](https://github.com/SanderMertens/flecs),
 [gaia-ecs](https://github.com/richardbiely/gaia-ecs) and
@@ -212,7 +309,7 @@ and prints the results side by side:
 
 ```bash
 scripts/ecs_compare.py
-scripts/ecs_compare.py --only sc2,flecs --threads 8
+scripts/ecs_compare.py --only sc,flecs --threads 8
 scripts/ecs_compare.py --markdown --save results.json
 ```
 

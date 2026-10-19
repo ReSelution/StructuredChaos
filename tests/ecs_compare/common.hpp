@@ -254,14 +254,14 @@ namespace compare {
     inline constexpr const char *LOOP_LOOKUP = "1 system, looks up another entity";
     // The same entities damage the Health of others: by 1 each, which must
     // all arrive when several threads damage the same one. So far only
-    // sc::ecs2 has a means for that (modify); WRITE_RANDOM is the same
+    // sc::ecs has a means for that (modify); WRITE_RANDOM is the same
     // without a lock, which only one thread may do.
     inline constexpr const char *WRITE_RANDOM = "1 system, damages its target, no lock";
     inline constexpr const char *MODIFY_RANDOM = "1 system, damages its target";
     inline constexpr const char *MODIFY_FEW = "1 system, damages 1 of 1 000 entities";
     inline constexpr const char *MODIFY_ONE = "1 system, damages the same entity";
     // The same recorded and done once the system is over, one change after
-    // the other: sc::ecs2 Commands::modify.
+    // the other: sc::ecs Commands::modify.
     inline constexpr const char *RECORD_RANDOM = "1 system, damages its target, recorded";
     inline constexpr const char *RECORD_FEW = "1 system, damages 1 of 1 000 entities, recorded";
     inline constexpr const char *RECORD_ONE = "1 system, damages the same entity, recorded";
@@ -298,7 +298,7 @@ namespace compare {
   // ENTITY_COUNT entities in three sets of components, created in turn:
   // Position and Velocity, Position and Health, Position alone. Given their
   // components after create, the way every library can, or created with
-  // them, with what a library has for that (for sc2 an area per set).
+  // them, with what a library has for that (for sc an area per set).
   inline constexpr const char *SETS_AFTER_WORLD = "100 000 entities in 3 sets, given their components after create";
   inline constexpr const char *SETS_WITH_WORLD = "100 000 entities in 3 sets, created with their components";
 

@@ -1,6 +1,6 @@
 # TODO
 
-Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeimler/ecs_benchmark)
+Found while integrating `sc::ecs` into [ecs_benchmark](https://github.com/abeimler/ecs_benchmark)
 (`src/structured-chaos`, pinned to commit `bfd4be4`).
 
 ## Decisions of the benchmark integration to review
@@ -9,7 +9,7 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
   is made. Without it the benchmark thread has no slot of its own in `EntityAllocator::withShare`, and every
   `create()` goes through `m_sharedMutex`. With `0` no workers run, so it stays single-threaded like the other
   frameworks.
-- **No malloc override:** mimalloc is built with `MI_OVERRIDE OFF`. ecs2 only uses mimalloc through its own `mi_*`
+- **No malloc override:** mimalloc is built with `MI_OVERRIDE OFF`. ecs only uses mimalloc through its own `mi_*`
   calls; the rest of the benchmark runs on the system malloc, like every other framework there. `tests/ecs_compare`
   instead uses mimalloc for all libraries.
 - **fmt from vcpkg:** spdlog is built with `SPDLOG_FMT_EXTERNAL`. `SPDLOG_USE_STD_FORMAT` fails with both gcc and
@@ -17,7 +17,7 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
   not work either: it has the same include guards as the `<fmt/core.h>` that the benchmark's
   `base/systems/DataSystem.h` includes, and both end up in the same translation units.
 
-## Missing API in ecs2
+## Missing API in ecs
 
 - [x] **No `emplace_or_replace`:** `Column::emplaceOrReplace` now (`World` only passes it on): one step with the
   `making` bit held from the look at the mask until the component is made or assigned; the one there gets a new
@@ -37,7 +37,7 @@ Found while integrating `sc::ecs2` into [ecs_benchmark](https://github.com/abeim
 
 ## Resource cache
 
-`ResourceCache<T>` in `src/sc/ecs2/resource.hpp`: load once by key, handles with a count, given back only by
+`ResourceCache<T>` in `src/sc/ecs/resource.hpp`: load once by key, handles with a count, given back only by
 `collect(owner)` of the owner of the resource (a system at the end of the frame), loaded without waiting by
 `loadAsync`.
 
@@ -228,7 +228,7 @@ hero/monster data differed per framework). Small counts with the page summary (`
   hero/monster components, so their masks are `0x5555…` and the loop goes bit by bit. Measured per frame (16K) against
   flecs: +350k cycles, +500k instructions (the `tzcnt` loop and the address of every component), +18k L1 misses
   (half of every cache line of Health/Damage/Sprite/Player is a gap), +3k–6k branch misses. The extra misses are in
-  the `if`s of the benchmark's Health/Damage logic, not in the loop of ecs2, and they are not the bottleneck: with
+  the `if`s of the benchmark's Health/Damage logic, not in the loop of ecs, and they are not the bottleneck: with
   clang 3k fewer, same time. Tried without gain: a linear loop with a bit test for words at least half full (+6 to
   +17 %), pointers moved on by the gap instead of `values + slot` (+6 % instructions, same cycles). What is left is
   the layout; see "Entity locality" below.
@@ -236,7 +236,7 @@ hero/monster data differed per framework). Small counts with the page summary (`
 Entity benchmarks, ns per entity, rank among 7–8 frameworks (mustache has no destroy/remove-add results). Create and
 destroy from the reworked benchmarks of ecs_benchmark (`c00a2d1`: one registry for all iterations, so indices are
 reused; 1, 64, 1024 and 262K entities, 0.3 s each), the rest from the full run. Before the rework every create and
-destroy result held the teardown of a registry per iteration (sc::ecs2 15 µs, flecs 470 µs), which made sc look
+destroy result held the teardown of a registry per iteration (sc::ecs 15 µs, flecs 470 µs), which made sc look
 twice as slow at 1024 as it is.
 
 - **`get`, ahead:** one component 0.7 at 1024 and 262K (Ginseng 1.2, EnTT 2.0, flecs 10.7). Two components 1.3,
@@ -288,7 +288,7 @@ twice as slow at 1024 as it is.
   place (`EntityAllocator::giveMany` of pages), which also replaces the compacting. `parallelDestroy`, µs, before
   / after: 100K without components 250 / 184, with 6 components 343 / 303; 1M 1 680 / 963 and 3 167 / 2 422.
   Destroy through `Commands`, 100K: 338 → 274.
-- [ ] **+3 to 5 % on unchanged paths after the parallel `giveMany`:** in `ecs_compare_sc2`, destroy on one thread
+- [ ] **+3 to 5 % on unchanged paths after the parallel `giveMany`:** in `ecs_compare_sc`, destroy on one thread
   820 → 848 µs, all at once 781 → 821, add + remove recorded 541 → 564 (7 runs each), though their code did not
   change. The probe that calls `destroy(span)` directly shows no difference (100K 691 / 690 / 700 against 687 /
   702 / 689). Presumably code placement in that binary (new instantiations, other inlining); not looked into.
@@ -296,7 +296,7 @@ twice as slow at 1024 as it is.
   (like `CommandList::apply`). Before, nothing said so and `eraseAll` even said "Safe next to threads that keep to
   other entities", while `FreeList::give` (`resize`, `push_back`) runs against `take` from `create` without a lock:
   thread A in `create` reads `indices[before - 1]` while thread B in `destroy` pushes back, the vector reallocates,
-  A reads freed memory. Now also the components go without locked instructions. Left: a debug assert if ecs2 can
+  A reads freed memory. Now also the components go without locked instructions. Left: a debug assert if ecs can
   tell that a loop or stage is running.
 - [x] **Bulk create only fast with fresh indices (`bfd4be4`):** every reused index went to the columns on its own
   (`run(index, 1)`: count, mask and summary per entity). `FreeList::takeMany` takes them with one `fetch_sub`, and
@@ -321,7 +321,7 @@ twice as slow at 1024 as it is.
     L1 (the big arrays at addresses with the same offset), maybe how IBS reports atomics. Not a problem, not
     understood.
   - Mostly a property of the benchmark (the whole world churned per iteration); a game that makes a few hundred
-    entities per frame works elsewhere. No fault in ecs2 seen; only the bytes per entity could shrink, and the
+    entities per frame works elsewhere. No fault in ecs seen; only the bytes per entity could shrink, and the
     generation is the part that buys safety.
 - `BM_AddComponent` says nothing: it pauses the timer per entity, every framework lands at ~540 ns.
 
@@ -363,7 +363,7 @@ it already (own pages at the top of the index space).
   the reworked create benchmark of ecs_benchmark measures, with reused indices).
 - [x] **Threads:** a `Share` per thread and area (129 per area, 8 KiB). Pages are handed out under a lock, once per
   4096 entities, so that the row of pages the loops go through has no gap.
-- [x] **Measure the benefit:** `SETS_AFTER_WORLD` / `SETS_WITH_WORLD` in `ecs_compare` (sc2 only so far): 100K entities
+- [x] **Measure the benefit:** `SETS_AFTER_WORLD` / `SETS_WITH_WORLD` in `ecs_compare` (sc only so far): 100K entities
   in three sets created in turn (Position + Velocity, Position + Health, Position), given their components after
   `create` against created with them. µs, 5 runs, after / with: the 1st set 23.8 / 5.9 on one thread (a third of
   the entities at the speed of full pages), 5.4 / 3.4 on all; the 2nd set 20.1 / 2.6 and 4.8 / 2.9; Position, which
@@ -375,7 +375,7 @@ it already (own pages at the top of the index space).
 
 ## Slower after the index limit and the areas
 
-`ecs_compare_sc2`, 5 runs alternating, `5e57280` (before both) against `df066c0`. The benchmarks create their
+`ecs_compare_sc`, 5 runs alternating, `5e57280` (before both) against `df066c0`. The benchmarks create their
 worlds with `create(span, Position, Velocity)`, so those entities now lie in an area at page 2^18. The rest is
 level or faster (random `get` -4 %, damage without lock -34 %, add + remove through `Commands` -15 %).
 
@@ -409,13 +409,13 @@ level or faster (random `get` -4 %, damage without lock -34 %, add + remove thro
   first destroy of a world, with every first touch of its tables: create all at once +15 % (above),
   `parallelDestroy` +35 µs (above, the table of page numbers of `PageSort`). Not made to look better by touching
   the tables in the constructor, which the benchmarks do not time. The variants in a world emptied before
-  (`CREATE_AGAIN`, `CREATE_BATCH_AGAIN`, so far only for sc2) were meant to show the other case and showed
+  (`CREATE_AGAIN`, `CREATE_BATCH_AGAIN`, so far only for sc) were meant to show the other case and showed
   something else, see the next one.
 - [x] **Emptied pages gave their memory back at once:** a world filled, emptied with `destroy` and filled again took
   5 times as long as a new one (522 instead of 95 µs, 336 page faults: `vacate` gave every emptied page but the 4
   spares back with `MADV_DONTNEED`, and every piece came back zeroed). Since `5e57280` at least, not a regression.
   `memory::decommit` uses `MADV_FREE` on Linux now (the memory stays until the OS needs it, as with `offer`), and
-  `startPage` no longer populates a page that gave its memory back. `ecs_compare_sc2`, 5 runs: create in an
+  `startPage` no longer populates a page that gave its memory back. `ecs_compare_sc`, 5 runs: create in an
   emptied world 1 512 → 1 095 µs, all at once 539 → 174; destroy 852 → 761, all at once 752 → 674; add + remove
   904 → 795, on all threads 142 → 118; create in a new world level. Memory: the emptied pages count as Rss
   (`LazyFree`) until taken, the world after 2 200 frames 4.89 → 4.95 MB. Windows unchanged (`MEM_DECOMMIT`).
@@ -432,7 +432,7 @@ level or faster (random `get` -4 %, damage without lock -34 %, add + remove thro
 
 ## Show the parallel advantage in numbers
 
-ecs_benchmark is single-threaded on purpose, so none of its results shows the main argument for ecs2 (structural
+ecs_benchmark is single-threaded on purpose, so none of its results shows the main argument for ecs (structural
 changes inside parallel loops without deferring).
 
 - [ ] **Structural changes in a parallel loop:** per frame 1 %, 10 %, 50 % of the entities gain or lose a component

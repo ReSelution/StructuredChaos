@@ -10,5 +10,5 @@ option(
   'ecs_comparison',
   type: 'boolean',
   value: false,
-  description: 'Build the benchmarks that compare sc::ecs2 with other ECS libraries',
+  description: 'Build the benchmarks that compare sc::ecs with other ECS libraries',
 )

@@ -8,15 +8,15 @@
 #include <thread>
 #include <vector>
 
-#include "sc/ecs2/resource.hpp"
-#include "sc/ecs2/world.hpp"
+#include "sc/ecs/resource.hpp"
+#include "sc/ecs/world.hpp"
 #include "sc/threading/threading.hpp"
 
 namespace {
 
-  using sc::ecs2::ResourceCache;
-  using sc::ecs2::ResourceHandle;
-  using sc::ecs2::World;
+  using sc::ecs::ResourceCache;
+  using sc::ecs::ResourceHandle;
+  using sc::ecs::World;
 
   // Counts how many there are, so that a test sees when one is given back.
   struct Texture {
@@ -36,7 +36,7 @@ namespace {
 
 } // namespace
 
-TEST_CASE("ECS2 Resource Load Once", "[ecs2][resource][threading]") {
+TEST_CASE("ECS Resource Load Once", "[ecs][resource][threading]") {
   sc::threading::init();
   Texture::alive = 0;
   {
@@ -67,7 +67,7 @@ TEST_CASE("ECS2 Resource Load Once", "[ecs2][resource][threading]") {
   CHECK(Texture::alive.load() == 0);
 }
 
-TEST_CASE("ECS2 Resource Collect", "[ecs2][resource]") {
+TEST_CASE("ECS Resource Collect", "[ecs][resource]") {
   Texture::alive = 0;
   ResourceCache<Texture> cache;
   int loads = 0;
@@ -121,7 +121,7 @@ TEST_CASE("ECS2 Resource Collect", "[ecs2][resource]") {
   }
 }
 
-TEST_CASE("ECS2 Resource Force Load", "[ecs2][resource]") {
+TEST_CASE("ECS Resource Force Load", "[ecs][resource]") {
   Texture::alive = 0;
   ResourceCache<Texture> cache;
 
@@ -141,7 +141,7 @@ TEST_CASE("ECS2 Resource Force Load", "[ecs2][resource]") {
   CHECK(cache.find(1) == fresh);
 }
 
-TEST_CASE("ECS2 Resource Loader Throws", "[ecs2][resource][threading]") {
+TEST_CASE("ECS Resource Loader Throws", "[ecs][resource][threading]") {
   sc::threading::init();
   Texture::alive = 0;
   ResourceCache<Texture> cache;
@@ -180,7 +180,7 @@ TEST_CASE("ECS2 Resource Loader Throws", "[ecs2][resource][threading]") {
   }
 }
 
-TEST_CASE("ECS2 Resource Owners", "[ecs2][resource][threading]") {
+TEST_CASE("ECS Resource Owners", "[ecs][resource][threading]") {
   Texture::alive = 0;
   ResourceCache<Texture> cache(2);
 
@@ -228,7 +228,7 @@ TEST_CASE("ECS2 Resource Owners", "[ecs2][resource][threading]") {
   }
 }
 
-TEST_CASE("ECS2 Resource Handle As Component", "[ecs2][resource]") {
+TEST_CASE("ECS Resource Handle As Component", "[ecs][resource]") {
   Texture::alive = 0;
   ResourceCache<Texture> cache;
   {
@@ -244,7 +244,7 @@ TEST_CASE("ECS2 Resource Handle As Component", "[ecs2][resource]") {
   }
 }
 
-TEST_CASE("ECS2 Resource Load Async", "[ecs2][resource][threading]") {
+TEST_CASE("ECS Resource Load Async", "[ecs][resource][threading]") {
   sc::threading::init();
   Texture::alive = 0;
 

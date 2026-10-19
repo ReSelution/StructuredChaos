@@ -23,7 +23,7 @@
 #include "entity.hpp"
 #include "world.hpp"
 
-namespace sc::ecs2::internal {
+namespace sc::ecs::internal {
 
   // Memory for the components a thread wants added later, and the functions
   // it wants to modify components with. What is made in it
@@ -430,9 +430,9 @@ namespace sc::ecs2::internal {
   template<typename F>
   using ModifiedBy = typename OnlyParam<typename SystemSignature<F>::Params>::Type;
 
-} // namespace sc::ecs2::internal
+} // namespace sc::ecs::internal
 
-namespace sc::ecs2 {
+namespace sc::ecs {
 
   // The entities that have the given components, as a parameter of a system:
   //
@@ -472,7 +472,7 @@ namespace sc::ecs2 {
     [[nodiscard]] Component &get(Entity entity) const {
       assert(m_world->valid(entity));
       assert(internal::mayGet<Component>() &&
-             "sc::ecs2: get for writing in a parallel loop, where another thread of it may write the same component");
+             "sc::ecs: get for writing in a parallel loop, where another thread of it may write the same component");
       return std::get<World::ColumnOf<Component> *>(m_columns)->get(indexOf(entity));
     }
 
@@ -731,9 +731,9 @@ namespace sc::ecs2 {
     std::span<internal::CommandList> m_lists;
   };
 
-} // namespace sc::ecs2
+} // namespace sc::ecs
 
-namespace sc::ecs2::internal {
+namespace sc::ecs::internal {
 
   // What a system reads and writes, collected from its parameters.
   struct SystemAccess {
@@ -983,9 +983,9 @@ namespace sc::ecs2::internal {
     }
   }
 
-} // namespace sc::ecs2::internal
+} // namespace sc::ecs::internal
 
-namespace sc::ecs2 {
+namespace sc::ecs {
 
   // Runs systems on a world, as many of them at the same time as their
   // parameters allow.
@@ -1213,4 +1213,4 @@ namespace sc::ecs2 {
     std::vector<internal::CommandList *> m_stageLists;
   };
 
-} // namespace sc::ecs2
+} // namespace sc::ecs

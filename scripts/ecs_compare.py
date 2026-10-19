@@ -6,7 +6,7 @@ built in build-bench-ecs, which is configured as an optimized build with
 -Decs_comparison=true if it does not exist yet:
 
     scripts/ecs_compare.py
-    scripts/ecs_compare.py --only sc2,flecs --threads 8
+    scripts/ecs_compare.py --only sc,flecs --threads 8
     scripts/ecs_compare.py --markdown --save results.json
 
 On Windows, from a shell with the environment of Visual Studio, and with
@@ -39,7 +39,7 @@ SETUP_OPTIONS = ["-Dbuildtype=release", "-Db_ndebug=true", "-Decs_comparison=tru
 # Column titles, in the order of the columns. Libraries not listed here follow
 # in alphabetical order under the name of their executable.
 LIBRARIES = {
-    "sc2": "sc::ecs2",
+    "sc": "sc::ecs",
     "entt": "EnTT",
     "flecs": "Flecs",
     "gaia": "gaia-ecs",
@@ -454,7 +454,7 @@ def main() -> int:
     parser.add_argument("--no-build", action="store_true", help="run what is built already, without meson")
     parser.add_argument("--samples", type=int, default=50, help="samples per benchmark (default: 50)")
     parser.add_argument("--threads", type=int, help="threads of the parallel benchmarks (default: all)")
-    parser.add_argument("--only", help="comma separated libraries to run, e.g. sc2,flecs")
+    parser.add_argument("--only", help="comma separated libraries to run, e.g. sc,flecs")
     parser.add_argument("--relative-to", metavar="LIBRARY", help="show factors to this library instead of the fastest")
     parser.add_argument("--markdown", action="store_true", help="print markdown tables")
     parser.add_argument("--no-color", action="store_true", help="plain text also on a terminal")

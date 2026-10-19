@@ -20,11 +20,11 @@
 
 #include "entity.hpp"
 
-namespace sc::ecs2 {
+namespace sc::ecs {
 
   // Says that few entities have a component:
   //
-  //   template <> inline constexpr bool sc::ecs2::rareComponent<Player> = true;
+  //   template <> inline constexpr bool sc::ecs::rareComponent<Player> = true;
   //
   // Its column then gets memory in small pieces, a page of the column at a
   // time, instead of the huge pages that make going through many components
@@ -81,9 +81,9 @@ namespace sc::ecs2 {
   // get components again, see Column::SPARE_PAGES.
   inline constexpr size_t SPARE_BYTES = 2 * memory::HUGE_PAGE_SIZE;
 
-} // namespace sc::ecs2
+} // namespace sc::ecs
 
-namespace sc::ecs2::internal {
+namespace sc::ecs::internal {
 
   // One bit for every entity of a page.
   inline constexpr size_t PAGE_WORDS = PAGE_SIZE / 64;
@@ -1224,4 +1224,4 @@ namespace sc::ecs2::internal {
     alignas(Header) mutable std::byte m_headerBytes[HEADER_BYTES];
   };
 
-} // namespace sc::ecs2::internal
+} // namespace sc::ecs::internal
