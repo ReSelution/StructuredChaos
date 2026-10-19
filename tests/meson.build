@@ -155,6 +155,7 @@ test_memory = executable(
   sources: [
     'memory/bench_heap.cpp',
     'memory/test_arena_pool.cpp',
+    'memory/test_deferred.cpp',
     'memory/test_heap.cpp',
     'memory/test_huge_page_resource.cpp',
     'memory/test_monotonic_resource.cpp',
