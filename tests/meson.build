@@ -20,22 +20,6 @@ else
   test_timeout = 30
 endif
 
-test_ecs = executable(
-  'test_ecs',
-  sources: [
-    'ecs/test_commands.cpp',
-    'ecs/test_groups.cpp',
-    'ecs/test_registry.cpp',
-    'ecs/test_scheduler.cpp',
-  ],
-  dependencies: [
-    catch2_dep,
-    sc_dep,
-  ],
-)
-
-test('ECS Tests', test_ecs, env: test_env, timeout: test_timeout)
-
 # The prototype of an ECS of our own, see src/sc/ecs2.
 test_ecs2 = executable(
   'test_ecs2',
@@ -51,24 +35,6 @@ test_ecs2 = executable(
 )
 
 test('ECS2 Tests', test_ecs2, env: test_env, timeout: test_timeout)
-
-bench_ecs = executable(
-  'bench_ecs',
-  sources: [
-    'ecs/bench_ecs.cpp',
-  ],
-  dependencies: [
-    catch2_dep,
-    sc_dep,
-  ],
-)
-
-benchmark(
-  'ECS Benchmarks',
-  bench_ecs,
-  args: ['[!benchmark]'],
-  timeout: 600,
-)
 
 test_threading = executable(
   'test_threading',

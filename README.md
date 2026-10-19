@@ -18,134 +18,12 @@ management, logging, statistics, localization and hashing.
 
 | Module | Header | What it does |
 | --- | --- | --- |
-| [ECS](#ecs) | `sc/ecs/scheduler.hpp` | EnTT registry without locks, and a scheduler that runs the systems that do not conflict at the same time |
 | [Threading](#threading) | `sc/threading/threading.hpp` | Thread pool with priorities, futures, batches and parallel loops |
 | [Memory](#memory) | `sc/memory/heap.hpp` | mimalloc heap that frees everything at once, usable as a `std::pmr` resource |
 | [Logger](#logger) | `sc/logger/logger.hpp` | Compile-time named loggers on top of spdlog, one file per module |
 | [Stats](#stats) | `sc/stats/stats.hpp` | Counters and throughput meters that compile to nothing when disabled |
 | [Localization](#localization) | `sc/localizations/magpie_string.hpp` | *Magpie*: translated strings looked up by a key hashed at compile time |
 | [Hash](#hash) | `sc/hash/hash.hpp` | rapidhash with identical results at compile time and at run time |
-
-### ECS
-
-`sc::ecs::Registry` wraps an `entt::registry` and reaches components without
-any locking. What keeps threads apart is the `sc::ecs::Scheduler`: a system is
-a function whose parameters say what it reads and writes, and two systems run
-at the same time if neither writes a component the other one uses.
-
-```cpp
-#include "sc/ecs/registry.hpp"
-#include "sc/ecs/scheduler.hpp"
-#include "sc/threading/threading.hpp"
-
-struct Position { float x{0.0f}; float y{0.0f}; };
-struct Velocity { float dx{0.0f}; float dy{0.0f}; };
-struct Health { float value{100.0f}; };
-struct Frozen {};
-
-using sc::ecs::Commands;
-using sc::ecs::Exclude;
-using sc::ecs::View;
-
-sc::threading::init(); // the scheduler runs its systems on the thread pool
-
-sc::ecs::Registry registry;
-
-sc::ecs::Entity e = registry.create();
-registry.emplace<Position>(e, 1.0f, 2.0f);
-registry.emplace<Velocity>(e, 0.5f, -0.5f);
-registry.emplace<Health>(e);
-
-sc::ecs::Scheduler scheduler;
-
-// Writes Position, reads Velocity: a const component is only read.
-scheduler.add([](View<Position, const Velocity, Exclude<Frozen>> view) {
-  for (auto [entity, pos, vel] : view.each()) {
-    pos.x += vel.dx;
-    pos.y += vel.dy;
-  }
-});
-
-// The body of a loop, called for every entity on several threads at once.
-// Touches other components than the system above and runs next to it.
-scheduler.addParallel([](Health &health) { health.value = std::min(100.0f, health.value + 1.0f); });
-
-// Adding and removing components and destroying entities is recorded and
-// done once the systems running at the same time are finished.
-scheduler.add([](View<const Health> view, Commands<Frozen> commands) {
-  for (auto [entity, health] : view.each()) {
-    if (health.value <= 0.0f) {
-      commands.destroy(entity);
-    } else if (health.value < 10.0f) {
-      commands.emplace<Frozen>(entity);
-    }
-  }
-});
-
-scheduler.run(registry); // once per frame
-```
-
-A system may take any number of views, groups and one `Commands`. One that
-takes `sc::ecs::Registry &` may do anything and runs alone. Systems that cannot
-run together keep the order in which they were added.
-
-`addParallel` builds the view from the parameters of the function. A view with
-excluded components or a group is named instead:
-
-```cpp
-#include "sc/ecs/group.hpp"
-
-scheduler.addParallel<View<Position, const Velocity, Exclude<Frozen>>>(
-    [](Position &pos, const Velocity &vel) { pos.x += vel.dx; });
-
-// A group keeps its components packed together and is the fastest to go through.
-scheduler.addParallel<sc::ecs::Group<entt::owned_t<Position, const Velocity>>>(
-    [](Position &pos, const Velocity &vel) { pos.x += vel.dx; });
-```
-
-Before the components, the function may take the entity and `Commands`. Every
-thread records into a buffer of its own; the changes of different threads are
-made in no particular order:
-
-```cpp
-scheduler.addParallel([](entt::entity entity, Commands<Frozen> commands, const Health &health) {
-  if (health.value <= 0.0f) {
-    commands.destroy(entity);
-  } else if (health.value < 10.0f) {
-    commands.emplace<Frozen>(entity);
-  }
-});
-```
-
-Inside a system that does more than one loop, `sc::ecs::parallelEach(view,
-function)` does the same for a single view or group and `sc::ecs::each(view,
-function)` on the calling thread alone. Both go through the components page by
-page, which is several times faster than the `each` of an EnTT view for a
-function that does little. Such a system records changes from its loops through
-`sc::ecs::ParallelCommands`, whose `local()` is the `Commands` of the calling
-thread.
-
-Without the scheduler, the registry is used like an `entt::registry`:
-
-```cpp
-auto [pos, vel] = registry.get<Position, const Velocity>(e);
-pos.x += vel.dx;
-
-for (auto [entity, position] : registry.view<Position, Exclude<Frozen>>().each()) {
-  position.y = 0.0f;
-}
-
-registry.destroy(e);
-```
-
-Used from several threads this way, a component type must either be read by
-any number of threads or written by a single one; adding and removing
-components counts as writing. Only `create` and `valid` are safe from any
-thread at any time.
-
-Components have to be trivially destructible. Variable-sized data goes into a
-`sc::ecs::Resource<std::span<T>>` field, which the registry allocates from a
-heap of that component and frees together with it.
 
 ### Threading
 
@@ -301,8 +179,7 @@ meson test -C build --suite StructuredChaos
 meson setup build --native-file cross/linux-clang.ini
 ```
 
-Benchmarks run separately. The ones of the ECS compare it with a bare
-`entt::registry` and want an optimized build (`-Dbuildtype=release
+Benchmarks run separately and want an optimized build (`-Dbuildtype=release
 -Db_ndebug=true`):
 
 ```bash
@@ -415,14 +292,14 @@ executable('game', 'main.cpp', dependencies: sc_dep, override_options: ['cpp_std
 
 | Library | Used for |
 | --- | --- |
-| [EnTT](https://github.com/skypjack/entt) | ECS storage |
+| [EnTT](https://github.com/skypjack/entt) | Compared with in the ECS benchmarks |
 | [mimalloc](https://github.com/microsoft/mimalloc) | Heaps and the global allocator |
 | [spdlog](https://github.com/gabime/spdlog) | Logging |
 | [rapidhash](https://github.com/Nicoshev/rapidhash) | Hashing |
 | [unordered_dense](https://github.com/martinus/unordered_dense) | Hash maps |
 | [simdutf](https://github.com/simdutf/simdutf) | UTF-16 to UTF-8 conversion |
 | [atomic_queue](https://github.com/max0x7ba/atomic_queue) | Lock-free queues of the thread pool |
-| [PFR](https://github.com/boostorg/pfr) | Reflection over component fields |
+| [PFR](https://github.com/boostorg/pfr) | Nothing since the old ECS went, still passed on |
 | [glm](https://github.com/g-truc/glm), [xsimd](https://github.com/xtensor-stack/xsimd) | Math and SIMD, passed on to consumers |
 | [Catch2](https://github.com/catchorg/Catch2) | Tests and benchmarks |
 

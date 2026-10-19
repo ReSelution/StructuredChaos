@@ -76,6 +76,9 @@ atomic_queue_dep = dependency(
 )
 
 # Needed by the public headers, so every consumer gets them as well.
+# TODO: entt and pfr were only used by the old sc::ecs, which is gone; entt
+# is still needed by tests/ecs_compare. Taking them out of here would break a
+# consumer that uses them through sc_dep (SAA?), so not before that is checked.
 sc_public_deps = [
   entt_dep,
   spdlog_dep,
