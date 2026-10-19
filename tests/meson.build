@@ -40,6 +40,7 @@ test('ECS Tests', test_ecs, env: test_env, timeout: test_timeout)
 test_ecs2 = executable(
   'test_ecs2',
   sources: [
+    'ecs2/test_resource.cpp',
     'ecs2/test_scheduler.cpp',
     'ecs2/test_world.cpp',
   ],
