@@ -60,6 +60,14 @@ namespace sc::ecs2 {
   // entities get their indices from an area of their own, where they are
   // among themselves. A component that only they have then needs memory for
   // their few pages and not for pages all over the world.
+  //
+  // Rare is one fixed area without a set: all rare entities share it,
+  // whatever components they get, so players, bosses and cameras made this
+  // way lie mixed in the same pages. When the components are known at
+  // create, a set does better: world.create<Player>() or
+  // world.create(Player{...}) gives every set an area of its own. Rare is
+  // for the few entities whose components are not known yet when they are
+  // made.
   struct Rare {};
   inline constexpr Rare rare{};
 
