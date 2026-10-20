@@ -264,7 +264,8 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     recordAdd.addParallel(
         [](Entity entity, Commands commands, const Position &) { commands.emplace<Health>(entity, 50.0f); });
     Scheduler recordRemove;
-    recordRemove.addParallel([](Entity entity, Commands commands, const Position &) { commands.erase<Health>(entity); });
+    recordRemove.addParallel(
+        [](Entity entity, Commands commands, const Position &) { commands.erase<Health>(entity); });
     recordAdd.run(world.world);
     REQUIRE(world.world.column<Health>().pages() == world.world.column<Position>().pages());
     REQUIRE(world.world.get<const Health>(world.entities.back()).value == 50.0f);
@@ -565,18 +566,28 @@ namespace {
       const Position pos{static_cast<float>(i), 1.0f};
       if (with) {
         switch (i % 3) {
-          case 0: (void)world->create(pos, Velocity{1.0f, 2.0f}); break;
-          case 1: (void)world->create(pos, Health{50.0f}); break;
-          default: (void)world->create(pos);
+          case 0:
+            (void) world->create(pos, Velocity{1.0f, 2.0f});
+            break;
+          case 1:
+            (void) world->create(pos, Health{50.0f});
+            break;
+          default:
+            (void) world->create(pos);
         }
         continue;
       }
       const Entity entity = world->create();
       world->emplace<Position>(entity, pos);
       switch (i % 3) {
-        case 0: world->emplace<Velocity>(entity, 1.0f, 2.0f); break;
-        case 1: world->emplace<Health>(entity, 50.0f); break;
-        default: break;
+        case 0:
+          world->emplace<Velocity>(entity, 1.0f, 2.0f);
+          break;
+        case 1:
+          world->emplace<Health>(entity, 50.0f);
+          break;
+        default:
+          break;
       }
     }
     return world;

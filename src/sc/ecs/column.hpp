@@ -837,9 +837,8 @@ namespace sc::ecs::internal {
     // heldHas. After the count, and seq_cst for that. 64 loads, on the rare
     // way of a page that gives its memory back.
     [[nodiscard]] static bool anyHeld(const Header &header) noexcept {
-      return std::ranges::any_of(header.making, [](const std::atomic<uint64_t> &word) {
-        return word.load(std::memory_order_seq_cst) != 0;
-      });
+      return std::ranges::any_of(
+          header.making, [](const std::atomic<uint64_t> &word) { return word.load(std::memory_order_seq_cst) != 0; });
     }
 
     // Takes the making bit of an index, waiting while another thread has it,

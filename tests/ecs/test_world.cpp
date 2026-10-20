@@ -269,7 +269,7 @@ TEST_CASE("World Entities", "[ecs][world]") {
     // is full.
     REQUIRE_THROWS_AS(entities.create(Allocator::FIRST_AREA + 1), std::length_error);
     for (uint32_t i = 1; i < PAGE_SIZE; ++i) {
-      (void)entities.create(Allocator::FIRST_AREA);
+      (void) entities.create(Allocator::FIRST_AREA);
     }
     REQUIRE_THROWS_AS(entities.create(Allocator::FIRST_AREA), std::length_error);
     // Nothing is lost by trying.
@@ -839,7 +839,8 @@ TEST_CASE("World Components", "[ecs][world]") {
     world.each<const Tag>([&](Entity) { ++tags; });
     REQUIRE(world.column<Tag>().page(0).count == tags);
     size_t positions = 0;
-    world.each<const Position>([&](const Position &position) { positions += position.x == 1.0f && position.y == 2.0f; });
+    world.each<const Position>(
+        [&](const Position &position) { positions += position.x == 1.0f && position.y == 2.0f; });
     REQUIRE(world.column<Position>().page(0).count == positions);
     for (const Entity entity: entities) {
       world.erase<Named>(entity);

@@ -417,9 +417,8 @@ namespace sc::ecs {
   // every thread keeps to other entities, which is what the functions of
   // parallelEach do with their own entity and the ones they create. For an
   // entity that several threads may go for there is tryEmplace, and erase:
-  // one of them does it; emplaceOrReplace makes them wait for each other. The value of a component is another matter: it is
-  // written by one thread, or read by any number. destroy must have nothing
-  // running next to it.
+  // one of them does it; emplaceOrReplace makes them wait for each other. The value of a component is another matter:
+  // it is written by one thread, or read by any number. destroy must have nothing running next to it.
   //
   // A const world is only read: valid, contains, get and loops over const
   // components. None of them makes the column of a component the world never
@@ -495,8 +494,8 @@ namespace sc::ecs {
     //
     // If making a component throws, the entity stays with those before it.
     template<typename First, typename... Rest>
-      // Not for a span of entities, see the next one, which a std::vector
-      // only turns into when it is not const.
+    // Not for a span of entities, see the next one, which a std::vector
+    // only turns into when it is not const.
       requires(!std::is_convertible_v<First &, std::span<Entity>> && !std::is_same_v<First, Rare>)
     [[nodiscard]] Entity create(const First &first, const Rest &...rest) {
       const Entity entity = m_entities.create(areaOf<First, Rest...>());

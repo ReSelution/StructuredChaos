@@ -312,7 +312,7 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     // right away, one created for them and given them after, and one
     // through Commands.
     scheduler.addParallel([](Change<Frozen, Spawner> change, const Velocity &) {
-      (void)change.create(Frozen{}, Spawner{1});
+      (void) change.create(Frozen{}, Spawner{1});
       const Entity planned = change.create<Spawner, Frozen>();
       change.emplace<Frozen>(planned);
       change.emplace<Spawner>(planned, 2);
