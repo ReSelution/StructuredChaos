@@ -135,7 +135,7 @@ namespace sc::ecs::internal {
   // mask of a word before it goes through it, and that of a full page not at
   // all, so one the function takes from an entity after its own would be
   // called destroyed; and in parallelEach another thread may be writing the
-  // one modify changes. Nothing in release builds.
+  // one modify or emplaceOrReplace changes. Nothing in release builds.
   inline void assertNotLooped([[maybe_unused]] const ColumnBase *column, [[maybe_unused]] uint32_t index) noexcept {
 #ifndef NDEBUG
     for (const LoopWatch *watch = loopWatch; watch != nullptr; watch = watch->outer) {
@@ -483,6 +483,8 @@ namespace sc::ecs::internal {
       bool made = false;
       try {
         if (heldHas(header, slot)) {
+          // Replacing is changing, adding is not checked.
+          assertNotLooped(this, index);
           if constexpr (HAS_VALUE) {
             *valueAt(index) = T{std::forward<Args>(args)...};
           }

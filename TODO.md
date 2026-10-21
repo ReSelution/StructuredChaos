@@ -243,7 +243,7 @@ need goes through `Commands`, or through `Modify` of components the loop does no
   write the same `Health`. For systems a `static_assert` in `Scheduler::addSystem` now forbids `Modify<T>` together
   with `T` as a loop parameter or in a query (also `const T`: reading without the bit next to a `modify` is a race
   as well). For `world.parallelEach` with `world.modify` in it, which has no types to check, debug builds assert
-  in `Column::modify` that it is not a component the loop goes through on another entity (`assertNotLooped`).
+  in `Column::modify` and `emplaceOrReplace` that it is not a component the loop goes through on another entity (`assertNotLooped`).
 - [x] **Page lock while iterating: dropped,** see the decision above. It would only have let a loop `modify` the
   components it goes through. As it was planned: a loop locks the page of each column it writes (per column and page, not per
   entity page, so a loop over `Health` does not block `modify<Sprite>`), one RMW per 4096 entities. Pitfalls:
