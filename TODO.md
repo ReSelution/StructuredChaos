@@ -265,6 +265,17 @@ The API is not settled; these are the open questions found so far.
   `World::each`); a command buffer applies them in a fixed order. Relevant for replays and lockstep networking; state
   it as a trade-off, not only as a speed gain.
 
+## A single-threaded variant
+
+- [ ] **A world without thread safety:** a variant of `World` (and `Column`, `EntityAllocator`) for one thread,
+  without what makes the world safe for many: no atomics in the masks, counts and summaries, no making bits, no
+  locked instructions in emplace, erase and modify, no `Share`s per thread in the allocator. What it would gain is
+  not measured; in the measurements above, one locked instruction more per add or remove cost 25 to 45 %. Worth
+  knowing first: `Commands` is faster than a direct change where many go to the same entities (`Commands::modify`
+  3.4 against 14.6 ns per hit with all threads on one of 1 000 targets) because the recorded changes are applied on
+  several threads, page by page. A single-threaded world loses that, so compare it against the parallel one with
+  `Commands`, not only against single changes.
+
 ## Single-thread standing in ecs_benchmark
 
 Measured 2026-10-17 on a Ryzen 7 5800X, after the per-index seed fix in ecs_benchmark (`a9f3135`; before it the
