@@ -232,9 +232,11 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   all of them lie in page 0 and every thread wrote its count. Now `vacate` keeps a page whose making bits are
   held instead (`Column::heldHas`), and add + remove is unchanged (899 to 909 µs against 898).
 
-## `modify` inside parallel loops: directions, not decided
+## `modify` inside parallel loops: directions
 
-The API is not settled; these are the open questions found so far.
+Decided on 2026-10-21: the function of a loop does not touch the components the loop goes through on other
+entities, the same rule as for adding and removing (see "Adding and removing in an `each`"). What other entities
+need goes through `Commands`, or through `Modify` of components the loop does not name.
 
 - [x] **Same-loop race:** `modify` only helps if every writer takes the lock. A `parallelEach<Health>` writes its own
   pages without it; if its callback calls `modify<Health>` on an entity in a page another thread is iterating, both
@@ -242,13 +244,15 @@ The API is not settled; these are the open questions found so far.
   with `T` as a loop parameter or in a query (also `const T`: reading without the bit next to a `modify` is a race
   as well). For `world.parallelEach` with `world.modify` in it, which has no types to check, debug builds assert
   in `Column::modify` that it is not a component the loop goes through on another entity (`assertNotLooped`).
-- [ ] **Page lock while iterating:** a loop locks the page of each column it writes (per column and page, not per
+- [x] **Page lock while iterating: dropped,** see the decision above. It would only have let a loop `modify` the
+  components it goes through. As it was planned: a loop locks the page of each column it writes (per column and page, not per
   entity page, so a loop over `Health` does not block `modify<Sprite>`), one RMW per 4096 entities. Pitfalls:
   - Deadlock: thread A holds page P1 and calls `modify` on P2, thread B holds P2 and calls `modify` on P1 (two groups
     hitting each other). `modify` must never block while its thread holds a page lock.
   - Latency: a waiting `modify` waits up to a whole page; many threads hitting one target (the player's page) all
     wait for one thread.
-- [ ] **Non-blocking `modify` (candidate):** the page lock holds the owning thread id.
+- [x] **Non-blocking `modify`: dropped** with the page lock it needs. As it was planned: the page lock holds the
+  owning thread id.
   1. page not locked: run directly with the `making` bit;
   2. locked by this thread: run directly, same thread writes in order;
   3. locked by another thread: push the callback into a lock-free mailbox of that page; the owner drains it before
