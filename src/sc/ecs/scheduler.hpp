@@ -12,6 +12,7 @@
 #include <mutex>
 #include <new>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -21,6 +22,7 @@
 #include "sc/threading/threading.hpp"
 
 #include "entity.hpp"
+#include "resource.hpp"
 #include "world.hpp"
 
 namespace sc::ecs::internal {
@@ -731,9 +733,46 @@ namespace sc::ecs {
     std::span<internal::CommandList> m_lists;
   };
 
+  // The ResourceCache given to the scheduler with provide, as a parameter of
+  // a system:
+  //
+  //   ResourceCache<Texture> textures;
+  //   scheduler.provide(textures);
+  //   scheduler.add([](Query<const Mesh> meshes, Resources<Texture> textures) {
+  //     ResourceHandle<Texture> albedo = textures->loadAsync(id, [] { ... });
+  //   });
+  //   scheduler.add([](Resources<Texture> textures) { textures->collect(); }, "collect textures");
+  //
+  // Everything of the cache is safe from any thread at any time, collect as
+  // well, so it keeps no system waiting. A copy is one pointer, which makes
+  // it a parameter for the function of addParallel too.
+  template<typename T, typename Key = h64, typename Hash = ankerl::unordered_dense::hash<Key>>
+  class Resources {
+  public:
+    using Cache = ResourceCache<T, Key, Hash>;
+
+    explicit Resources(Cache &cache) noexcept : m_cache(&cache) {}
+
+    [[nodiscard]] Cache *operator->() const noexcept { return m_cache; }
+    [[nodiscard]] Cache &operator*() const noexcept { return *m_cache; }
+
+  private:
+    Cache *m_cache;
+  };
+
 } // namespace sc::ecs
 
 namespace sc::ecs::internal {
+
+  // Stands for the type of a cache given with Scheduler::provide: its
+  // address, the same in every translation unit.
+  template<typename Cache>
+  inline constexpr char cacheTag = 0;
+
+  struct ProvidedCache {
+    const void *tag;
+    void *cache;
+  };
 
   // What a system reads and writes, collected from its parameters.
   struct SystemAccess {
@@ -778,6 +817,9 @@ namespace sc::ecs::internal {
   struct SystemContext {
     World &world;
     std::span<CommandList> commands;
+    std::span<const ProvidedCache> caches;
+    // Of the system, for errors.
+    const std::string &name;
   };
 
   // How one kind of system parameter is declared to the scheduler and how its
@@ -831,6 +873,25 @@ namespace sc::ecs::internal {
     static World &fetch(const SystemContext &context) { return context.world; }
   };
 
+  template<typename T, typename Key, typename Hash>
+  struct SystemParam<Resources<T, Key, Hash>> {
+    using Cache = ResourceCache<T, Key, Hash>;
+
+    // The cache is safe next to everything.
+    static void declare(SystemAccess &) {}
+
+    // One look through the provided caches per run of the system, not per
+    // entity.
+    static Resources<T, Key, Hash> fetch(const SystemContext &context) {
+      for (const ProvidedCache &provided: context.caches) {
+        if (provided.tag == &cacheTag<Cache>) {
+          return Resources<T, Key, Hash>(*static_cast<Cache *>(provided.cache));
+        }
+      }
+      throw std::logic_error("the system \"" + context.name + "\" takes a cache the scheduler was not provided with");
+    }
+  };
+
   // Queries, Change and Commands are taken by value or by const reference, the
   // world only by reference.
   template<typename Param>
@@ -868,6 +929,8 @@ namespace sc::ecs::internal {
   inline constexpr bool isLoopExtra<Commands> = true;
   template<typename... Terms>
   inline constexpr bool isLoopExtra<Query<Terms...>> = true;
+  template<typename T, typename Key, typename Hash>
+  inline constexpr bool isLoopExtra<Resources<T, Key, Hash>> = true;
 
   // The parameters of a function for Scheduler::addParallel: the entity, then
   // Change, Commands and queries, all of them optional, and then the
@@ -996,6 +1059,7 @@ namespace sc::ecs {
   //   void freeze(Query<const Health> query, Change<Frozen> change);   // adds and removes Frozen
   //   void hit(Query<const Target> query, Modify<Health> modify);   // changes Health of any entity, locked
   //   void reap(Query<const Lifetime> query, Commands commands);   // destroys entities, later
+  //   void stream(Resources<Texture> textures);            // loads into a cache given with provide
   //   void load(World &world);                             // may do anything, runs alone
   //
   // Two systems run at the same time if neither writes a component the other
@@ -1019,8 +1083,8 @@ namespace sc::ecs {
     //
     // A component taken by reference to non-const is written, any other one is
     // only read. Before the components, the function may take the entity and,
-    // after it, Change, Commands, Modify and queries, the last two for
-    // entities other than its own:
+    // after it, Change, Commands, Modify, queries and Resources, Modify and
+    // queries for entities other than its own:
     //
     //   scheduler.addParallel([](Entity entity, Commands commands, const Health &health) { ... });
     //   scheduler.addParallel([](Query<const Health> others, const Target &target) { ... });
@@ -1053,6 +1117,23 @@ namespace sc::ecs {
                          typename Signature::ExtraList{});
     }
 
+    // Makes the cache the one systems get as Resources<T, Key, Hash>. Only a
+    // pointer is kept: the cache has to outlive every run. One cache per
+    // type; owners within it are for resources that go at points of their
+    // own. std::logic_error for a second cache of the same type. Not during
+    // run.
+    template<typename T, typename Key, typename Hash>
+    Scheduler &provide(ResourceCache<T, Key, Hash> &cache) {
+      const void *const tag = &internal::cacheTag<ResourceCache<T, Key, Hash>>;
+      for (const internal::ProvidedCache &provided: m_caches) {
+        if (provided.tag == tag) {
+          throw std::logic_error("the scheduler has a cache of this type already");
+        }
+      }
+      m_caches.push_back({.tag = tag, .cache = &cache});
+      return *this;
+    }
+
     // Runs every system once. Stages with more than one system and systems
     // added with addParallel run on the thread pool, so sc::threading::init
     // must have been called before, and run must not be called from a pool
@@ -1079,7 +1160,7 @@ namespace sc::ecs {
         try {
           internal::runAll(stage, [this, &world](size_t index) {
             System &system = m_systems[index];
-            system.run({.world = world, .commands = system.commands});
+            system.run({.world = world, .commands = system.commands, .caches = m_caches, .name = system.name});
           });
         } catch (...) {
           clearCommands(stage);
@@ -1211,6 +1292,7 @@ namespace sc::ecs {
     // For the commands of a stage, kept for the next one.
     internal::CommandApplier m_applier;
     std::vector<internal::CommandList *> m_stageLists;
+    std::vector<internal::ProvidedCache> m_caches;
   };
 
 } // namespace sc::ecs

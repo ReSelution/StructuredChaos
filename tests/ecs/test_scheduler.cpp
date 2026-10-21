@@ -22,6 +22,9 @@ namespace {
   using sc::ecs::Modify;
   using sc::ecs::PAGE_SIZE;
   using sc::ecs::Query;
+  using sc::ecs::ResourceCache;
+  using sc::ecs::ResourceHandle;
+  using sc::ecs::Resources;
   using sc::ecs::Scheduler;
   using sc::ecs::World;
 
@@ -69,6 +72,15 @@ namespace {
         throw std::runtime_error("broken");
       }
     }
+  };
+
+  // A resource that shows how often it was loaded.
+  struct Texture {
+    int id;
+  };
+
+  struct Material {
+    ResourceHandle<Texture> albedo;
   };
 
   using Stages = std::vector<std::vector<size_t>>;
@@ -146,6 +158,13 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
     scheduler.add([](Query<const Position>, Commands) {});
     scheduler.add([](Query<const Position>, Commands) {});
     REQUIRE(scheduler.stages() == Stages{{0, 1}});
+  }
+
+  SECTION("A Cache Keeps Nobody Waiting") {
+    scheduler.add([](Query<Health>, Resources<Texture>) {});
+    scheduler.add([](Resources<Texture>) {});
+    scheduler.addParallel([](Resources<Texture>, Health &) {});
+    REQUIRE(scheduler.stages() == Stages{{0, 1}, {2}});
   }
 
   SECTION("A System That Takes The World Or Nothing Runs Alone") {
@@ -850,6 +869,70 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
         REQUIRE(world.get<Health>(entities[i]).value == 101);
       }
     }
+  }
+
+  SECTION("Systems Load Into The Provided Cache") {
+    ResourceCache<Texture> textures;
+    std::atomic<int> loads = 0;
+    scheduler.provide(textures);
+    scheduler.addParallel([&](Entity entity, Commands commands, Resources<Texture> cache, const Velocity &) {
+      // Four keys for all entities: each is loaded once.
+      const int id = static_cast<int>(sc::ecs::indexOf(entity) % 4);
+      ResourceHandle<Texture> albedo = cache->load(static_cast<sc::h64>(id), [&] {
+        ++loads;
+        return Texture{id};
+      });
+      commands.emplace<Material>(entity, std::move(albedo));
+    });
+    scheduler.run(world);
+    // CHECK up to the erase: the cache must not go while components have its handles.
+    CHECK(loads == 4);
+    CHECK(textures.size() == 4);
+    for (size_t i = 0; i < entities.size(); ++i) {
+      if (i % 3 != 0) {
+        CHECK(world.get<Material>(entities[i]).albedo->id == static_cast<int>(sc::ecs::indexOf(entities[i]) % 4));
+      }
+    }
+
+    // Without handles, a system gives them back.
+    for (const Entity entity: entities) {
+      world.erase<Material>(entity);
+    }
+    Scheduler collector;
+    size_t collected = 0;
+    collector.provide(textures);
+    collector.add([&](const Resources<Texture> &cache) { collected = cache->collect(); }, "collect textures");
+    collector.run(world);
+    REQUIRE(collected == 4);
+    REQUIRE(textures.size() == 0);
+  }
+
+  SECTION("A Cache That Was Not Provided Ends The Run") {
+    bool ran = false;
+    scheduler.add([&](Resources<Texture>) { ran = true; }, "stream");
+    REQUIRE_THROWS_AS(scheduler.run(world), std::logic_error);
+    REQUIRE_FALSE(ran);
+  }
+
+  SECTION("One Cache Per Type") {
+    ResourceCache<Texture> textures;
+    ResourceCache<Texture> others;
+    ResourceCache<Texture, std::string> named;
+    scheduler.provide(textures);
+    REQUIRE_THROWS_AS(scheduler.provide(others), std::logic_error);
+    // Another key is another type.
+    scheduler.provide(named);
+    Texture *got = nullptr;
+    Texture *gotNamed = nullptr;
+    scheduler.add([&](Resources<Texture> cache, Resources<Texture, std::string> byName) {
+      got = &*cache->load(1, [] { return Texture{1}; });
+      gotNamed = &*byName->load("one", [] { return Texture{2}; });
+    });
+    scheduler.run(world);
+    REQUIRE(got->id == 1);
+    REQUIRE(gotNamed->id == 2);
+    textures.collect();
+    named.collect();
   }
 
   SECTION("An Exception Ends The Run After Its Stage") {

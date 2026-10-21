@@ -46,8 +46,11 @@ Found while integrating `sc::ecs` into [ecs_benchmark](https://github.com/abeiml
 - [ ] **The last handle of a resource takes a CAS loop:** the count and the queued bit are one word, so that a
   handle never touches the entry after its last change (collect may free it right after). Every other drop is
   one CAS as well, not a `fetch_sub`. Not measured against `shared_ptr`.
-- [ ] **Not a parameter of systems yet:** systems get the cache through captures. A `SystemParam` for it once SAA
-  shows how it is used; the scheduler would not need to know about it for stages, a load is safe from anywhere.
+- [x] **A parameter of systems:** `scheduler.provide(cache)` keeps a pointer to it, and systems take
+  `Resources<T, Key, Hash>`, one pointer with `->` to the cache, also in the function of `addParallel`. It declares
+  nothing, since everything of the cache (collect too) is safe from anywhere. One cache per type, a second `provide`
+  throws; a system whose cache was not provided throws at `run`. Finding the cache is a look through the provided
+  ones per run of the system, not measured.
 - [x] **GPU resources:** the cache knows no frames. The destructor of a GPU resource only puts it into a
   `memory::DeletionQueue` (`src/sc/memory/deferred.hpp`), which frees it with `beginFrame` once the fence of its
   frame has signalled. Chosen over a frame delay in the cache (more state in load, find and collect, and only for
