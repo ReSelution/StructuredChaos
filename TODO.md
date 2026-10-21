@@ -157,12 +157,14 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
 - [ ] **No write per applied change:** `applyChange` sets `finish` to null in every change it does, so that `clear`
   after an exception knows what is left. A position per page (and one for the lists in order) would tell the same
   without writing 1M changes back; not measured whether it matters.
-- [ ] **Listeners declare their access:** `scheduler.on<Hit>([](const Hit &, Query<const Armor>, Commands) { ... })`
-  with the same `SystemParam`s as systems, and an `Emit<Hit>` parameter for the emitter whose `declare` adds the
-  `SystemAccess` of every listener of `Hit`. The stages are built in `run()`, so listeners only have to be registered
-  before that. Needed even with `modify`: a plain system that writes the same component through `each`/`get` in the
-  same stage does not take the bit, so either the scheduler knows the listener writes it, or every writer of that
-  component goes through `modify`.
+- [x] **Listeners declare their access:** `scheduler.on([](const Hit &, Modify<Health>, Commands) { ... })`, the
+  event as the first parameter and after it the same `SystemParam`s as systems; a system emits with an `Emit<Hit>`
+  parameter (also in `addParallel`), which calls the listeners right away on its thread. `stages()` adds to every
+  system what the listeners of the events it emits use, of the events they emit as well, so listeners may be added
+  after the systems. A listener with nothing but the event makes its emitters run alone, as a system without
+  parameters. What `static_assert` checks for one system (a component taken through `Modify` and past it) is checked
+  there over the system and its listeners, with `std::logic_error`. The parameters of a listener are made for every
+  event, `Resources` with its look through the provided caches; not measured.
 - [x] **Measure:** cost of `modify` per event, and with many threads waiting on the same target (one boss, many
   hits), as a case in `tests/ecs_compare` (large world, 1M entities, each damages another by 1; Ryzen 7 5800X,
   16 threads, clang release, median of 5 runs, ns per entity):

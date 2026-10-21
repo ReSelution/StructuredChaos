@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <exception>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -774,6 +775,10 @@ namespace sc::ecs::internal {
     void *cache;
   };
 
+  // Stands for the type of an event of Scheduler::on and Emit, as cacheTag.
+  template<typename Event>
+  inline constexpr char eventTag = 0;
+
   // What a system reads and writes, collected from its parameters.
   struct SystemAccess {
     struct Component {
@@ -785,6 +790,13 @@ namespace sc::ecs::internal {
     // The system takes the world itself and may do anything with it.
     bool exclusive = false;
     bool commands = false;
+    // The events it emits, by eventTag: what their listeners use is added
+    // when the stages are built.
+    std::vector<const void *> emits;
+    // The components it takes through Modify and through queries, its loop's
+    // among them, which must not overlap: modify locks, the others do not.
+    std::vector<size_t> modified;
+    std::vector<size_t> gotten;
 
     // Several parameters may name the same component; writing wins.
     void add(size_t index, bool write) {
@@ -795,6 +807,32 @@ namespace sc::ecs::internal {
         }
       }
       components.push_back({.index = index, .write = write});
+    }
+
+    void addEmit(const void *tag) {
+      if (std::ranges::find(emits, tag) == emits.end()) {
+        emits.push_back(tag);
+      }
+    }
+
+    // Uses what the other one uses as well.
+    void merge(const SystemAccess &other) {
+      for (const Component &component: other.components) {
+        add(component.index, component.write);
+      }
+      exclusive = exclusive || other.exclusive;
+      commands = commands || other.commands;
+      for (const void *const tag: other.emits) {
+        addEmit(tag);
+      }
+      modified.insert(modified.end(), other.modified.begin(), other.modified.end());
+      gotten.insert(gotten.end(), other.gotten.begin(), other.gotten.end());
+    }
+
+    // Whether a component taken through Modify is also taken past it.
+    [[nodiscard]] bool modifiesGotten() const noexcept {
+      return std::ranges::any_of(modified,
+                                 [this](size_t index) { return std::ranges::find(gotten, index) != gotten.end(); });
     }
 
     // Whether the two must not run at the same time.
@@ -813,14 +851,74 @@ namespace sc::ecs::internal {
     }
   };
 
+  struct SystemContext;
+
+  // A function given to Scheduler::on, called with the event and the context
+  // of the system that emits it, on several threads at once.
+  struct Listener {
+    std::move_only_function<void(const void *, const SystemContext &) const> call;
+    SystemAccess access;
+  };
+
+  // The listeners of one type of event.
+  struct EventListeners {
+    const void *tag;
+    std::vector<Listener> listeners;
+  };
+
   // What the parameters of a system are made from when it runs.
   struct SystemContext {
     World &world;
     std::span<CommandList> commands;
     std::span<const ProvidedCache> caches;
+    std::span<const EventListeners> events;
     // Of the system, for errors.
     const std::string &name;
   };
+
+} // namespace sc::ecs::internal
+
+namespace sc::ecs {
+
+  // Calls the listeners of Event given to the scheduler with on, right away
+  // and on the calling thread, as a parameter of a system:
+  //
+  //   scheduler.on([](const Hit &hit, Modify<Health> modify) {
+  //     modify(hit.target, [&](Health &health) { health.value -= hit.damage; });
+  //   });
+  //   scheduler.addParallel([](Emit<Hit> emit, const Weapon &weapon) { emit(Hit{weapon.target, weapon.damage}); });
+  //
+  // The system counts as using what the listeners use, of the events they
+  // emit as well, so the scheduler keeps it apart from the systems they would
+  // race with. In a loop the listeners run on all its threads at once. Only
+  // valid while the system runs.
+  template<typename Event>
+  class Emit {
+    static_assert(std::is_same_v<Event, std::remove_cvref_t<Event>>, "Emit names the type of the event");
+
+  public:
+    Emit(const internal::EventListeners *listeners, const internal::SystemContext &context) noexcept :
+        m_listeners(listeners), m_context(&context) {}
+
+    // The parameters of every listener are made for every event.
+    void operator()(const Event &event) const {
+      if (m_listeners == nullptr) {
+        return;
+      }
+      for (const internal::Listener &listener: m_listeners->listeners) {
+        listener.call(&event, *m_context);
+      }
+    }
+
+  private:
+    // Null if the event has none.
+    const internal::EventListeners *m_listeners;
+    const internal::SystemContext *m_context;
+  };
+
+} // namespace sc::ecs
+
+namespace sc::ecs::internal {
 
   // How one kind of system parameter is declared to the scheduler and how its
   // value is made when the system runs.
@@ -840,6 +938,7 @@ namespace sc::ecs::internal {
     template<typename... Get, typename... Excluded>
     static void declare(SystemAccess &access, List<Get...>, List<Excluded...>) {
       (access.add(componentIndex<std::remove_const_t<Get>>(), !std::is_const_v<Get>), ...);
+      (access.gotten.push_back(componentIndex<std::remove_const_t<Get>>()), ...);
       // An excluded component is only looked up, never changed.
       (access.add(componentIndex<std::remove_const_t<Excluded>>(), false), ...);
     }
@@ -854,7 +953,10 @@ namespace sc::ecs::internal {
 
   template<typename... Components>
   struct SystemParam<Modify<Components...>> {
-    static void declare(SystemAccess &access) { (access.add(componentIndex<Components>(), true), ...); }
+    static void declare(SystemAccess &access) {
+      (access.add(componentIndex<Components>(), true), ...);
+      (access.modified.push_back(componentIndex<Components>()), ...);
+    }
 
     static Modify<Components...> fetch(const SystemContext &context) { return Modify<Components...>{context.world}; }
   };
@@ -889,6 +991,20 @@ namespace sc::ecs::internal {
         }
       }
       throw std::logic_error("the system \"" + context.name + "\" takes a cache the scheduler was not provided with");
+    }
+  };
+
+  template<typename Event>
+  struct SystemParam<Emit<Event>> {
+    static void declare(SystemAccess &access) { access.addEmit(&eventTag<Event>); }
+
+    static Emit<Event> fetch(const SystemContext &context) {
+      for (const EventListeners &listeners: context.events) {
+        if (listeners.tag == &eventTag<Event>) {
+          return Emit<Event>(&listeners, context);
+        }
+      }
+      return Emit<Event>(nullptr, context);
     }
   };
 
@@ -931,6 +1047,8 @@ namespace sc::ecs::internal {
   inline constexpr bool isLoopExtra<Query<Terms...>> = true;
   template<typename T, typename Key, typename Hash>
   inline constexpr bool isLoopExtra<Resources<T, Key, Hash>> = true;
+  template<typename Event>
+  inline constexpr bool isLoopExtra<Emit<Event>> = true;
 
   // The parameters of a function for Scheduler::addParallel: the entity, then
   // Change, Commands and queries, all of them optional, and then the
@@ -1060,6 +1178,7 @@ namespace sc::ecs {
   //   void hit(Query<const Target> query, Modify<Health> modify);   // changes Health of any entity, locked
   //   void reap(Query<const Lifetime> query, Commands commands);   // destroys entities, later
   //   void stream(Resources<Texture> textures);            // loads into a cache given with provide
+  //   void fight(Query<const Weapon> query, Emit<Hit> emit);   // uses what the listeners of Hit use
   //   void load(World &world);                             // may do anything, runs alone
   //
   // Two systems run at the same time if neither writes a component the other
@@ -1083,8 +1202,8 @@ namespace sc::ecs {
     //
     // A component taken by reference to non-const is written, any other one is
     // only read. Before the components, the function may take the entity and,
-    // after it, Change, Commands, Modify, queries and Resources, Modify and
-    // queries for entities other than its own:
+    // after it, Change, Commands, Modify, queries, Resources and Emit, Modify
+    // and queries for entities other than its own:
     //
     //   scheduler.addParallel([](Entity entity, Commands commands, const Health &health) { ... });
     //   scheduler.addParallel([](Query<const Health> others, const Target &target) { ... });
@@ -1134,6 +1253,24 @@ namespace sc::ecs {
       return *this;
     }
 
+    // Adds a listener of the event its first parameter takes, by value or
+    // const reference. The parameters after it are those of a system. It is
+    // called where a system emits the event with Emit, right away and on that
+    // thread, so on several threads at once for a loop, and through a const
+    // reference: a mutable lambda does not compile.
+    //
+    //   scheduler.on([](const Hit &hit, Modify<Health> modify) { ... });
+    //   scheduler.on([](const Died &died, Commands commands) { commands.destroy(died.entity); });
+    //
+    // The systems that emit the event count as using what its listeners use,
+    // so a listener with nothing but the event makes them run alone, as a
+    // system without parameters does. Listeners may be added after the
+    // systems that emit their event, not during run.
+    template<typename F>
+    Scheduler &on(F &&listener) {
+      return addListener(std::forward<F>(listener), typename internal::SystemSignature<std::decay_t<F>>::Params{});
+    }
+
     // Runs every system once. Stages with more than one system and systems
     // added with addParallel run on the thread pool, so sc::threading::init
     // must have been called before, and run must not be called from a pool
@@ -1151,7 +1288,7 @@ namespace sc::ecs {
       const size_t threads = threading::threadSlots();
       for (System &system: m_systems) {
         // One more for the threads outside the pool, see Commands::withList.
-        if (system.access.commands && system.commands.size() < threads + 1) {
+        if (system.effective.commands && system.commands.size() < threads + 1) {
           system.commands = std::vector<internal::CommandList>(threads + 1);
         }
       }
@@ -1160,7 +1297,11 @@ namespace sc::ecs {
         try {
           internal::runAll(stage, [this, &world](size_t index) {
             System &system = m_systems[index];
-            system.run({.world = world, .commands = system.commands, .caches = m_caches, .name = system.name});
+            system.run({.world = world,
+                        .commands = system.commands,
+                        .caches = m_caches,
+                        .events = m_events,
+                        .name = system.name});
           });
         } catch (...) {
           clearCommands(stage);
@@ -1190,15 +1331,28 @@ namespace sc::ecs {
     // The systems in the order they run, by index in the order they were
     // added: one stage after the other, the systems of a stage at the same
     // time.
+    //
+    // std::logic_error for a system that takes a component past Modify which
+    // it or a listener of an event it emits modifies, as addSystem's
+    // static_assert for a system alone.
     [[nodiscard]] const std::vector<std::vector<size_t>> &stages() {
       if (!m_stagesValid) {
+        for (System &system: m_systems) {
+          system.effective = effectiveAccess(system.access);
+          if (system.effective.modifiesGotten()) {
+            throw std::logic_error("the system \"" + system.name +
+                                   "\" or a listener of an event it emits modifies a component that one of them also "
+                                   "takes through a query or its loop: modify locks it and they do not");
+          }
+        }
+
         // A system runs in the stage after the last earlier one it conflicts
         // with.
         std::vector<size_t> stageOf(m_systems.size(), 0);
         size_t count = 0;
         for (size_t i = 0; i < m_systems.size(); ++i) {
           for (size_t earlier = 0; earlier < i; ++earlier) {
-            if (m_systems[i].access.conflictsWith(m_systems[earlier].access)) {
+            if (m_systems[i].effective.conflictsWith(m_systems[earlier].effective)) {
               stageOf[i] = std::max(stageOf[i], stageOf[earlier] + 1);
             }
           }
@@ -1217,12 +1371,67 @@ namespace sc::ecs {
     struct System {
       std::move_only_function<void(const internal::SystemContext &)> run;
       std::string name;
+      // From its parameters.
       internal::SystemAccess access;
+      // With what the listeners of the events it emits use, set by stages.
+      internal::SystemAccess effective;
       // What the threads recorded through Commands, one list for every pool
       // thread and one for all others; empty for a system that does not take
       // Commands.
       std::vector<internal::CommandList> commands;
     };
+
+    // What a system uses with what the listeners of its events use, and those
+    // of the events they emit. Every event once, also where they emit each
+    // other.
+    [[nodiscard]] internal::SystemAccess effectiveAccess(const internal::SystemAccess &own) const {
+      internal::SystemAccess effective = own;
+      // merge appends the events of the listeners.
+      for (size_t i = 0; i < effective.emits.size(); ++i) {
+        const void *const tag = effective.emits[i];
+        for (const internal::EventListeners &event: m_events) {
+          if (event.tag == tag) {
+            for (const internal::Listener &listener: event.listeners) {
+              effective.merge(listener.access);
+            }
+          }
+        }
+      }
+      return effective;
+    }
+
+    template<typename F, typename EventParam, typename... Params>
+    Scheduler &addListener(F &&listener, internal::List<EventParam, Params...>) {
+      using Event = std::remove_cvref_t<EventParam>;
+      static_assert(!std::is_reference_v<EventParam> || std::is_const_v<std::remove_reference_t<EventParam>>,
+                    "a listener takes its event by value or const reference");
+      static_assert(!internal::usesModifiedOtherwise<Params...>,
+                    "a component the listener modifies is not also named by its queries: modify locks it and they "
+                    "do not; read it in the function of modify");
+      internal::SystemAccess access;
+      (internal::SystemParamFor<Params>::declare(access), ...);
+      if (sizeof...(Params) == 0) {
+        access.exclusive = true;
+      }
+
+      internal::Listener made{
+          .call =
+              [function = std::decay_t<F>(std::forward<F>(listener))](const void *event,
+                                                                      const internal::SystemContext &context) {
+                function(*static_cast<const Event *>(event), internal::SystemParamFor<Params>::fetch(context)...);
+              },
+          .access = std::move(access),
+      };
+      const void *const tag = &internal::eventTag<Event>;
+      auto found = std::ranges::find(m_events, tag, &internal::EventListeners::tag);
+      if (found == m_events.end()) {
+        m_events.push_back({.tag = tag, .listeners = {}});
+        found = std::prev(m_events.end());
+      }
+      found->listeners.push_back(std::move(made));
+      m_stagesValid = false;
+      return *this;
+    }
 
     // Drops what the systems of a stage recorded through Commands.
     void clearCommands(const std::vector<size_t> &stage) noexcept {
@@ -1251,6 +1460,7 @@ namespace sc::ecs {
               },
           .name = std::move(name),
           .access = std::move(access),
+          .effective = {},
           .commands = {},
       });
       m_stagesValid = false;
@@ -1293,6 +1503,8 @@ namespace sc::ecs {
     internal::CommandApplier m_applier;
     std::vector<internal::CommandList *> m_stageLists;
     std::vector<internal::ProvidedCache> m_caches;
+    // Per type of event; Emit points into it while systems run.
+    std::vector<internal::EventListeners> m_events;
   };
 
 } // namespace sc::ecs

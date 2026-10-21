@@ -17,6 +17,7 @@ namespace {
 
   using sc::ecs::Change;
   using sc::ecs::Commands;
+  using sc::ecs::Emit;
   using sc::ecs::Entity;
   using sc::ecs::Exclude;
   using sc::ecs::Modify;
@@ -81,6 +82,15 @@ namespace {
 
   struct Material {
     ResourceHandle<Texture> albedo;
+  };
+
+  struct Hit {
+    Entity target;
+    int damage{1};
+  };
+
+  struct Died {
+    Entity entity;
   };
 
   using Stages = std::vector<std::vector<size_t>>;
@@ -165,6 +175,44 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
     scheduler.add([](Resources<Texture>) {});
     scheduler.addParallel([](Resources<Texture>, Health &) {});
     REQUIRE(scheduler.stages() == Stages{{0, 1}, {2}});
+  }
+
+  SECTION("An Emitter Uses What Its Listeners Use") {
+    scheduler.add([](Query<const Position>, Emit<Hit>) {});
+    scheduler.add([](Query<const Health>) {});
+    scheduler.add([](Query<const Position>) {});
+    scheduler.add([](Query<const Frozen>) {});
+    // Added after the system that emits the event, and through another event.
+    scheduler.on([](const Hit &, Modify<Health>, Emit<Died>) {});
+    scheduler.on([](Died, Change<Frozen>) {});
+    REQUIRE(scheduler.stages() == Stages{{0, 2}, {1, 3}});
+  }
+
+  SECTION("An Event Without Listeners Keeps Nobody Waiting") {
+    scheduler.add([](Query<const Position>, Emit<Hit>) {});
+    scheduler.add([](Query<Health>) {});
+    REQUIRE(scheduler.stages() == Stages{{0, 1}});
+  }
+
+  SECTION("A Listener With Nothing But The Event Makes Its Emitter Run Alone") {
+    scheduler.add([](Query<const Position>, Emit<Hit>) {});
+    scheduler.add([](Query<const Health>) {});
+    scheduler.on([](const Hit &) {});
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}});
+  }
+
+  SECTION("Events That Emit Each Other") {
+    scheduler.add([](Query<const Position>, Emit<Hit>) {});
+    scheduler.add([](Query<const Health>) {});
+    scheduler.on([](const Hit &, Emit<Died>) {});
+    scheduler.on([](const Died &, Emit<Hit>, Modify<Health>) {});
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}});
+  }
+
+  SECTION("A Listener Must Not Modify What Its Emitter Iterates") {
+    scheduler.addParallel([](Emit<Hit>, Health &) {}, "fight");
+    scheduler.on([](const Hit &, Modify<Health>) {});
+    REQUIRE_THROWS_AS(scheduler.stages(), std::logic_error);
   }
 
   SECTION("A System That Takes The World Or Nothing Runs Alone") {
@@ -933,6 +981,42 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     REQUIRE(gotNamed->id == 2);
     textures.collect();
     named.collect();
+  }
+
+  SECTION("Listeners Run Where The Event Is Emitted") {
+    const Entity boss = entities[0];
+    size_t moving = 0;
+    for (size_t i = 0; i < entities.size(); ++i) {
+      moving += (i % 3 != 0) ? 1 : 0;
+    }
+    // Many threads hit the same target at once.
+    scheduler.addParallel([boss](Emit<Hit> emit, const Velocity &) { emit(Hit{.target = boss, .damage = 1}); });
+    scheduler.on([](const Hit &hit, Modify<Health> modify) {
+      modify(hit.target, [&](Health &health) { health.value -= hit.damage; });
+    });
+    scheduler.run(world);
+    REQUIRE(world.get<Health>(boss).value == 100 - static_cast<int>(moving));
+  }
+
+  SECTION("Listeners Emit Events And Record Through Commands") {
+    // The system itself takes no Commands: its lists come from the listener.
+    scheduler.addParallel([](Entity entity, Emit<Hit> emit, const Velocity &) { emit(Hit{.target = entity}); });
+    scheduler.on([](const Hit &hit, Emit<Died> died) { died(Died{.entity = hit.target}); });
+    scheduler.on([](const Died &died, Commands commands) { commands.destroy(died.entity); });
+    scheduler.run(world);
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.valid(entities[i]) == (i % 3 == 0));
+    }
+  }
+
+  SECTION("An Event Without Listeners Does Nothing") {
+    std::atomic<int> ran = 0;
+    scheduler.addParallel([&](Emit<Died> emit, const Velocity &) {
+      emit(Died{});
+      ++ran;
+    });
+    scheduler.run(world);
+    REQUIRE(ran > 0);
   }
 
   SECTION("An Exception Ends The Run After Its Stage") {
