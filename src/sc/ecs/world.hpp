@@ -90,7 +90,7 @@ namespace sc::ecs::internal {
   class LoopWatcher {
   public:
 #ifndef NDEBUG
-    explicit LoopWatcher(const std::array<const ColumnBase *, Count> &columns) noexcept :
+    explicit LoopWatcher(const std::array<const std::atomic<ColumnBase *> *, Count> &columns) noexcept :
         m_columns(columns), m_watch{.columns = m_columns, .index = ~uint32_t{0}, .outer = loopWatch} {
       loopWatch = &m_watch;
     }
@@ -99,7 +99,7 @@ namespace sc::ecs::internal {
     // The loop calls its function for the entity at the index now.
     void at(uint32_t index) noexcept { m_watch.index = index; }
 #else
-    explicit LoopWatcher(const std::array<const ColumnBase *, Count> &) noexcept {}
+    explicit LoopWatcher(const std::array<const std::atomic<ColumnBase *> *, Count> &) noexcept {}
 
     void at(uint32_t) noexcept {}
 #endif
@@ -108,7 +108,7 @@ namespace sc::ecs::internal {
 
 #ifndef NDEBUG
   private:
-    std::array<const ColumnBase *, Count> m_columns;
+    std::array<const std::atomic<ColumnBase *> *, Count> m_columns;
     LoopWatch m_watch;
 #endif
   };
@@ -832,11 +832,7 @@ namespace sc::ecs {
     // of the world ever had the component then.
     template<typename Component>
     [[nodiscard]] const ColumnOf<Component> *findColumn() const {
-      const size_t index = internal::componentIndex<std::remove_const_t<Component>>();
-      const std::atomic<internal::ColumnBase *> &slot = index < internal::NEAR_COMPONENT_TYPES
-                                                            ? m_columns[index]
-                                                            : m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
-      return static_cast<const ColumnOf<Component> *>(slot.load(std::memory_order_acquire));
+      return static_cast<const ColumnOf<Component> *>(slotOf<Component>().load(std::memory_order_acquire));
     }
 
     // Calls the function with the components of every entity that has all of
@@ -846,17 +842,19 @@ namespace sc::ecs {
     //   world.each<Position, const Velocity>([](Position &pos, const Velocity &vel) { ... });
     //   world.each<const Health, Exclude<Frozen>>([](Entity entity, const Health &health) { ... });
     //
-    // The function may add and remove components of the entity it is called
-    // with and of entities it creates, as long as they are none of those the
-    // loop names; removing one the loop names from its own entity is fine for
-    // the loop, but the reference the function got goes with it. Other
-    // entities it leaves as they are, apart from what tryEmplace and erase do
-    // to them in parallelEach, see there: changes to them go through Commands.
-    // A component the loop names taken from another entity would be called
-    // destroyed if that entity comes later in its word or in a full page, and
-    // debug builds assert, see internal::assertNotLooped. An entity it creates
-    // may have the index of one that was destroyed, in a page the loop is yet
-    // to go through: with a component the loop names it would be found there.
+    // The function may add and remove any component of the entity it is
+    // called with; removing one the loop goes through is fine for the loop,
+    // but the reference the function got goes with it. On every other entity,
+    // also one it creates, it leaves the components the loop names alone,
+    // excluded ones included: no adding, removing, modify or replacing. So
+    // the loop goes through exactly the entities that had the components when
+    // it started. What other entities get or lose of these goes through
+    // Commands. A component taken from an entity later in its word or in a
+    // full page would be called destroyed, and whether the loop gets to one
+    // that was given or taken one would depend on where it lies. Debug builds
+    // assert, see internal::assertNotLooped. Other components of other
+    // entities are free to change, see parallelEach for doing it from several
+    // threads.
     template<typename... Terms, typename Function>
     void each(Function &&function) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
@@ -879,12 +877,13 @@ namespace sc::ecs {
     }
 
     // The same on the calling thread and on every pool thread that has nothing
-    // else to do. Each thread gets entities of its own, so the function may
-    // add and remove components here as well. To an entity that is not its
-    // own, which the function of another thread may have in mind as well, it
-    // gives a component with tryEmplace. Taking one away with erase is safe
-    // as far as the world goes, but not for a thread that is using the
-    // component just then: see Commands::erase of the scheduler.
+    // else to do, with the same rule for the components the loop names. Each
+    // thread gets entities of its own, so the function may add and remove
+    // components here as well. To an entity that is not its own, which the
+    // function of another thread may have in mind as well, it gives a
+    // component the loop does not name with tryEmplace. Taking one away with
+    // erase is safe as far as the world goes, but not for a thread that is
+    // using the component just then: see Commands::erase of the scheduler.
     template<typename... Terms, typename Function>
     void parallelEach(Function &&function, size_t grain = 1) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
@@ -966,6 +965,14 @@ namespace sc::ecs {
       const uint32_t area = m_nextArea++;
       slot.store(area, std::memory_order_release);
       return area;
+    }
+
+    // Where the column of a component is kept, null in it until it is made.
+    template<typename Component>
+    [[nodiscard]] const std::atomic<internal::ColumnBase *> &slotOf() const {
+      const size_t index = internal::componentIndex<std::remove_const_t<Component>>();
+      return index < internal::NEAR_COMPONENT_TYPES ? m_columns[index]
+                                                    : m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
     }
 
     // The columns of the components a loop names, as it uses them: a loop
@@ -1064,7 +1071,8 @@ namespace sc::ecs {
                      const Columns<Excluded...> &excluded, uint32_t first, uint32_t last, Function &function) const {
       static_assert(sizeof...(Get) != 0, "a loop needs a component to go through");
       [&]<size_t... G, size_t... X>(std::index_sequence<G...>, std::index_sequence<X...>) {
-        internal::LoopWatcher<sizeof...(Get)> watcher{{std::get<G>(columns)...}};
+        internal::LoopWatcher<sizeof...(Get) + sizeof...(Excluded)> watcher{
+            {&slotOf<Get>()..., &slotOf<Excluded>()...}};
         for (uint32_t place = first; place < last; ++place) {
           const uint32_t number = m_entities.pageAt(place);
           const std::tuple pages{std::get<G>(columns)->page(number)...};

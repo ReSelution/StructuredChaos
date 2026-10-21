@@ -212,8 +212,18 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   from another entity (`assertNotLooped`), also through nested loops and listeners of `Emit`. Removing the looped
   component of its own entity stays allowed: the loop is fine with it, only the function's reference is gone.
   Nothing in release builds (one run: 62 of 67 rows within the range of the runs before ±3 %, the rest in both
-  directions). Adding to another entity is not checked: the loop may or may not see it, but nothing is destroyed.
-  Changes by other threads are not caught either; for them a loop that holds the making bit would be needed.
+  directions). Changes by other threads are not caught either; for them a loop that holds the making bit would be
+  needed.
+
+  Then (2026-10-21) the rule covers adding as well, and the excluded components: on other entities, also ones it
+  creates, the function does not add, remove, modify or replace any component the loop names. A loop then goes
+  through exactly the entities that had the components when it started, without copying the masks: a copy per page
+  would only hide what is added in the same page (later pages are read when the loop gets to them), and a copy of
+  all pages at the start would cost about 512 bytes per page and column per loop. Every thread that could add to a
+  named column during the loop is in it (the function, its listeners, the other threads of a `parallelEach`) and
+  has it in its `LoopWatch`; other systems are kept apart by the scheduler. Checked in `occupy`, which every way
+  of adding goes through. The watch holds where the world keeps each column, not the column, so an excluded column
+  made only during the loop is found as well.
 - [x] **Measure:** cost of `modify` per event, and with many threads waiting on the same target (one boss, many
   hits), as a case in `tests/ecs_compare` (large world, 1M entities, each damages another by 1; Ryzen 7 5800X,
   16 threads, clang release, median of 5 runs, ns per entity):

@@ -119,7 +119,9 @@ namespace sc::ecs::internal {
   // What a loop of World on this thread goes through, and the entity whose
   // call it is in, for the assert in assertNotLooped. Only in debug builds.
   struct LoopWatch {
-    std::span<const ColumnBase *const> columns;
+    // Where the world keeps the columns the loop names, excluded ones among
+    // them: a column made only during the loop is found there as well.
+    std::span<const std::atomic<ColumnBase *> *const> columns;
     uint32_t index;
     // Of the loop the function of which runs this one, or null.
     const LoopWatch *outer;
@@ -129,19 +131,21 @@ namespace sc::ecs::internal {
   inline thread_local const LoopWatch *loopWatch = nullptr;
 #endif
 
-  // Asserts that no loop on this thread goes through the column, unless it
-  // is in the call for the index: the function of a loop does not touch the
-  // components the loop goes through on other entities. A loop reads the
-  // mask of a word before it goes through it, and that of a full page not at
-  // all, so one the function takes from an entity after its own would be
-  // called destroyed; and in parallelEach another thread may be writing the
-  // one modify or emplaceOrReplace changes. Nothing in release builds.
+  // Asserts that no loop on this thread names the column, unless it is in
+  // the call for the index: the function of a loop does not touch the
+  // components the loop names on other entities, excluded ones included. A
+  // loop reads the mask of a word before it goes through it, and that of a
+  // full page not at all, so one the function takes from an entity after its
+  // own would be called destroyed; in parallelEach another thread may be
+  // writing the one modify or emplaceOrReplace changes; and whether the loop
+  // gets to an entity that one was given to or taken from would depend on
+  // where it lies. Nothing in release builds.
   inline void assertNotLooped([[maybe_unused]] const ColumnBase *column, [[maybe_unused]] uint32_t index) noexcept {
 #ifndef NDEBUG
     for (const LoopWatch *watch = loopWatch; watch != nullptr; watch = watch->outer) {
-      for (const ColumnBase *const looped: watch->columns) {
-        assert((looped != column || index == watch->index) &&
-               "sc::ecs: the function of a loop removed or modified a component the loop goes through on another "
+      for (const std::atomic<ColumnBase *> *const looped: watch->columns) {
+        assert((looped->load(std::memory_order_relaxed) != column || index == watch->index) &&
+               "sc::ecs: the function of a loop added, removed or modified a component the loop names on another "
                "entity; record that with Commands");
       }
     }
@@ -1011,6 +1015,11 @@ namespace sc::ecs::internal {
     // there may use it: vacate marks it as gone before it looks at the count,
     // which it finds raised then.
     void occupy(Header &header, uint32_t number, uint32_t slot, uint32_t count) {
+#ifndef NDEBUG
+      for (uint32_t i = 0; i < count; ++i) {
+        assertNotLooped(this, (number << PAGE_BITS) + slot + i);
+      }
+#endif
       header.count.fetch_add(count, std::memory_order_seq_cst);
       if (header.started.load(std::memory_order_seq_cst)) [[likely]] {
         return;
