@@ -22,12 +22,12 @@ using namespace compare;
 
 namespace {
 
-  using sc::ecs::Change;
   using sc::ecs::Commands;
+  using sc::ecs::Edit;
   using sc::ecs::Entity;
-  using sc::ecs::Modify;
   using sc::ecs::Query;
   using sc::ecs::Scheduler;
+  using sc::ecs::Spawn;
 
   // The default, which each column chooses its pages with.
   constexpr sc::ecs::Pages PAGES = sc::ecs::Pages::Auto;
@@ -158,14 +158,14 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     // One system, whose threads create their entities in pages of their own
     // and give them components right away.
     Scheduler spawner;
-    spawner.add([workers](Change<Position, Velocity> change) {
+    spawner.add([workers](Edit<Position, Velocity> edit, Spawn spawn) {
       sc::threading::parallelFor(workers, 1, [&](size_t first, size_t last) {
         for (size_t worker = first; worker < last; ++worker) {
           const Slice part = slice(ENTITY_COUNT, worker, workers);
           for (size_t i = part.first; i < part.last; ++i) {
-            const Entity entity = change.create();
-            change.emplace<Position>(entity, static_cast<float>(i), 1.0f);
-            change.emplace<Velocity>(entity, 1.0f, 2.0f);
+            const Entity entity = spawn.create();
+            edit.emplace<Position>(entity, static_cast<float>(i), 1.0f);
+            edit.emplace<Velocity>(entity, 1.0f, 2.0f);
           }
         }
       });
@@ -247,10 +247,9 @@ TEST_CASE(SMALL_WORLD, "[ecs_compare][!benchmark]") {
     };
 
     Scheduler adder;
-    adder.addParallel(
-        [](Entity entity, Change<Health> change, const Position &) { change.emplace<Health>(entity, 50.0f); });
+    adder.addParallel([](Entity entity, Edit<Health> edit, const Position &) { edit.emplace<Health>(entity, 50.0f); });
     Scheduler remover;
-    remover.addParallel([](Entity entity, Change<Health> change, const Position &) { change.erase<Health>(entity); });
+    remover.addParallel([](Entity entity, Edit<Health> edit, const Position &) { edit.erase<Health>(entity); });
     adder.run(world.world);
     REQUIRE(world.world.column<Health>().pages() == world.world.column<Position>().pages());
     remover.run(world.world);
@@ -417,13 +416,13 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     const auto damage = [](Health &health) { health.value -= 1.0f; };
 
     Scheduler random;
-    random.addParallel([&](Modify<Health> modify, const Target &target) { modify(target.entity, damage); });
+    random.addParallel([&](Edit<Health> edit, const Target &target) { edit.modify(target.entity, damage); });
     Scheduler few;
-    few.addParallel([&](Entity entity, Modify<Health> modify, const Target &) {
-      modify(world.entities[sc::ecs::indexOf(entity) % FEW], damage);
+    few.addParallel([&](Entity entity, Edit<Health> edit, const Target &) {
+      edit.modify(world.entities[sc::ecs::indexOf(entity) % FEW], damage);
     });
     Scheduler one;
-    one.addParallel([&](Modify<Health> modify, const Target &) { modify(boss, damage); });
+    one.addParallel([&](Edit<Health> edit, const Target &) { edit.modify(boss, damage); });
     std::atomic<uint32_t> counter = 0;
     Scheduler atomic;
     atomic.addParallel([&](const Target &) { counter.fetch_add(1, std::memory_order_relaxed); });

@@ -98,6 +98,9 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   chunk, also with no helper thread). The scheduler keeps other systems away, not the other threads of the same
   loop; reading with `get<const T>` stays allowed. Writing another entity's component there is for `modify`.
   `World::column<T>().get` gets past it.
+  Dropped on 2026-10-22, with `internal::mayGet`, `inParallelLoop` and `ParallelLoop`: writing another entity's
+  component through `get` or `tryGet` in a parallel loop can be what the caller wants, and keeping the threads apart
+  is the caller's to know; `Edit::modify` takes turns where they may meet.
 - [x] **`Commands::modify(entity, function)`:** the function is moved into the thread's `CommandList` and called after
   the stage, in the order recorded with the thread's `emplace`/`erase`, without the bit (nothing runs then); does not
   count as writing the component, so readers of it run in the same stage and see the old value. Same benchmark as

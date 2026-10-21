@@ -61,6 +61,8 @@ namespace sc::ecs {
     Made,
     // There was one, and it got a new value (emplaceOrReplace).
     Replaced,
+    // There was one, and the function changed it (emplaceOrModify).
+    Modified,
     // There was one, or another thread was first, and it was left as it is
     // (tryEmplace).
     There,
@@ -477,6 +479,34 @@ namespace sc::ecs::internal {
     // memory under the assignment for the bit, see heldHas.
     template<typename... Args>
     Emplaced emplaceOrReplace(uint32_t index, Args &&...args) {
+      const bool made = emplaceOr(
+          index,
+          [&](T *value) {
+            if constexpr (HAS_VALUE) {
+              *value = T{std::forward<Args>(args)...};
+            }
+          },
+          std::forward<Args>(args)...);
+      return made ? Emplaced::Made : Emplaced::Replaced;
+    }
+
+    // The same, but if there is a component, the function is called with it,
+    // as modify does: Emplaced::Made or Emplaced::Modified. Of threads that
+    // do this for the same index at the same time, one makes the component
+    // and the others change it, each after the one before.
+    template<typename Function, typename... Args>
+    Emplaced emplaceOrModify(uint32_t index, Function &&function, Args &&...args) {
+      static_assert(HAS_VALUE, "a component without members has no value to modify");
+      static_assert(std::is_invocable_v<Function &, T &>, "the function takes the component by reference");
+      const bool made = emplaceOr(index, [&](T *value) { function(*value); }, std::forward<Args>(args)...);
+      return made ? Emplaced::Made : Emplaced::Modified;
+    }
+
+  private:
+    // emplaceOrReplace and emplaceOrModify: true if the component was made,
+    // false if there was one and there was called with it.
+    template<typename There, typename... Args>
+    bool emplaceOr(uint32_t index, const There &there, Args &&...args) {
       assert(index < INDEX_LIMIT);
       const uint32_t number = index >> PAGE_BITS;
       Header &header = makeHeader(number);
@@ -487,10 +517,13 @@ namespace sc::ecs::internal {
       bool made = false;
       try {
         if (heldHas(header, slot)) {
-          // Replacing is changing, adding is not checked.
+          // Changing it, unlike adding, is checked here.
           assertNotLooped(this, index);
           if constexpr (HAS_VALUE) {
-            *valueAt(index) = T{std::forward<Args>(args)...};
+            there(valueAt(index));
+          } else {
+            // No values, and so no address for one.
+            there(nullptr);
           }
         } else {
           occupy(header, number, slot, 1);
@@ -511,9 +544,10 @@ namespace sc::ecs::internal {
         throw;
       }
       making.fetch_and(~bit, std::memory_order_release);
-      return made ? Emplaced::Made : Emplaced::Replaced;
+      return made;
     }
 
+  public:
     // Calls the function with the component at the index while it holds the
     // making bit. Another thread that modifies the same index waits, as do
     // emplaceOrReplace and erase of a component that DESTROYS, so of two
@@ -657,6 +691,37 @@ namespace sc::ecs::internal {
       } else if ((header.mask[slot / 64].fetch_and(~bit, std::memory_order_seq_cst) & bit) == 0) {
         // seq_cst for heldHas: no bit taken here.
         return false;
+      }
+      forsake(header, number, 1);
+      return true;
+    }
+
+    // The same without the making bit, also for a component that DESTROYS:
+    // no other thread may go for the index at the same time, as for
+    // LocalEdit. The mask and the count stay atomic, as other threads change
+    // other indices of the page. A component that owns a unique_ptr, 1M
+    // entities one after the other, ns per erase: 7.7 with the bit, 4.2
+    // without.
+    bool eraseWithoutBit(uint32_t index) noexcept {
+      if (index >= INDEX_LIMIT) {
+        return false;
+      }
+      const uint32_t number = index >> PAGE_BITS;
+      Header *const found = findHeader(number);
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      if (found == nullptr || !has(*found, slot)) {
+        return false;
+      }
+      assertNotLooped(this, index);
+      Header &header = *found;
+      const uint64_t bit = uint64_t{1} << (slot % 64);
+      // seq_cst for heldHas, as erase without the bit.
+      if ((header.mask[slot / 64].fetch_and(~bit, std::memory_order_seq_cst) & bit) == 0) {
+        return false;
+      }
+      if constexpr (DESTROYS) {
+        // Before the page may give its memory back.
+        std::destroy_at(valueAt(index));
       }
       forsake(header, number, 1);
       return true;

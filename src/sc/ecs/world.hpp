@@ -34,33 +34,6 @@ namespace sc::ecs {
 namespace sc::ecs::internal {
 
 #ifndef NDEBUG
-  // Set while a thread runs the function of a parallel loop, for the assert
-  // in get: what get hands out for writing, another thread of the same loop
-  // may be writing at the same time, as the scheduler keeps only other
-  // systems away. Only in debug builds.
-  inline thread_local bool inParallelLoop = false;
-#endif
-
-  // Has inParallelLoop set for as long as it exists, and then as it was
-  // before. Nothing in release builds.
-  class ParallelLoop {
-  public:
-#ifndef NDEBUG
-    ParallelLoop() noexcept : m_before(inParallelLoop) { inParallelLoop = true; }
-    ~ParallelLoop() { inParallelLoop = m_before; }
-#else
-    ParallelLoop() noexcept = default;
-#endif
-    ParallelLoop(const ParallelLoop &) = delete;
-    ParallelLoop &operator=(const ParallelLoop &) = delete;
-
-#ifndef NDEBUG
-  private:
-    bool m_before;
-#endif
-  };
-
-#ifndef NDEBUG
   // Set while a thread runs the function of World::modify.
   inline thread_local bool inModify = false;
 #endif
@@ -112,17 +85,6 @@ namespace sc::ecs::internal {
     LoopWatch m_watch;
 #endif
   };
-
-  // Whether get may hand out a component of this type here: for reading
-  // always, for writing not in a parallel loop.
-  template<typename Component>
-  [[nodiscard]] bool mayGet() noexcept {
-#ifndef NDEBUG
-    return std::is_const_v<Component> || !inParallelLoop;
-#else
-    return true;
-#endif
-  }
 
   // Sorts items by the page of their entity, keeping their order, so that
   // every page can go to one thread: no other thread touches it in any
@@ -747,6 +709,24 @@ namespace sc::ecs {
       return column<Component>().emplaceOrReplace(indexOf(entity), std::forward<Args>(args)...);
     }
 
+    // Calls the function with the component of the entity, as modify does,
+    // or gives the entity one made from the arguments if it has none:
+    // Emplaced::Made or Emplaced::Modified. One step with the component
+    // locked: of threads that do this for the same entity at the same time,
+    // one makes it and the others change it.
+    //
+    //   world.emplaceOrModify<Damage>(target, [&](Damage &damage) { damage.value += hit; }, hit);
+    //
+    // The function must not call modify, which is asserted.
+    template<typename Component, typename Function, typename... Args>
+    Emplaced emplaceOrModify(Entity entity, Function &&function, Args &&...args) {
+      static_assert(!std::is_const_v<Component>, "emplaceOrModify is for writing");
+      assert(valid(entity));
+      [[maybe_unused]] const internal::Modifying modifying;
+      return column<Component>().emplaceOrModify(indexOf(entity), std::forward<Function>(function),
+                                                 std::forward<Args>(args)...);
+    }
+
     // Gives the entity the component unless it has it: Emplaced::Made, or
     // Emplaced::There if it had it or another thread was first. Several
     // threads may do this for the same entity at the same time, also next to
@@ -796,13 +776,15 @@ namespace sc::ecs {
     }
 
     // The entity must exist and have the component. In the function of a
-    // parallel loop only for reading, get<const Component>: another thread of
-    // the loop may write the same component.
+    // parallel loop, writing a component of another entity through it is the
+    // caller's to keep apart from the other threads of the loop, which may be
+    // at the same entity; modify of Edit takes turns with them.
+    // TODO: no static_assert for a component without members, as tryGet has:
+    // Column::get forms its address from the null values of such a column,
+    // which UBSan reports as a null pointer with an offset.
     template<typename Component>
     [[nodiscard]] Component &get(Entity entity) {
       assert(valid(entity));
-      assert(internal::mayGet<Component>() &&
-             "sc::ecs: get for writing in a parallel loop, where another thread of it may write the same component");
       return column<Component>().get(indexOf(entity));
     }
 
@@ -812,6 +794,23 @@ namespace sc::ecs {
       const ColumnOf<Component> *const found = findColumn<Component>();
       assert(found != nullptr);
       return found->get(indexOf(entity));
+    }
+
+    // The component of the entity, or null if it does not have one, also for
+    // an entity that does not exist (any more): get checked first, as EnTT's
+    // try_get. As get in a parallel loop.
+    template<typename Component>
+    [[nodiscard]] Component *tryGet(Entity entity) {
+      static_assert(ColumnOf<Component>::HAS_VALUE,
+                    "a component without members has no value to get; ask with contains");
+      return foundIn(findColumn<Component>(), entity);
+    }
+
+    template<typename Component>
+    [[nodiscard]] const std::remove_const_t<Component> *tryGet(Entity entity) const {
+      static_assert(ColumnOf<Component>::HAS_VALUE,
+                    "a component without members has no value to get; ask with contains");
+      return foundIn(findColumn<Component>(), entity);
     }
 
     // The column of a component, which is made on first use.
@@ -967,6 +966,17 @@ namespace sc::ecs {
       return area;
     }
 
+    // The component of the entity in a column that may be null, or null; in
+    // the order of contains.
+    template<typename Column>
+    [[nodiscard]] auto *foundIn(Column *column, Entity entity) const {
+      using Value = std::remove_reference_t<decltype(column->get(0))>;
+      if (column == nullptr || !column->contains(indexOf(entity)) || !valid(entity)) {
+        return static_cast<Value *>(nullptr);
+      }
+      return &column->get(indexOf(entity));
+    }
+
     // Where the column of a component is kept, null in it until it is made.
     template<typename Component>
     [[nodiscard]] const std::atomic<internal::ColumnBase *> &slotOf() const {
@@ -1010,10 +1020,6 @@ namespace sc::ecs {
       const size_t helpers =
           countUpTo(columns, pages, threading::threadSlots() * ENTITIES_PER_THREAD) / ENTITIES_PER_THREAD;
       threading::parallelFor(pages, grain, helpers, [&](size_t first, size_t last) {
-        // Also on the calling thread, and with no helper at all: whether
-        // another thread takes part depends on the count, the mistake does
-        // not.
-        [[maybe_unused]] const internal::ParallelLoop loop;
         eachInPages(get, without, columns, excluded, static_cast<uint32_t>(first), static_cast<uint32_t>(last),
                     function);
       });

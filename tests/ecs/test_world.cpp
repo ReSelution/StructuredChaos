@@ -2,6 +2,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -945,6 +946,69 @@ TEST_CASE("World Components", "[ecs][world]") {
     REQUIRE(usedPages(world.column<Named>()) == 0);
   }
 
+  SECTION("Threads Make The Same And Other Columns At The Same Time") {
+    // Each thread makes all of them, in its own order: every one is made
+    // once, and every thread gets that one.
+    constexpr size_t chunks = 16;
+    std::vector<std::array<const void *, 4>> got(chunks);
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        for (size_t k = 0; k < 4; ++k) {
+          switch ((chunk + k) % 4) {
+            case 0:
+              got[chunk][0] = &world.column<Position>();
+              break;
+            case 1:
+              got[chunk][1] = &world.column<Velocity>();
+              break;
+            case 2:
+              got[chunk][2] = &world.column<Named>();
+              break;
+            default:
+              got[chunk][3] = &world.column<Tag>();
+              break;
+          }
+        }
+      }
+    });
+    for (const auto &each: got) {
+      REQUIRE(each == got.front());
+    }
+    REQUIRE(got.front()[0] == world.findColumn<Position>());
+    REQUIRE(got.front()[3] == world.findColumn<Tag>());
+    // Every one is in the list destroy goes through once.
+    const Entity entity = world.create();
+    world.emplace<Position>(entity);
+    world.emplace<Tag>(entity);
+    world.destroy(entity);
+    REQUIRE_FALSE(world.contains<Position>(entity));
+  }
+
+  SECTION("Threads Add Or Modify The Same Components Without Losing A Change") {
+    // None has the component at first: one thread makes it, the others add.
+    std::vector<Entity> targets(8);
+    for (Entity &target: targets) {
+      target = world.create();
+    }
+    constexpr size_t chunks = 16;
+    constexpr int rounds = 2000;
+    std::atomic<size_t> made = 0;
+    sc::threading::parallelFor(chunks, 1, [&](size_t first, size_t last) {
+      for (size_t chunk = first; chunk < last; ++chunk) {
+        for (int round = 0; round < rounds; ++round) {
+          for (const Entity target: targets) {
+            made += world.emplaceOrModify<Position>(
+                        target, [](Position &position) { position.x += 1.0f; }, 1.0f) == Emplaced::Made;
+          }
+        }
+      }
+    });
+    REQUIRE(made == targets.size());
+    for (const Entity target: targets) {
+      REQUIRE(world.get<Position>(target).x == static_cast<float>(chunks * rounds));
+    }
+  }
+
   SECTION("Threads Add The First And Remove The Last Component Of A Page") {
     // So few that the page gets its memory and gives it back all the time.
     constexpr size_t chunks = 8;
@@ -1139,6 +1203,53 @@ TEST_CASE("World Components", "[ecs][world]") {
     REQUIRE(single.parallelDestroy(std::span<const Entity>{page}) == page.size());
     REQUIRE(single.alive() == 0);
     REQUIRE(single.column<Position>().pages() == single.column<Position>().spares());
+  }
+
+  SECTION("A Component Is Looked Up Without Knowing Whether It Is There") {
+    const Entity entity = world.create();
+    const Entity other = world.create();
+    // No column yet.
+    REQUIRE(world.tryGet<Position>(entity) == nullptr);
+    world.emplace<Position>(entity, 1.0f, 2.0f);
+    Position *const found = world.tryGet<Position>(entity);
+    REQUIRE(found == &world.get<Position>(entity));
+    found->x = 3.0f;
+    REQUIRE(world.get<Position>(entity).x == 3.0f);
+    // A column, but not for this entity.
+    REQUIRE(world.tryGet<Position>(other) == nullptr);
+    REQUIRE(world.tryGet<const Position>(entity)->y == 2.0f);
+    const World &read = world;
+    REQUIRE(read.tryGet<Position>(entity) == found);
+    REQUIRE(read.tryGet<Velocity>(entity) == nullptr);
+
+    // A destroyed entity has none, also once another one has its index and
+    // the component.
+    world.destroy(entity);
+    REQUIRE(world.tryGet<Position>(entity) == nullptr);
+    const Entity next = world.create();
+    REQUIRE(sc::ecs::indexOf(next) == sc::ecs::indexOf(entity));
+    world.emplace<Position>(next);
+    REQUIRE(world.tryGet<Position>(entity) == nullptr);
+    REQUIRE(world.tryGet<Position>(next) != nullptr);
+  }
+
+  SECTION("A Component Is Added Or Modified") {
+    const Entity entity = world.create();
+    const auto grow = [](Position &position) { position.x += 1.0f; };
+    REQUIRE(world.emplaceOrModify<Position>(entity, grow, 5.0f, 2.0f) == Emplaced::Made);
+    // Made from the arguments, without the function.
+    REQUIRE(world.get<Position>(entity).x == 5.0f);
+    REQUIRE(world.emplaceOrModify<Position>(entity, grow, 9.0f) == Emplaced::Modified);
+    REQUIRE(world.get<Position>(entity).x == 6.0f);
+    REQUIRE(world.get<Position>(entity).y == 2.0f);
+    REQUIRE(world.column<Position>().page(0).count == 1);
+
+    // A function that throws leaves the component as the function left it,
+    // and the next one gets the bit.
+    REQUIRE_THROWS_AS(world.emplaceOrModify<Position>(entity, [](Position &) { throw std::runtime_error("no"); }),
+                      std::runtime_error);
+    REQUIRE(world.emplaceOrModify<Position>(entity, grow) == Emplaced::Modified);
+    REQUIRE(world.get<Position>(entity).x == 7.0f);
   }
 
   SECTION("A Component Is Added Or Replaced") {
@@ -1565,26 +1676,6 @@ TEST_CASE("World Loops", "[ecs][world][threading]") {
     });
     REQUIRE(alphas == (entities.size() + 1) / 2);
   }
-
-#ifndef NDEBUG
-  SECTION("A Parallel Loop Gets Components Of Other Entities Only For Reading") {
-    using sc::ecs::internal::mayGet;
-    // What the assert in get asks.
-    std::atomic<size_t> writable = 0;
-    std::atomic<size_t> readable = 0;
-    world.parallelEach<const Position>([&](const Position &) {
-      writable += mayGet<Velocity>();
-      readable += mayGet<const Velocity>();
-    });
-    REQUIRE(writable == 0);
-    REQUIRE(readable == entities.size());
-    // Outside of it, and in a loop of one thread, both.
-    REQUIRE(mayGet<Velocity>());
-    size_t serial = 0;
-    world.each<const Position>([&](const Position &) { serial += mayGet<Velocity>(); });
-    REQUIRE(serial == entities.size());
-  }
-#endif
 }
 
 TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Before", "[ecs][world][threading]") {

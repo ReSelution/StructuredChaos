@@ -420,7 +420,7 @@ namespace sc::ecs::internal {
   template<typename F>
   struct SystemSignature;
 
-  // The component a function for Modify takes: its only parameter.
+  // The component a function for modify takes: its only parameter.
   template<typename Params>
   struct OnlyParam {
     static_assert(sizeof(Params) == 0, "the function takes the component, and nothing else");
@@ -467,16 +467,29 @@ namespace sc::ecs {
     }
 
     // The component of any entity that exists and has it, named the way the
-    // query names it. In the function of a parallel loop only a const one:
-    // the scheduler keeps other systems from writing it, but not the other
-    // threads of the same loop.
+    // query names it. The scheduler keeps other systems from writing it, but
+    // not the other threads of the same parallel loop: see World::get.
+    // TODO: no static_assert for a component without members, as tryGet has:
+    // Column::get forms its address from the null values of such a column.
     template<typename Component>
       requires named<Component>
     [[nodiscard]] Component &get(Entity entity) const {
       assert(m_world->valid(entity));
-      assert(internal::mayGet<Component>() &&
-             "sc::ecs: get for writing in a parallel loop, where another thread of it may write the same component");
       return std::get<World::ColumnOf<Component> *>(m_columns)->get(indexOf(entity));
+    }
+
+    // The same, or null if the entity does not have it or does not exist
+    // (any more), see World::tryGet.
+    template<typename Component>
+      requires named<Component>
+    [[nodiscard]] Component *tryGet(Entity entity) const {
+      static_assert(World::ColumnOf<Component>::HAS_VALUE,
+                    "a component without members has no value to get; ask with contains");
+      auto *const column = std::get<World::ColumnOf<Component> *>(m_columns);
+      if (!column->contains(indexOf(entity)) || !m_world->valid(entity)) {
+        return nullptr;
+      }
+      return &column->get(indexOf(entity));
     }
 
     template<typename Component>
@@ -498,33 +511,18 @@ namespace sc::ecs {
     decltype(columnsOf(std::declval<World &>(), typename Lists::GetList{})) m_columns;
   };
 
-  // Lets a system add and remove the components it names, right away:
+  // Lets a system make entities, right away and from any thread, also from
+  // the function of a parallel loop:
   //
-  //   scheduler.addParallel([](Entity entity, Change<Frozen> change, const Health &health) {
-  //     if (health.value < 10.0f) {
-  //       change.emplace<Frozen>(entity);
-  //     }
-  //   });
+  //   scheduler.addParallel([](Spawn spawn, const Spawner &spawner) { ... spawn.create<Bullet>() ... });
   //
-  // To the scheduler this is writing the components, so no other system uses
-  // them at the same time. Within the system:
-  //  - a loop must not change the components it goes through;
-  //  - the function of a parallel loop uses emplace only for the entity it is
-  //    called with and for entities it made with create, which no other
-  //    thread knows of. Any other entity it gives a component with
-  //    tryEmplace, as several threads may be doing at the same time, and
-  //    takes it away with Commands::erase: erase would take it away from
-  //    under a thread that is using it.
-  template<typename... Components>
-  class Change {
-    template<typename Component>
-    static constexpr bool named = (std::same_as<Component, Components> || ...);
-
+  // An entity without components touches nothing the scheduler knows of, so
+  // Spawn keeps no system waiting. To give it components, Edit them.
+  class Spawn {
   public:
-    explicit Change(World &world) : m_world(&world) {}
+    explicit Spawn(World &world) : m_world(&world) {}
 
-    // An entity to give the named components to. Safe to call from the
-    // function of a parallel loop, like World::create.
+    // See World::create.
     [[nodiscard]] Entity create() const { return m_world->create(); }
 
     // The same in the area of a set of components, see World::create: an
@@ -535,6 +533,75 @@ namespace sc::ecs {
       return m_world->template create<Set...>();
     }
 
+  private:
+    World *m_world;
+  };
+
+  // Lets a system add, remove and change the components it names, on any
+  // entity, right away and from several threads for the same one:
+  //
+  //   scheduler.addParallel([](Edit<Health, Frozen> edit, const Target &target) {
+  //     edit.modify(target.entity, [](Health &health) { health.value -= 10; });
+  //     edit.emplace<Frozen>(target.entity);
+  //   });
+  //
+  // To the scheduler this is writing the components, so no other system uses
+  // them at the same time. Within the system, tryEmplace and the ways of
+  // changing a component hold its making bit, so threads that go for the
+  // same entity take turns, and erase waits for them; nothing else takes the
+  // bit, so nothing else may use the components: no query of the system
+  // names them, not even for reading, which is checked when the system is
+  // added. The loop of addParallel may go through them, as the function
+  // changes them only on its own entity, see World::each; debug builds
+  // assert that. To read such a component of another entity, read it in the
+  // function of modify.
+  //
+  // emplace takes no bit and needs no other thread to go for the entity's
+  // component, as World::emplace: in a parallel loop, where each thread has
+  // entities of its own, for its own entity and for the ones it creates, as
+  // long as no thread gives the component to other entities with
+  // tryEmplace. Where one does, tryEmplace for all of them.
+  //
+  // Edit or Commands: where few threads hit the same entity, Edit, which
+  // runs right away where the threads are; where many hit few, Commands,
+  // which does not touch the entity before the stage is over and applies on
+  // several threads, a page on each. Every modify of a thread reaches for the
+  // cache line of the lock bit, and every one that takes it writes it twice;
+  // with many threads on one entity the line goes from core to core for each
+  // of them, whether the bit is free or not. ecs_compare, 1M entities
+  // damaging another one, all threads, ns per hit, modify against
+  // Commands::modify: random target 1.4 and 3.6, one of 1 000 targets 14.6
+  // and 3.2, the same target 15.6 and 3.4.
+  //
+  // LocalEdit has the same functions without the bit, for systems whose
+  // threads never go for the same entity, which is the programmer's to know:
+  // on one thread, or in a parallel loop that changes only the entity of the
+  // call and the ones it creates. As Edit, not next to a query of the same
+  // components. 1M entities each taking 1 off the
+  // Health of a random other one, on one thread, ns per hit: Edit::modify
+  // 6.4, LocalEdit::modify 2.2, Query::get and writing 1.1 (it does not look
+  // whether the entity has one).
+  enum class Locking : uint8_t {
+    // Takes the making bit, see Edit.
+    Bit,
+    // Takes none, see LocalEdit.
+    None,
+  };
+
+  template<Locking LOCKING, typename... Components>
+  class BasicEdit {
+    static_assert((!std::is_const_v<Components> && ...), "Edit is for writing; a const component is read with Query");
+
+    static constexpr bool LOCKED = LOCKING == Locking::Bit;
+
+    template<typename Component>
+    static constexpr bool named = (std::same_as<Component, Components> || ...);
+
+  public:
+    // Makes the columns that are not there yet. In a system they are there:
+    // Scheduler::run makes them before the first system.
+    explicit BasicEdit(World &world) : m_world(&world), m_columns{&world.template column<Components>()...} {}
+
     // An entity with named components, right away, in the area of their set.
     template<typename First, typename... Rest>
       requires(named<First> && (named<Rest> && ...))
@@ -542,90 +609,170 @@ namespace sc::ecs {
       return m_world->create(first, rest...);
     }
 
+    // The entity must not have the component yet, and no other thread may go
+    // for it, see above. Always Emplaced::Made.
     template<typename Component, typename... Args>
       requires named<Component>
     Emplaced emplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
-      return m_world->template emplace<Component>(entity, std::forward<Args>(args)...);
+      return columnFor<Component>(entity).emplace(indexOf(entity), std::forward<Args>(args)...);
     }
 
-    // See World::tryEmplace. Not [[nodiscard]], as World::tryEmplace and
+    // Gives the entity the component unless it has it: Emplaced::Made, or
+    // Emplaced::There if it had it or another thread was first, see
+    // World::tryEmplace. Not [[nodiscard]], as World::tryEmplace and
     // World::erase are not: whether this thread was first is often of no
     // interest.
     template<typename Component, typename... Args>
       requires named<Component>
     Emplaced tryEmplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
-      return m_world->template tryEmplace<Component>(entity, std::forward<Args>(args)...);
+      World::ColumnOf<Component> &column = columnFor<Component>(entity);
+      if constexpr (LOCKED) {
+        return column.tryEmplace(indexOf(entity), std::forward<Args>(args)...);
+      } else {
+        if (column.contains(indexOf(entity))) {
+          return Emplaced::There;
+        }
+        return column.emplace(indexOf(entity), std::forward<Args>(args)...);
+      }
+    }
+
+    // See World::emplaceOrReplace.
+    template<typename Component, typename... Args>
+      requires named<Component>
+    Emplaced emplaceOrReplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
+      World::ColumnOf<Component> &column = columnFor<Component>(entity);
+      if constexpr (LOCKED) {
+        return column.emplaceOrReplace(indexOf(entity), std::forward<Args>(args)...);
+      } else {
+        if (!column.contains(indexOf(entity))) {
+          return column.emplace(indexOf(entity), std::forward<Args>(args)...);
+        }
+        if constexpr (!std::is_empty_v<Component>) {
+          changed(column, entity) = Component{std::forward<Args>(args)...};
+        }
+        return Emplaced::Replaced;
+      }
+    }
+
+    // See World::modify. The component is the one the function takes, by
+    // reference.
+    template<typename Function>
+    bool modify(Entity entity, Function &&function) const { // NOLINT(modernize-use-nodiscard)
+      using Component = internal::ModifiedBy<std::decay_t<Function>>;
+      static_assert(named<Component>, "the function takes a component the Edit names");
+      World::ColumnOf<Component> &column = columnFor<Component>(entity);
+      if constexpr (LOCKED) {
+        [[maybe_unused]] const internal::Modifying modifying;
+        return column.modify(indexOf(entity), std::forward<Function>(function));
+      } else {
+        if (!column.contains(indexOf(entity))) {
+          return false;
+        }
+        function(changed(column, entity));
+        return true;
+      }
+    }
+
+    // See World::emplaceOrModify. The component is the one the function
+    // takes, by reference; it is made from the arguments if the entity has
+    // none.
+    template<typename Function, typename... Args>
+    Emplaced emplaceOrModify(Entity entity, Function &&function, // NOLINT(modernize-use-nodiscard)
+                             Args &&...args) const {
+      using Component = internal::ModifiedBy<std::decay_t<Function>>;
+      static_assert(named<Component>, "the function takes a component the Edit names");
+      World::ColumnOf<Component> &column = columnFor<Component>(entity);
+      if constexpr (LOCKED) {
+        [[maybe_unused]] const internal::Modifying modifying;
+        return column.emplaceOrModify(indexOf(entity), std::forward<Function>(function), std::forward<Args>(args)...);
+      } else {
+        if (!column.contains(indexOf(entity))) {
+          return column.emplace(indexOf(entity), std::forward<Args>(args)...);
+        }
+        function(changed(column, entity));
+        return Emplaced::Modified;
+      }
     }
 
     template<typename Component>
       requires named<Component>
     bool erase(Entity entity) const { // NOLINT(modernize-use-nodiscard)
-      return m_world->template erase<Component>(entity);
+      World::ColumnOf<Component> &column = columnFor<Component>(entity);
+      if constexpr (LOCKED) {
+        // Waits for the bit of a component that DESTROYS, see Column::erase.
+        return column.erase(indexOf(entity));
+      } else {
+        return column.eraseWithoutBit(indexOf(entity));
+      }
     }
 
+    // The component of the entity, without a look whether it has one, see
+    // World::get; a const one only to read. Only LocalEdit: through Edit it
+    // would get past the bit that modify of other threads takes.
+    template<typename Component>
+      requires(named<std::remove_const_t<Component>> && !LOCKED)
+    [[nodiscard]] Component &get(Entity entity) const {
+      static_assert(World::ColumnOf<Component>::HAS_VALUE,
+                    "a component without members has no value to get; ask with contains");
+      return columnFor<std::remove_const_t<Component>>(entity).get(indexOf(entity));
+    }
+
+    // The same, or null if the entity does not have it or does not exist
+    // (any more), see World::tryGet.
+    template<typename Component>
+      requires(named<std::remove_const_t<Component>> && !LOCKED)
+    [[nodiscard]] Component *tryGet(Entity entity) const {
+      static_assert(World::ColumnOf<Component>::HAS_VALUE,
+                    "a component without members has no value to get; ask with contains");
+      auto *const column = std::get<World::ColumnOf<std::remove_const_t<Component>> *>(m_columns);
+      if (!column->contains(indexOf(entity)) || !m_world->valid(entity)) {
+        return nullptr;
+      }
+      return &column->get(indexOf(entity));
+    }
+
+    // Any entity may be asked for, as World::contains.
     template<typename Component>
       requires named<Component>
     [[nodiscard]] bool contains(Entity entity) const {
-      return m_world->template contains<Component>(entity);
+      return std::get<World::ColumnOf<Component> *>(m_columns)->contains(indexOf(entity)) && m_world->valid(entity);
     }
 
   private:
-    World *m_world;
-  };
-
-  // Lets a system change the values of the components it names, on any
-  // entity, right away and from several threads for the same one:
-  //
-  //   scheduler.addParallel([](Modify<Health> modify, const Target &target) {
-  //     modify(target.entity, [](Health &health) { health.value -= 10; });
-  //   });
-  //
-  // To the scheduler this is writing the components, so no other system uses
-  // them at the same time. Within the system modify locks a component and
-  // nothing else does, so nothing else may use them: the function of a
-  // parallel loop does not take them as parameters, and no query of the
-  // system names them, not even for reading. Both are checked when the
-  // system is added. To read such a component, read it in the function of
-  // modify.
-  //
-  // Modify or Commands::modify: where few threads hit the same entity,
-  // Modify, which runs right away where the threads are; where many hit few,
-  // Commands::modify, which does not touch the entity before the stage is
-  // over. Every modify of a thread reaches for the cache line of the lock bit,
-  // and every one that takes it writes it twice; with many threads on one
-  // entity the line goes from core to core for each of them, whether the bit
-  // is free or not. ecs_compare, 1M entities damaging another one, all
-  // threads, ns per hit, Modify against Commands::modify: random target 1.4
-  // and 3.6, one of 1 000 targets 14.6 and 3.2, the same target 15.6 and 3.4.
-  template<typename... Components>
-  class Modify {
-    static_assert((!std::is_const_v<Components> && ...), "Modify is for writing; a const component is read with Query");
-
+    // The column of a named component, looked up once when the Edit is made,
+    // as Query does: through World::column on every call, adding and removing
+    // a component on all threads in addParallel took 151 to 156 instead of 136
+    // to 138 µs (ecs_compare, 100K entities). The entity must exist, which only
+    // debug builds check, as World does.
     template<typename Component>
-    static constexpr bool named = (std::same_as<Component, Components> || ...);
-
-  public:
-    explicit Modify(World &world) : m_world(&world) {}
-
-    // See World::modify. The component is the one the function takes, by
-    // reference.
-    template<typename Function>
-    bool operator()(Entity entity, Function &&function) const { // NOLINT(modernize-use-nodiscard)
-      using Component = internal::ModifiedBy<std::decay_t<Function>>;
-      static_assert(named<Component>, "the function takes a component the Modify names");
-      return m_world->template modify<Component>(entity, std::forward<Function>(function));
+    [[nodiscard]] World::ColumnOf<Component> &columnFor([[maybe_unused]] Entity entity) const {
+      assert(m_world->valid(entity));
+      return *std::get<World::ColumnOf<Component> *>(m_columns);
     }
 
-  private:
+    // The component of the entity, to change without the bit, checked as
+    // modify is: not one a loop names on another entity.
+    template<typename Column>
+    [[nodiscard]] static auto &changed(Column &column, Entity entity) noexcept {
+      internal::assertNotLooped(&column, indexOf(entity));
+      return column.get(indexOf(entity));
+    }
+
     World *m_world;
+    std::tuple<World::ColumnOf<Components> *...> m_columns;
   };
+
+  template<typename... Components>
+  using Edit = BasicEdit<Locking::Bit, Components...>;
+
+  template<typename... Components>
+  using LocalEdit = BasicEdit<Locking::None, Components...>;
 
   // Records what a system cannot do right away: destroying entities, which
   // touches every component, and removing a component another thread may be
-  // using. Adding a component is recorded for a system that would otherwise
-  // have to write it with Change, and keep the systems that use it waiting;
-  // changing its value, for one that would otherwise use Modify, for the same
-  // reason and to need no lock.
+  // using. Adding a component or changing its value is recorded for a system
+  // that would otherwise have to write it with Edit, and keep the systems
+  // that use it waiting, and to need no lock.
   // It is done once all systems that run at the same time are done, so
   // nothing an entity has goes away or turns up while they run. Safe to use
   // from the function of a parallel loop, for any entity and from several
@@ -683,7 +830,7 @@ namespace sc::ecs {
     }
 
     // Calls the function with the component of the entity later, as
-    // Modify does now:
+    // Edit::modify does now:
     //
     //   commands.modify(target, [](Health &health) { health.value -= 10; });
     //
@@ -701,8 +848,8 @@ namespace sc::ecs {
     // same from run to run for one thread. The result is the same where the
     // order does not matter, as with damage that is subtracted.
     //
-    // Faster than Modify where many threads hit few entities, slower where
-    // they hit many, see Modify.
+    // Faster than Edit::modify where many threads hit few entities, slower
+    // where they hit many, see Edit.
     template<typename Function>
     void modify(Entity entity, Function &&function) const {
       using Component = internal::ModifiedBy<std::decay_t<Function>>;
@@ -779,6 +926,20 @@ namespace sc::ecs::internal {
   template<typename Event>
   inline constexpr char eventTag = 0;
 
+  // Makes the column of a component in a world, for Scheduler::run.
+  struct ColumnMaker {
+    size_t index;
+    bool (*made)(const World &);
+    void (*make)(World &);
+  };
+
+  template<typename Component>
+  [[nodiscard]] ColumnMaker columnMaker() {
+    return {.index = componentIndex<Component>(),
+            .made = [](const World &world) { return world.template findColumn<Component>() != nullptr; },
+            .make = [](World &world) { (void) world.template column<Component>(); }};
+  }
+
   // What a system reads and writes, collected from its parameters.
   struct SystemAccess {
     struct Component {
@@ -793,10 +954,13 @@ namespace sc::ecs::internal {
     // The events it emits, by eventTag: what their listeners use is added
     // when the stages are built.
     std::vector<const void *> emits;
-    // The components it takes through Modify and through queries, its loop's
-    // among them, which must not overlap: modify locks, the others do not.
+    // The components it takes through Edit and through queries, not the one
+    // of its loop, which must not overlap: a loop of the query would get to
+    // an edited entity or not, depending on where it lies.
     std::vector<size_t> modified;
     std::vector<size_t> gotten;
+    // The columns its parameters look up when they are made or used.
+    std::vector<ColumnMaker> columns;
 
     // Several parameters may name the same component; writing wins.
     void add(size_t index, bool write) {
@@ -807,6 +971,12 @@ namespace sc::ecs::internal {
         }
       }
       components.push_back({.index = index, .write = write});
+    }
+
+    void addColumn(const ColumnMaker &maker) {
+      if (std::ranges::find(columns, maker.index, &ColumnMaker::index) == columns.end()) {
+        columns.push_back(maker);
+      }
     }
 
     void addEmit(const void *tag) {
@@ -827,13 +997,15 @@ namespace sc::ecs::internal {
       }
       modified.insert(modified.end(), other.modified.begin(), other.modified.end());
       gotten.insert(gotten.end(), other.gotten.begin(), other.gotten.end());
+      for (const ColumnMaker &maker: other.columns) {
+        addColumn(maker);
+      }
     }
 
-    // Whether a component taken through Modify is also taken past it.
+    // Whether a component taken through Edit is also taken past it.
     // TODO: not checked, here or in usesModifiedOtherwise: a loop that writes
     // Health with a Query<const Health> (or a listener with one) reads the
-    // Health of other entities while other threads of the loop write it. The
-    // debug assert of get only covers writing.
+    // Health of other entities while other threads of the loop write it.
     [[nodiscard]] bool modifiesGotten() const noexcept {
       return std::ranges::any_of(modified,
                                  [this](size_t index) { return std::ranges::find(gotten, index) != gotten.end(); });
@@ -887,8 +1059,8 @@ namespace sc::ecs {
   // Calls the listeners of Event given to the scheduler with on, right away
   // and on the calling thread, as a parameter of a system:
   //
-  //   scheduler.on([](const Hit &hit, Modify<Health> modify) {
-  //     modify(hit.target, [&](Health &health) { health.value -= hit.damage; });
+  //   scheduler.on([](const Hit &hit, Edit<Health> edit) {
+  //     edit.modify(hit.target, [&](Health &health) { health.value -= hit.damage; });
   //   });
   //   scheduler.addParallel([](Emit<Hit> emit, const Weapon &weapon) { emit(Hit{weapon.target, weapon.damage}); });
   //
@@ -943,26 +1115,31 @@ namespace sc::ecs::internal {
     static void declare(SystemAccess &access, List<Get...>, List<Excluded...>) {
       (access.add(componentIndex<std::remove_const_t<Get>>(), !std::is_const_v<Get>), ...);
       (access.gotten.push_back(componentIndex<std::remove_const_t<Get>>()), ...);
+      (access.addColumn(columnMaker<std::remove_const_t<Get>>()), ...);
       // An excluded component is only looked up, never changed.
       (access.add(componentIndex<std::remove_const_t<Excluded>>(), false), ...);
     }
   };
 
-  template<typename... Components>
-  struct SystemParam<Change<Components...>> {
-    static void declare(SystemAccess &access) { (access.add(componentIndex<Components>(), true), ...); }
-
-    static Change<Components...> fetch(const SystemContext &context) { return Change<Components...>{context.world}; }
-  };
-
-  template<typename... Components>
-  struct SystemParam<Modify<Components...>> {
+  template<Locking LOCKING, typename... Components>
+  struct SystemParam<BasicEdit<LOCKING, Components...>> {
     static void declare(SystemAccess &access) {
       (access.add(componentIndex<Components>(), true), ...);
       (access.modified.push_back(componentIndex<Components>()), ...);
+      (access.addColumn(columnMaker<Components>()), ...);
     }
 
-    static Modify<Components...> fetch(const SystemContext &context) { return Modify<Components...>{context.world}; }
+    static BasicEdit<LOCKING, Components...> fetch(const SystemContext &context) {
+      return BasicEdit<LOCKING, Components...>{context.world};
+    }
+  };
+
+  template<>
+  struct SystemParam<Spawn> {
+    // A new entity has nothing anybody else uses.
+    static void declare(SystemAccess &) {}
+
+    static Spawn fetch(const SystemContext &context) { return Spawn{context.world}; }
   };
 
   template<>
@@ -1012,7 +1189,7 @@ namespace sc::ecs::internal {
     }
   };
 
-  // Queries, Change and Commands are taken by value or by const reference, the
+  // Queries, Edit and Commands are taken by value or by const reference, the
   // world only by reference.
   template<typename Param>
   using SystemParamFor =
@@ -1041,10 +1218,10 @@ namespace sc::ecs::internal {
   // A parameter of a loop function that is neither the entity nor a component.
   template<typename Param>
   inline constexpr bool isLoopExtra = false;
-  template<typename... Components>
-  inline constexpr bool isLoopExtra<Change<Components...>> = true;
-  template<typename... Components>
-  inline constexpr bool isLoopExtra<Modify<Components...>> = true;
+  template<Locking LOCKING, typename... Components>
+  inline constexpr bool isLoopExtra<BasicEdit<LOCKING, Components...>> = true;
+  template<>
+  inline constexpr bool isLoopExtra<Spawn> = true;
   template<>
   inline constexpr bool isLoopExtra<Commands> = true;
   template<typename... Terms>
@@ -1055,7 +1232,7 @@ namespace sc::ecs::internal {
   inline constexpr bool isLoopExtra<Emit<Event>> = true;
 
   // The parameters of a function for Scheduler::addParallel: the entity, then
-  // Change, Commands and queries, all of them optional, and then the
+  // Edit, Spawn, Commands and queries, all of them optional, and then the
   // components.
   template<bool WithEntity, typename Extras, typename... Rest>
   struct LoopRest;
@@ -1097,17 +1274,17 @@ namespace sc::ecs::internal {
   template<typename... First, typename... Second, typename... Rest>
   struct Concat<List<First...>, List<Second...>, Rest...> : Concat<List<First..., Second...>, Rest...> {};
 
-  // The components a parameter of a system names for modify.
+  // The components a parameter of a system names for Edit.
   template<typename Param>
   struct ModifiedOf {
     using Type = List<>;
   };
-  template<typename... Components>
-  struct ModifiedOf<Modify<Components...>> {
+  template<Locking LOCKING, typename... Components>
+  struct ModifiedOf<BasicEdit<LOCKING, Components...>> {
     using Type = List<Components...>;
   };
 
-  // The components a parameter of a system reads or writes without modify:
+  // The components a parameter of a system reads or writes without Edit:
   // those a query gets. Excluded ones are only looked up in the mask, which
   // modify does not change.
   template<typename Param>
@@ -1127,13 +1304,21 @@ namespace sc::ecs::internal {
   template<typename... Modified, typename... Gotten>
   inline constexpr bool overlaps<List<Modified...>, List<Gotten...>> = (isGotten<Modified, Gotten...> || ...);
 
-  // Whether a system with these parameters uses a component it modifies
-  // also past modify, which takes no lock: through a query, or as a
-  // component of its loop, which comes as a query as well.
+  // Whether a system with these parameters uses a component it edits also
+  // through a query, whose loop would get to an edited entity or not,
+  // depending on where it lies.
   template<typename... Params>
   inline constexpr bool usesModifiedOtherwise =
       overlaps<typename Concat<typename ModifiedOf<std::remove_cvref_t<Params>>::Type...>::Type,
                typename Concat<typename GottenOf<std::remove_cvref_t<Params>>::Type...>::Type>;
+
+  // The same for the parameters of a system, the first of which is the
+  // query of its loop when LOOP is true: the loop may go through what the
+  // system edits, as its function changes it only on its own entity.
+  template<bool LOOP, typename... Params>
+  inline constexpr bool editsQueried = usesModifiedOtherwise<Params...>;
+  template<typename Loop, typename... Rest>
+  inline constexpr bool editsQueried<true, Loop, Rest...> = usesModifiedOtherwise<Rest...>;
 
   // Calls the function for every item, for more than one item on the thread
   // pool, and returns once all calls are done. Rethrows the first exception.
@@ -1178,8 +1363,8 @@ namespace sc::ecs {
   // A system is a function whose parameters say what it uses:
   //
   //   void move(Query<Position, const Velocity> query);   // writes Position, reads Velocity
-  //   void freeze(Query<const Health> query, Change<Frozen> change);   // adds and removes Frozen
-  //   void hit(Query<const Target> query, Modify<Health> modify);   // changes Health of any entity, locked
+  //   void hit(Query<const Target> query, Edit<Health, Frozen> edit);   // adds, removes and changes them, locked
+  //   void spawn(Query<const Spawner> query, Spawn spawn);   // makes entities
   //   void reap(Query<const Lifetime> query, Commands commands);   // destroys entities, later
   //   void stream(Resources<Texture> textures);            // loads into a cache given with provide
   //   void fight(Query<const Weapon> query, Emit<Hit> emit);   // uses what the listeners of Hit use
@@ -1206,15 +1391,16 @@ namespace sc::ecs {
     //
     // A component taken by reference to non-const is written, any other one is
     // only read. Before the components, the function may take the entity and,
-    // after it, Change, Commands, Modify, queries, Resources and Emit, Modify
-    // and queries for entities other than its own:
+    // after it, Edit, Spawn, Commands, queries, Resources and Emit, Edit and
+    // queries for entities other than its own:
     //
     //   scheduler.addParallel([](Entity entity, Commands commands, const Health &health) { ... });
     //   scheduler.addParallel([](Query<const Health> others, const Target &target) { ... });
-    //   scheduler.addParallel([](Modify<Health> modify, const Target &target) { ... });
+    //   scheduler.addParallel([](Edit<Health> edit, const Target &target) { ... });
     //
-    // A query there only reads: the other threads of the loop may be at the
-    // same entity, and get asserts in debug builds. To write, Modify.
+    // Writing through a query there is the function's to keep apart from the
+    // other threads of the loop, which may be at the same entity, see
+    // World::get; Edit::modify takes turns with them.
     //
     // grain is the number of pages a thread takes at a time.
     template<typename F>
@@ -1263,7 +1449,7 @@ namespace sc::ecs {
     // thread, so on several threads at once for a loop, and through a const
     // reference: a mutable lambda does not compile.
     //
-    //   scheduler.on([](const Hit &hit, Modify<Health> modify) { ... });
+    //   scheduler.on([](const Hit &hit, Edit<Health> edit) { ... });
     //   scheduler.on([](const Died &died, Commands commands) { commands.destroy(died.entity); });
     //
     // The systems that emit the event count as using what its listeners use,
@@ -1296,6 +1482,7 @@ namespace sc::ecs {
           system.commands = std::vector<internal::CommandList>(threads + 1);
         }
       }
+      makeColumns(world);
 
       for (const std::vector<size_t> &stage: stages) {
         try {
@@ -1336,8 +1523,8 @@ namespace sc::ecs {
     // added: one stage after the other, the systems of a stage at the same
     // time.
     //
-    // std::logic_error for a system that takes a component past Modify which
-    // it or a listener of an event it emits modifies, as addSystem's
+    // std::logic_error for a system that takes a component through a query
+    // which it or a listener of an event it emits edits, as addSystem's
     // static_assert for a system alone.
     [[nodiscard]] const std::vector<std::vector<size_t>> &stages() {
       if (!m_stagesValid) {
@@ -1345,8 +1532,9 @@ namespace sc::ecs {
           system.effective = effectiveAccess(system.access);
           if (system.effective.modifiesGotten()) {
             throw std::logic_error("the system \"" + system.name +
-                                   "\" or a listener of an event it emits modifies a component that one of them also "
-                                   "takes through a query or its loop: modify locks it and they do not");
+                                   "\" or a listener of an event it emits edits a component that one of them also "
+                                   "takes through a query: a loop of the query would get to an edited entity or not, "
+                                   "depending on where it lies");
           }
         }
 
@@ -1365,6 +1553,14 @@ namespace sc::ecs {
         m_stages.assign(count, {});
         for (size_t i = 0; i < m_systems.size(); ++i) {
           m_stages[stageOf[i]].push_back(i);
+        }
+        m_columns.clear();
+        for (const System &system: m_systems) {
+          for (const internal::ColumnMaker &maker: system.effective.columns) {
+            if (std::ranges::find(m_columns, maker.index, &internal::ColumnMaker::index) == m_columns.end()) {
+              m_columns.push_back(maker);
+            }
+          }
         }
         m_stagesValid = true;
       }
@@ -1410,8 +1606,8 @@ namespace sc::ecs {
       static_assert(!std::is_reference_v<EventParam> || std::is_const_v<std::remove_reference_t<EventParam>>,
                     "a listener takes its event by value or const reference");
       static_assert(!internal::usesModifiedOtherwise<Params...>,
-                    "a component the listener modifies is not also named by its queries: modify locks it and they "
-                    "do not; read it in the function of modify");
+                    "a component the listener edits is not also named by its queries: a loop of the query would get "
+                    "to an edited entity or not, depending on where it lies; read it in the function of modify");
       internal::SystemAccess access;
       (internal::SystemParamFor<Params>::declare(access), ...);
       if (sizeof...(Params) == 0) {
@@ -1437,6 +1633,20 @@ namespace sc::ecs {
       return *this;
     }
 
+    // The columns the systems and their listeners use that the world does
+    // not have yet, made before the first system, so that none is made while
+    // the threads of a loop wait for it. One after the other: two columns
+    // took 9 µs that way and 20 to 22 µs on two threads, as making one
+    // reserves addresses, which the OS does for one thread of a process at a
+    // time, and the pool threads had to be woken up first.
+    void makeColumns(World &world) {
+      for (const internal::ColumnMaker &maker: m_columns) {
+        if (!maker.made(world)) {
+          maker.make(world);
+        }
+      }
+    }
+
     // Drops what the systems of a stage recorded through Commands.
     void clearCommands(const std::vector<size_t> &stage) noexcept {
       for (const size_t index: stage) {
@@ -1446,13 +1656,14 @@ namespace sc::ecs {
       }
     }
 
-    template<typename F, typename... Params>
+    // With LOOP, the first parameter is the query of the loop of addParallel.
+    template<bool LOOP = false, typename F, typename... Params>
     Scheduler &addSystem(F &&system, const std::string &name, internal::List<Params...>) {
-      static_assert(!internal::usesModifiedOtherwise<Params...>,
-                    "a component the system modifies is not also taken by its loop or named by its queries: modify "
-                    "locks it and they do not; read it in the function of modify");
+      static_assert(!internal::editsQueried<LOOP, Params...>,
+                    "a component the system edits is not also named by its queries: a loop of the query would get "
+                    "to an edited entity or not, depending on where it lies; read it in the function of modify");
       internal::SystemAccess access;
-      (internal::SystemParamFor<Params>::declare(access), ...);
+      declare<LOOP, Params...>(access);
       if (sizeof...(Params) == 0) {
         access.exclusive = true;
       }
@@ -1471,6 +1682,19 @@ namespace sc::ecs {
       return *this;
     }
 
+    template<bool LOOP, typename First, typename... Rest>
+    static void declare(internal::SystemAccess &access) {
+      internal::SystemParamFor<First>::declare(access);
+      if constexpr (LOOP) {
+        // Not for modifiesGotten: what the loop goes through, the function
+        // only edits on its own entity.
+        access.gotten.clear();
+      }
+      (internal::SystemParamFor<Rest>::declare(access), ...);
+    }
+    template<bool LOOP>
+    static void declare(internal::SystemAccess &) {}
+
     // addParallel for the query of the components the function is called with.
     template<typename F, typename... Extras, typename... Components>
     Scheduler &addLoop(F &&function, std::string name, size_t grain, internal::List<Extras...> extras,
@@ -1488,7 +1712,7 @@ namespace sc::ecs {
                            internal::List<Extras...>) {
       using Function = std::decay_t<F>;
       using Signature = internal::LoopSignature<typename internal::SystemSignature<Function>::Params>;
-      return addSystem(
+      return addSystem<true>(
           [function = Function(std::forward<F>(function)), grain](Query<Terms...> query, Extras... extras) mutable {
             if constexpr (Signature::ENTITY) {
               query.parallelEach(
@@ -1509,6 +1733,8 @@ namespace sc::ecs {
     std::vector<internal::ProvidedCache> m_caches;
     // Per type of event; Emit points into it while systems run.
     std::vector<internal::EventListeners> m_events;
+    // Of all systems and listeners, set by stages.
+    std::vector<internal::ColumnMaker> m_columns;
   };
 
 } // namespace sc::ecs

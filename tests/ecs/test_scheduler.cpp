@@ -15,18 +15,19 @@
 
 namespace {
 
-  using sc::ecs::Change;
   using sc::ecs::Commands;
+  using sc::ecs::Edit;
   using sc::ecs::Emit;
   using sc::ecs::Entity;
   using sc::ecs::Exclude;
-  using sc::ecs::Modify;
+  using sc::ecs::LocalEdit;
   using sc::ecs::PAGE_SIZE;
   using sc::ecs::Query;
   using sc::ecs::ResourceCache;
   using sc::ecs::ResourceHandle;
   using sc::ecs::Resources;
   using sc::ecs::Scheduler;
+  using sc::ecs::Spawn;
   using sc::ecs::World;
 
   struct Position {
@@ -95,6 +96,12 @@ namespace {
 
   using Stages = std::vector<std::vector<size_t>>;
 
+  // Edit has no get: it would get past the bit that modify takes.
+  template<typename EditType>
+  concept HasGet = requires(const EditType &edit, Entity entity) { edit.template get<Health>(entity); };
+  static_assert(!HasGet<Edit<Health>>);
+  static_assert(HasGet<LocalEdit<Health>>);
+
   void move(Query<Position, const Velocity> query) {
     query.each([](Position &pos, const Velocity &vel) {
       pos.x += vel.dx;
@@ -144,24 +151,39 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
 
   SECTION("An Excluded Component Counts As Read") {
     scheduler.add([](Query<Position, Exclude<Frozen>>) {});
-    scheduler.add([](Query<const Health>, Change<Frozen>) {});
+    scheduler.add([](Query<const Health>, Edit<Frozen>) {});
     scheduler.add([](Query<const Health, Exclude<Frozen>>) {});
     REQUIRE(scheduler.stages() == Stages{{0}, {1}, {2}});
   }
 
-  SECTION("Changing A Component Counts As Writing It") {
-    scheduler.add([](Query<const Position>, Change<Health>) {});
+  SECTION("Editing A Component Counts As Writing It") {
+    scheduler.add([](Query<const Position>, Edit<Health>) {});
     scheduler.add([](Query<const Health>) {});
-    scheduler.add([](Query<const Position>, Change<Frozen>) {});
+    scheduler.add([](Query<const Position>, Edit<Spawner, Target>) {});
+    scheduler.addParallel([](Edit<Target>, const Velocity &) {});
+    scheduler.add([](Query<const Position>, Edit<Frozen>) {});
+    REQUIRE(scheduler.stages() == Stages{{0, 2, 4}, {1, 3}});
+  }
+
+  SECTION("Editing Without The Bit Counts As Writing As Well") {
+    scheduler.add([](Query<const Position>, LocalEdit<Health>) {});
+    scheduler.add([](Query<const Health>) {});
+    scheduler.addParallel([](LocalEdit<Spawner>, const Velocity &) {});
     REQUIRE(scheduler.stages() == Stages{{0, 2}, {1}});
   }
 
-  SECTION("Modifying A Component Counts As Writing It") {
-    scheduler.add([](Query<const Position>, Modify<Health>) {});
+  SECTION("A Loop May Go Through What Its System Edits") {
+    // The function edits it only on its own entity, see World::each.
+    scheduler.addParallel([](Entity, Edit<Health>, Health &) {});
     scheduler.add([](Query<const Health>) {});
-    scheduler.add([](Query<const Position>, Modify<Spawner, Target>) {});
-    scheduler.addParallel([](Modify<Target>, const Velocity &) {});
-    REQUIRE(scheduler.stages() == Stages{{0, 2}, {1, 3}});
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}});
+  }
+
+  SECTION("Spawning Keeps Nobody Waiting") {
+    scheduler.add([](Query<Position>, Spawn) {});
+    scheduler.add([](Spawn) {});
+    scheduler.addParallel([](Spawn, Position &) {});
+    REQUIRE(scheduler.stages() == Stages{{0, 1}, {2}});
   }
 
   SECTION("Commands Keep Nobody Waiting") {
@@ -183,8 +205,8 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
     scheduler.add([](Query<const Position>) {});
     scheduler.add([](Query<const Frozen>) {});
     // Added after the system that emits the event, and through another event.
-    scheduler.on([](const Hit &, Modify<Health>, Emit<Died>) {});
-    scheduler.on([](Died, Change<Frozen>) {});
+    scheduler.on([](const Hit &, Edit<Health>, Emit<Died>) {});
+    scheduler.on([](Died, Edit<Frozen>) {});
     REQUIRE(scheduler.stages() == Stages{{0, 2}, {1, 3}});
   }
 
@@ -205,14 +227,20 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
     scheduler.add([](Query<const Position>, Emit<Hit>) {});
     scheduler.add([](Query<const Health>) {});
     scheduler.on([](const Hit &, Emit<Died>) {});
-    scheduler.on([](const Died &, Emit<Hit>, Modify<Health>) {});
+    scheduler.on([](const Died &, Emit<Hit>, Edit<Health>) {});
     REQUIRE(scheduler.stages() == Stages{{0}, {1}});
   }
 
-  SECTION("A Listener Must Not Modify What Its Emitter Iterates") {
-    scheduler.addParallel([](Emit<Hit>, Health &) {}, "fight");
-    scheduler.on([](const Hit &, Modify<Health>) {});
+  SECTION("A Listener Must Not Edit What Its Emitter Queries") {
+    scheduler.addParallel([](Emit<Hit>, Query<const Health>, const Position &) {}, "fight");
+    scheduler.on([](const Hit &, Edit<Health>) {});
     REQUIRE_THROWS_AS(scheduler.stages(), std::logic_error);
+  }
+
+  SECTION("A Listener May Edit What Its Emitter's Loop Goes Through") {
+    scheduler.addParallel([](Emit<Hit>, Health &) {}, "fight");
+    scheduler.on([](const Hit &, Edit<Health>) {});
+    REQUIRE(scheduler.stages() == Stages{{0}});
   }
 
   SECTION("A System That Takes The World Or Nothing Runs Alone") {
@@ -229,7 +257,7 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
   SECTION("The Parameters Of A Loop Say What It Uses") {
     scheduler.addParallel([](Position &, const Velocity &) {});
     scheduler.addParallel([](Health &, Velocity) {});
-    scheduler.addParallel([](Entity, Change<Frozen>, const Health &) {});
+    scheduler.addParallel([](Entity, Edit<Frozen>, const Health &) {});
     scheduler.addParallel<Query<Velocity, Exclude<Frozen>>>([](Velocity &) {});
     REQUIRE(scheduler.stages() == Stages{{0, 1}, {2}, {3}});
   }
@@ -250,6 +278,19 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
   }
 
   Scheduler scheduler;
+
+  SECTION("A Query Looks Up Components Of Entities That May Not Have Them") {
+    // Every third entity has no Velocity.
+    size_t without = 0;
+    scheduler.add([&](Query<const Velocity> query) {
+      for (const Entity entity: entities) {
+        const Velocity *const vel = query.tryGet<const Velocity>(entity);
+        without += vel == nullptr ? 1 : 0;
+      }
+    });
+    scheduler.run(world);
+    REQUIRE(without == (entities.size() + 2) / 3);
+  }
 
   SECTION("Functions, Function Objects And Lambdas") {
     scheduler.add(move);
@@ -281,13 +322,13 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
   }
 
   SECTION("A Loop Adds And Removes Components Of Its Entity") {
-    scheduler.addParallel([](Entity entity, Change<Frozen, Velocity> change, const Position &pos) {
+    scheduler.addParallel([](Entity entity, Edit<Frozen, Velocity> edit, const Position &pos) {
       const auto i = static_cast<size_t>(pos.x);
       if (i % 2 == 0) {
-        change.emplace<Frozen>(entity);
+        edit.emplace<Frozen>(entity);
       }
       if (i % 3 == 1) {
-        change.erase<Velocity>(entity);
+        edit.erase<Velocity>(entity);
       }
     });
     // Sees what the loop did.
@@ -339,26 +380,26 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     const size_t spawners = (entities.size() + 99) / 100;
     // Changes its own entity and the ones it creates, which must not get in
     // each other's way.
-    scheduler.addParallel([](Entity entity, Change<Frozen, Velocity> change, const Position &) {
-      if (change.contains<Frozen>(entity)) {
-        change.erase<Frozen>(entity);
+    scheduler.addParallel([](Entity entity, Edit<Frozen, Velocity> edit, const Position &) {
+      if (edit.contains<Frozen>(entity)) {
+        edit.erase<Frozen>(entity);
       } else {
-        change.emplace<Frozen>(entity);
+        edit.emplace<Frozen>(entity);
       }
     });
-    scheduler.addParallel([](Change<Frozen, Velocity> change, const Spawner &spawner) {
+    scheduler.addParallel([](Edit<Frozen, Velocity> edit, Spawn spawn, const Spawner &spawner) {
       for (int i = 0; i < spawner.count; ++i) {
-        const Entity spawned = change.create();
-        change.emplace<Frozen>(spawned);
-        change.emplace<Velocity>(spawned, 7.0f, 7.0f);
+        const Entity spawned = spawn.create();
+        edit.emplace<Frozen>(spawned);
+        edit.emplace<Velocity>(spawned, 7.0f, 7.0f);
       }
     });
     // Twice: back to what it was for the first loop.
-    scheduler.addParallel([](Entity entity, Change<Frozen> change, const Position &) {
-      if (change.contains<Frozen>(entity)) {
-        change.erase<Frozen>(entity);
+    scheduler.addParallel([](Entity entity, Edit<Frozen> edit, const Position &) {
+      if (edit.contains<Frozen>(entity)) {
+        edit.erase<Frozen>(entity);
       } else {
-        change.emplace<Frozen>(entity);
+        edit.emplace<Frozen>(entity);
       }
     });
     REQUIRE(scheduler.stages() == Stages{{0}, {1}, {2}});
@@ -378,11 +419,11 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     // Every entity with a velocity spawns three: one with its components
     // right away, one created for them and given them after, and one
     // through Commands.
-    scheduler.addParallel([](Change<Frozen, Spawner> change, const Velocity &) {
-      (void) change.create(Frozen{}, Spawner{1});
-      const Entity planned = change.create<Spawner, Frozen>();
-      change.emplace<Frozen>(planned);
-      change.emplace<Spawner>(planned, 2);
+    scheduler.addParallel([](Edit<Frozen, Spawner> edit, Spawn spawn, const Velocity &) {
+      (void) edit.create(Frozen{}, Spawner{1});
+      const Entity planned = spawn.create<Spawner, Frozen>();
+      edit.emplace<Frozen>(planned);
+      edit.emplace<Spawner>(planned, 2);
     });
     scheduler.addParallel([](Commands commands, const Velocity &) {
       const Entity made = commands.create<Target>();
@@ -427,9 +468,9 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     const size_t spawners = (entities.size() + 99) / 100;
     // Every run destroys what the one before created.
     scheduler.addParallel<Query<const Frozen>>([](Entity entity, Commands commands) { commands.destroy(entity); });
-    scheduler.addParallel([](Change<Frozen> change, const Spawner &spawner) {
+    scheduler.addParallel([](Edit<Frozen> edit, Spawn spawn, const Spawner &spawner) {
       for (int i = 0; i < spawner.count; ++i) {
-        change.emplace<Frozen>(change.create());
+        edit.emplace<Frozen>(spawn.create());
       }
     });
     REQUIRE(scheduler.stages() == Stages{{0}, {1}});
@@ -461,17 +502,17 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     const uint32_t pages = world.pageCount();
     // Every thread adds the same components to its own entity and to the one
     // it creates, which is in the page of some thread or other.
-    scheduler.addParallel([](Entity entity, Change<Frozen, Spawner> change, const Position &pos) {
-      change.emplace<Frozen>(entity);
-      change.emplace<Spawner>(entity, static_cast<int>(pos.x));
-      const Entity spawned = change.create();
-      change.emplace<Frozen>(spawned);
-      change.emplace<Spawner>(spawned, -1);
+    scheduler.addParallel([](Entity entity, Edit<Frozen, Spawner> edit, Spawn spawn, const Position &pos) {
+      edit.emplace<Frozen>(entity);
+      edit.emplace<Spawner>(entity, static_cast<int>(pos.x));
+      const Entity spawned = spawn.create();
+      edit.emplace<Frozen>(spawned);
+      edit.emplace<Spawner>(spawned, -1);
     });
     // And takes them away again, the last ones of a page among them.
-    scheduler.addParallel([](Entity entity, Change<Frozen, Spawner> change, const Position &) {
-      change.erase<Frozen>(entity);
-      change.erase<Spawner>(entity);
+    scheduler.addParallel([](Entity entity, Edit<Frozen, Spawner> edit, const Position &) {
+      edit.erase<Frozen>(entity);
+      edit.erase<Spawner>(entity);
     });
     REQUIRE(scheduler.stages() == Stages{{0}, {1}});
     scheduler.run(world);
@@ -493,14 +534,14 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
   SECTION("A Loop Changes Entities That Other Threads Go For As Well") {
     // Every entity hits one of a few, as do many on other threads.
     constexpr size_t targets = 10;
-    scheduler.addParallel([&](Change<Spawner, Frozen> change, const Position &pos) {
+    scheduler.addParallel([&](Edit<Spawner, Frozen> edit, const Position &pos) {
       const Entity target = entities[static_cast<size_t>(pos.x) % targets];
-      change.tryEmplace<Spawner>(target, 5);
-      change.tryEmplace<Frozen>(target);
+      edit.tryEmplace<Spawner>(target, 5);
+      edit.tryEmplace<Frozen>(target);
     });
     std::atomic<size_t> thawed = 0;
-    scheduler.addParallel([&](Change<Frozen> change, const Position &pos) {
-      thawed += change.erase<Frozen>(entities[static_cast<size_t>(pos.x) % targets]);
+    scheduler.addParallel([&](Edit<Frozen> edit, const Position &pos) {
+      thawed += edit.erase<Frozen>(entities[static_cast<size_t>(pos.x) % targets]);
     });
     REQUIRE(scheduler.stages() == Stages{{0}, {1}});
     scheduler.run(world);
@@ -516,16 +557,151 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     }
   }
 
+  SECTION("A Loop Adds Or Modifies Components Of Entities That Other Threads Go For As Well") {
+    // Every entity hits one of a few that have no Spawner yet: the first hit
+    // makes it, every other one counts.
+    constexpr size_t targets = 10;
+    scheduler.addParallel([&](Edit<Spawner> edit, const Position &pos) {
+      const Entity target = entities[static_cast<size_t>(pos.x) % targets];
+      edit.emplaceOrModify(target, [](Spawner &spawner) { ++spawner.count; }, 1);
+    });
+    scheduler.run(world);
+
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.contains<Spawner>(entities[i]) == (i < targets));
+    }
+    for (size_t i = 0; i < targets; ++i) {
+      // How many entities hit it.
+      REQUIRE(world.get<Spawner>(entities[i]).count ==
+              static_cast<int>((entities.size() / targets) + (i < entities.size() % targets ? 1 : 0)));
+    }
+  }
+
+  SECTION("A System Added With add Gives New Entities Their Components") {
+    // emplace without the bit: one thread, and entities nobody else knows.
+    scheduler.add([](Query<const Velocity> query, Edit<Frozen, Spawner> edit, Spawn spawn) {
+      query.each([&](const Velocity &) {
+        const Entity made = spawn.create();
+        REQUIRE(edit.emplace<Frozen>(made) == sc::ecs::Emplaced::Made);
+        REQUIRE(edit.emplace<Spawner>(made, 4) == sc::ecs::Emplaced::Made);
+      });
+    });
+    scheduler.run(world);
+    size_t made = 0;
+    world.each<const Frozen, const Spawner>([&](const Spawner &spawner) { made += spawner.count == 4 ? 1 : 0; });
+    REQUIRE(made == entities.size() - ((entities.size() + 2) / 3));
+  }
+
+  SECTION("A System Added With add Edits Other Entities") {
+    // The same as from a parallel loop, on one thread: through the system
+    // itself and through a listener of an event it emits.
+    constexpr size_t targets = 10;
+    scheduler.on([](const Hit &hit, Edit<Spawner> edit) {
+      edit.emplaceOrModify(hit.target, [&](Spawner &spawner) { spawner.count += hit.damage; }, hit.damage);
+    });
+    scheduler.add([&](Query<const Position> query, Edit<Frozen, Target> edit, Emit<Hit> emit) {
+      query.each([&](Entity entity, const Position &pos) {
+        const Entity target = entities[static_cast<size_t>(pos.x) % targets];
+        emit(Hit{.target = target, .damage = 1});
+        edit.tryEmplace<Frozen>(target);
+        edit.emplaceOrModify(target, [](Target &aim) { ++aim.value; }, 1);
+        if (static_cast<size_t>(pos.x) % 2 == 0) {
+          edit.modify(entity, [](Target &aim) { aim.value += 100; });
+        }
+      });
+      // Replaced, then erased again for the odd targets.
+      for (size_t i = 0; i < targets; ++i) {
+        REQUIRE(edit.emplaceOrReplace<Target>(entities[i], -1) == sc::ecs::Emplaced::Replaced);
+        if (i % 2 == 1) {
+          REQUIRE(edit.erase<Frozen>(entities[i]));
+        }
+      }
+    });
+    scheduler.run(world);
+
+    const auto hits = [&](size_t i) {
+      return static_cast<int>((entities.size() / targets) + (i < entities.size() % targets ? 1 : 0));
+    };
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.contains<Frozen>(entities[i]) == (i < targets && i % 2 == 0));
+      REQUIRE(world.contains<Target>(entities[i]) == (i < targets));
+      REQUIRE(world.contains<Spawner>(entities[i]) == (i < targets));
+    }
+    for (size_t i = 0; i < targets; ++i) {
+      REQUIRE(world.get<Target>(entities[i]).value == -1);
+      REQUIRE(world.get<Spawner>(entities[i]).count == hits(i));
+    }
+  }
+
+  SECTION("A Loop Edits Its Own Entity Without The Bit") {
+    // Each thread changes only the entity of its call: no bit needed. Catch2
+    // is for one thread, so the threads count what went wrong.
+    std::atomic<int> wrong = 0;
+    scheduler.addParallel([&](Entity entity, LocalEdit<Health, Spawner, Frozen, Target> edit, const Position &pos) {
+      const auto x = static_cast<int>(pos.x);
+      wrong += !edit.modify(entity, [](Health &health) { health.value += 1; });
+      wrong += edit.emplaceOrModify(entity, [](Spawner &spawner) { ++spawner.count; }, 1) != sc::ecs::Emplaced::Made;
+      wrong +=
+          edit.emplaceOrModify(entity, [](Spawner &spawner) { ++spawner.count; }, 1) != sc::ecs::Emplaced::Modified;
+      wrong += edit.tryEmplace<Frozen>(entity) != sc::ecs::Emplaced::Made;
+      wrong += edit.tryEmplace<Frozen>(entity) != sc::ecs::Emplaced::There;
+      wrong += edit.emplaceOrReplace<Target>(entity, x) != sc::ecs::Emplaced::Made;
+      wrong += edit.emplaceOrReplace<Target>(entity, -x) != sc::ecs::Emplaced::Replaced;
+      if (x % 2 == 0) {
+        wrong += !edit.erase<Frozen>(entity);
+      }
+      // Without a look, and with one.
+      wrong += edit.get<Health>(entity).value != 101;
+      edit.get<Health>(entity).value += 1;
+      wrong += edit.get<const Spawner>(entity).count != 2;
+      wrong += edit.tryGet<Target>(entity) != &edit.get<Target>(entity);
+      wrong += edit.tryGet<const Health>(entity) != &edit.get<Health>(entity);
+    });
+    scheduler.run(world);
+    REQUIRE(wrong == 0);
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.get<Health>(entities[i]).value == 102);
+      REQUIRE(world.get<Spawner>(entities[i]).count == 2);
+      REQUIRE(world.get<Target>(entities[i]).value == -static_cast<int>(i));
+      REQUIRE(world.contains<Frozen>(entities[i]) == (i % 2 != 0));
+    }
+  }
+
+  SECTION("A Loop Removes A Component With A Destructor Without The Bit") {
+    // Named gives back what it owns: every one that is made is gone again.
+    const auto alive = std::make_shared<int>(0);
+    scheduler.addParallel([&](Entity entity, LocalEdit<Named> edit, const Position &) {
+      edit.emplace<Named>(entity, std::string(40, 'n'), alive);
+    });
+    Scheduler remover;
+    std::atomic<size_t> removed = 0;
+    remover.addParallel([&](Entity entity, LocalEdit<Named> edit, const Position &pos) {
+      if (static_cast<size_t>(pos.x) % 2 == 0) {
+        removed += edit.erase<Named>(entity) ? 1 : 0;
+        // Gone already.
+        removed += edit.erase<Named>(entity) ? 1 : 0;
+      }
+    });
+    scheduler.run(world);
+    REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size()));
+    remover.run(world);
+    REQUIRE(removed == (entities.size() + 1) / 2);
+    REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size() / 2));
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.contains<Named>(entities[i]) == (i % 2 != 0));
+    }
+  }
+
   SECTION("A Loop Modifies Entities That Other Threads Go For As Well") {
     // Every entity hits one of a few, as do many on other threads, and
     // every hit counts.
     constexpr size_t targets = 10;
     std::atomic<size_t> missed = 0;
-    scheduler.addParallel([&](Modify<Health, Spawner> modify, const Position &pos) {
+    scheduler.addParallel([&](Edit<Health, Spawner> edit, const Position &pos) {
       const Entity target = entities[static_cast<size_t>(pos.x) % targets];
-      modify(target, [](Health &health) { health.value -= 1; });
+      edit.modify(target, [](Health &health) { health.value -= 1; });
       // No entity has one.
-      missed += !modify(target, [](Spawner &spawner) { ++spawner.count; });
+      missed += !edit.modify(target, [](Spawner &spawner) { ++spawner.count; });
     });
     scheduler.run(world);
     scheduler.run(world);
@@ -991,8 +1167,8 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     }
     // Many threads hit the same target at once.
     scheduler.addParallel([boss](Emit<Hit> emit, const Velocity &) { emit(Hit{.target = boss, .damage = 1}); });
-    scheduler.on([](const Hit &hit, Modify<Health> modify) {
-      modify(hit.target, [&](Health &health) { health.value -= hit.damage; });
+    scheduler.on([](const Hit &hit, Edit<Health> edit) {
+      edit.modify(hit.target, [&](Health &health) { health.value -= hit.damage; });
     });
     scheduler.run(world);
     REQUIRE(world.get<Health>(boss).value == 100 - static_cast<int>(moving));
@@ -1017,6 +1193,24 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     });
     scheduler.run(world);
     REQUIRE(ran > 0);
+  }
+
+  SECTION("The Columns Of All Systems Are Made Before The First") {
+    World fresh;
+    std::atomic<bool> there = false;
+    scheduler.add([&](Query<const Spawner, Exclude<Frozen>>, Emit<Hit>) {
+      // Made already, also the one of the listener of Hit.
+      there = fresh.findColumn<Spawner>() != nullptr && fresh.findColumn<Target>() != nullptr;
+    });
+    scheduler.on([](const Hit &, Edit<Target>) {});
+    REQUIRE(fresh.findColumn<Spawner>() == nullptr);
+    scheduler.run(fresh);
+    REQUIRE(there);
+    // An excluded component is only looked up.
+    REQUIRE(fresh.findColumn<Frozen>() == nullptr);
+    // And the next run finds them.
+    scheduler.run(fresh);
+    REQUIRE(there);
   }
 
   SECTION("An Exception Ends The Run After Its Stage") {
