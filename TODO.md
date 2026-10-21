@@ -165,6 +165,11 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   parameters. What `static_assert` checks for one system (a component taken through `Modify` and past it) is checked
   there over the system and its listeners, with `std::logic_error`. The parameters of a listener are made for every
   event, `Resources` with its look through the provided caches; not measured.
+- [ ] **Adding and removing in an `each`:** look at what exactly happens when the function of an `each` or
+  `parallelEach` adds or removes components, through `Change`, `World` directly, or a listener of `Emit`: of its own
+  entity or of another, of a component the loop goes through or of another one. Does the loop see the change, skip
+  an entity, see one twice; does a reference the function holds stay good. By design a structural change has no
+  side effects on other components (one column per component), so only the column the loop goes through matters.
 - [x] **Measure:** cost of `modify` per event, and with many threads waiting on the same target (one boss, many
   hits), as a case in `tests/ecs_compare` (large world, 1M entities, each damages another by 1; Ryzen 7 5800X,
   16 threads, clang release, median of 5 runs, ns per entity):

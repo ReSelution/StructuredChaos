@@ -830,6 +830,10 @@ namespace sc::ecs::internal {
     }
 
     // Whether a component taken through Modify is also taken past it.
+    // TODO: not checked, here or in usesModifiedOtherwise: a loop that writes
+    // Health with a Query<const Health> (or a listener with one) reads the
+    // Health of other entities while other threads of the loop write it. The
+    // debug assert of get only covers writing.
     [[nodiscard]] bool modifiesGotten() const noexcept {
       return std::ranges::any_of(modified,
                                  [this](size_t index) { return std::ranges::find(gotten, index) != gotten.end(); });
