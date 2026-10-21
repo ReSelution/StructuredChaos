@@ -113,6 +113,41 @@ namespace sc::ecs::internal {
     std::array<uint64_t, PAGE_WORDS> words{};
   };
 
+  struct ColumnBase;
+
+#ifndef NDEBUG
+  // What a loop of World on this thread goes through, and the entity whose
+  // call it is in, for the assert in assertNotLooped. Only in debug builds.
+  struct LoopWatch {
+    std::span<const ColumnBase *const> columns;
+    uint32_t index;
+    // Of the loop the function of which runs this one, or null.
+    const LoopWatch *outer;
+  };
+
+  // The innermost loop on this thread, or null.
+  inline thread_local const LoopWatch *loopWatch = nullptr;
+#endif
+
+  // Asserts that no loop on this thread goes through the column, unless it
+  // is in the call for the index: the function of a loop does not touch the
+  // components the loop goes through on other entities. A loop reads the
+  // mask of a word before it goes through it, and that of a full page not at
+  // all, so one the function takes from an entity after its own would be
+  // called destroyed; and in parallelEach another thread may be writing the
+  // one modify changes. Nothing in release builds.
+  inline void assertNotLooped([[maybe_unused]] const ColumnBase *column, [[maybe_unused]] uint32_t index) noexcept {
+#ifndef NDEBUG
+    for (const LoopWatch *watch = loopWatch; watch != nullptr; watch = watch->outer) {
+      for (const ColumnBase *const looped: watch->columns) {
+        assert((looped != column || index == watch->index) &&
+               "sc::ecs: the function of a loop removed or modified a component the loop goes through on another "
+               "entity; record that with Commands");
+      }
+    }
+#endif
+  }
+
   // What the world needs of a column without knowing its component.
   struct ColumnBase {
     virtual ~ColumnBase() = default;
@@ -494,6 +529,7 @@ namespace sc::ecs::internal {
       if (found == nullptr || !has(*found, slot)) {
         return false;
       }
+      assertNotLooped(this, index);
       Header &header = *found;
       std::atomic<uint64_t> &making = header.making[slot / 64];
       const uint64_t bit = uint64_t{1} << (slot % 64);
@@ -593,6 +629,7 @@ namespace sc::ecs::internal {
       if (found == nullptr || !has(*found, slot)) {
         return false;
       }
+      assertNotLooped(this, index);
       Header &header = *found;
       const uint64_t bit = uint64_t{1} << (slot % 64);
       if constexpr (DESTROYS) {
@@ -635,6 +672,7 @@ namespace sc::ecs::internal {
       if (found == nullptr || !has(*found, slot)) {
         return false;
       }
+      assertNotLooped(this, index);
       Header &header = *found;
       std::atomic<uint64_t> &word = header.mask[slot / 64];
       word.store(word.load(std::memory_order_relaxed) & ~(uint64_t{1} << (slot % 64)), std::memory_order_relaxed);
@@ -681,6 +719,12 @@ namespace sc::ecs::internal {
           if (gone == 0) {
             continue;
           }
+#ifndef NDEBUG
+          for (uint64_t bits = gone; bits != 0; bits &= bits - 1) {
+            assertNotLooped(this,
+                            (kill.number << PAGE_BITS) + (word * 64) + static_cast<uint32_t>(std::countr_zero(bits)));
+          }
+#endif
           header->mask[word].store(mask & ~gone, std::memory_order_relaxed);
           if constexpr (DESTROYS) {
             const uint32_t first = (kill.number << PAGE_BITS) + (word * 64);

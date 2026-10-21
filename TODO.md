@@ -165,11 +165,55 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
   parameters. What `static_assert` checks for one system (a component taken through `Modify` and past it) is checked
   there over the system and its listeners, with `std::logic_error`. The parameters of a listener are made for every
   event, `Resources` with its look through the provided caches; not measured.
-- [ ] **Adding and removing in an `each`:** look at what exactly happens when the function of an `each` or
-  `parallelEach` adds or removes components, through `Change`, `World` directly, or a listener of `Emit`: of its own
-  entity or of another, of a component the loop goes through or of another one. Does the loop see the change, skip
-  an entity, see one twice; does a reference the function holds stay good. By design a structural change has no
-  side effects on other components (one column per component), so only the column the loop goes through matters.
+- [x] **Adding and removing in an `each`:** what happens when the function of an `each` or `parallelEach` adds or
+  removes components, through `Change`, `World` directly, or a listener of `Emit`. By design a structural change has
+  no side effects on other components (one column per component, values never move), so only the column the loop
+  goes through matters. Tried with a probe under ASan (`each<Owned>`, `Owned` holding a `unique_ptr`), single thread:
+
+  | change in the function | what the loop does |
+  |---|---|
+  | own entity, a component the loop does not name | nothing, other column |
+  | own entity, erase of the component the loop goes through | goes on, 100 of 100 and 4096 of 4096 calls; only the function's reference dies |
+  | other entity, erase, later word of the page | skipped: the mask of a word is read when the loop gets to it |
+  | other entity, erase, same word, later slot | **called with the destroyed component** (the mask of the word was read before) |
+  | other entity, erase, full page | **called with the destroyed component**: a full page is gone through without the mask |
+  | other entity, add, later word already in the summary | seen |
+  | other entity, add, later word not in the summary | not seen: the summary is read once per page |
+  | other entity, add, same word, later slot | not seen |
+  | other entity, later page | seen either way: the page is read when the loop gets to it |
+
+  So the documented rule (only the own entity, not the components the loop names) is what keeps it safe; nothing
+  checks it. Not tried, from reading: an erase that empties the page the loop is in parks it among the spares, which
+  keep its memory; only if other pages emptied meanwhile push it out does `vacate` give the memory back
+  (`memory::decommit`) under the loop, which reads zeros on Linux and faults on Windows. In `parallelEach` the
+  loop reads the mask with `relaxed` while `tryEmplace` of another thread sets it with `acq_rel`: seeing the bit
+  does not formally guarantee seeing the made value (fine on x86, not on ARM).
+
+  Three ways for the loop to see what the function removed on the same thread, tried and measured
+  (`scripts/ecs_compare.py --only sc`, best of 2 runs each against 4 runs as now; the same build differs by about
+  ±10 % in rows nothing changed, `get` among them):
+
+  | | 1 component, 1 thread | 3 components | 5 systems | looks up another entity | add + remove | destroy, all at once |
+  |---|---|---|---|---|---|---|
+  | as now | 22.3 µs | 13.8 µs | 952 µs | 1.26 ms | 780 µs | 463 µs |
+  | the mask read after every call | +423 % | +954 % | +485 % | +89 % | +1 % | +3 % |
+  | a `thread_local` count of removals, the mask read anew when it went up | +2 % | +1 % | −2 % | +92 % | +5 % | +44 % |
+  | a count per page and column (`Header::changes`), the same | +99 % | +268 % | +251 % | +246 % | +45 % | +33 % |
+
+  A full page is one loop the compiler turns into SIMD code; a load of the mask or of an atomic count per entity
+  ends that. The `thread_local` count can be hoisted where the function is seen through, but not where it calls
+  what the compiler does not see (looking up another entity, `modify`), and why removing got 38 to 44 % slower
+  with it was not found. The count per page sees other threads too, but does not stop them: a component removed
+  between the look and the call is still called destroyed.
+
+  Decided: none of them. The rule stays as documented (only the own entity, not the components the loop names; for
+  others `Commands`), and debug builds check it: a loop puts its columns and the entity of its call into a
+  `thread_local` `LoopWatch`, and `erase` and `eraseAlone` assert that they take no component of a watched column
+  from another entity (`assertNotLooped`), also through nested loops and listeners of `Emit`. Removing the looped
+  component of its own entity stays allowed: the loop is fine with it, only the function's reference is gone.
+  Nothing in release builds (one run: 62 of 67 rows within the range of the runs before ±3 %, the rest in both
+  directions). Adding to another entity is not checked: the loop may or may not see it, but nothing is destroyed.
+  Changes by other threads are not caught either; for them a loop that holds the making bit would be needed.
 - [x] **Measure:** cost of `modify` per event, and with many threads waiting on the same target (one boss, many
   hits), as a case in `tests/ecs_compare` (large world, 1M entities, each damages another by 1; Ryzen 7 5800X,
   16 threads, clang release, median of 5 runs, ns per entity):
@@ -196,8 +240,8 @@ The API is not settled; these are the open questions found so far.
   pages without it; if its callback calls `modify<Health>` on an entity in a page another thread is iterating, both
   write the same `Health`. For systems a `static_assert` in `Scheduler::addSystem` now forbids `Modify<T>` together
   with `T` as a loop parameter or in a query (also `const T`: reading without the bit next to a `modify` is a race
-  as well). Not checked for `world.parallelEach` with `world.modify` in it, which has no types to check.
-  The page lock below would allow it.
+  as well). For `world.parallelEach` with `world.modify` in it, which has no types to check, debug builds assert
+  in `Column::modify` that it is not a component the loop goes through on another entity (`assertNotLooped`).
 - [ ] **Page lock while iterating:** a loop locks the page of each column it writes (per column and page, not per
   entity page, so a loop over `Health` does not block `modify<Sprite>`), one RMW per 4096 entities. Pitfalls:
   - Deadlock: thread A holds page P1 and calls `modify` on P2, thread B holds P2 and calls `modify` on P1 (two groups

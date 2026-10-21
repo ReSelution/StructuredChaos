@@ -84,6 +84,35 @@ namespace sc::ecs::internal {
     Modifying &operator=(const Modifying &) = delete;
   };
 
+  // Has the columns of a loop in loopWatch for as long as it exists, see
+  // assertNotLooped. Nothing in release builds.
+  template<size_t Count>
+  class LoopWatcher {
+  public:
+#ifndef NDEBUG
+    explicit LoopWatcher(const std::array<const ColumnBase *, Count> &columns) noexcept :
+        m_columns(columns), m_watch{.columns = m_columns, .index = ~uint32_t{0}, .outer = loopWatch} {
+      loopWatch = &m_watch;
+    }
+    ~LoopWatcher() { loopWatch = m_watch.outer; }
+
+    // The loop calls its function for the entity at the index now.
+    void at(uint32_t index) noexcept { m_watch.index = index; }
+#else
+    explicit LoopWatcher(const std::array<const ColumnBase *, Count> &) noexcept {}
+
+    void at(uint32_t) noexcept {}
+#endif
+    LoopWatcher(const LoopWatcher &) = delete;
+    LoopWatcher &operator=(const LoopWatcher &) = delete;
+
+#ifndef NDEBUG
+  private:
+    std::array<const ColumnBase *, Count> m_columns;
+    LoopWatch m_watch;
+#endif
+  };
+
   // Whether get may hand out a component of this type here: for reading
   // always, for writing not in a parallel loop.
   template<typename Component>
@@ -819,11 +848,15 @@ namespace sc::ecs {
     //
     // The function may add and remove components of the entity it is called
     // with and of entities it creates, as long as they are none of those the
-    // loop names. Other entities it leaves as they are, apart from what
-    // tryEmplace and erase do to them in parallelEach, see there. An entity it
-    // creates may have the index of one that was destroyed, in a page the loop
-    // is yet to go through: with a component the loop names it would be found
-    // there.
+    // loop names; removing one the loop names from its own entity is fine for
+    // the loop, but the reference the function got goes with it. Other
+    // entities it leaves as they are, apart from what tryEmplace and erase do
+    // to them in parallelEach, see there: changes to them go through Commands.
+    // A component the loop names taken from another entity would be called
+    // destroyed if that entity comes later in its word or in a full page, and
+    // debug builds assert, see internal::assertNotLooped. An entity it creates
+    // may have the index of one that was destroyed, in a page the loop is yet
+    // to go through: with a component the loop names it would be found there.
     template<typename... Terms, typename Function>
     void each(Function &&function) {
       using Lists = internal::Split<internal::List<>, internal::List<>, Terms...>;
@@ -1031,6 +1064,7 @@ namespace sc::ecs {
                      const Columns<Excluded...> &excluded, uint32_t first, uint32_t last, Function &function) const {
       static_assert(sizeof...(Get) != 0, "a loop needs a component to go through");
       [&]<size_t... G, size_t... X>(std::index_sequence<G...>, std::index_sequence<X...>) {
+        internal::LoopWatcher<sizeof...(Get)> watcher{{std::get<G>(columns)...}};
         for (uint32_t place = first; place < last; ++place) {
           const uint32_t number = m_entities.pageAt(place);
           const std::tuple pages{std::get<G>(columns)->page(number)...};
@@ -1048,6 +1082,7 @@ namespace sc::ecs {
           [[maybe_unused]] const uint32_t *generations = WITH_ENTITY ? m_entities.generation(base) : nullptr;
 
           const auto call = [&](uint32_t slot) {
+            watcher.at(base + slot);
             if constexpr (WITH_ENTITY) {
               std::apply(function, std::tuple_cat(std::tuple{makeEntity(base + slot, generations[slot])},
                                                   internal::componentOn(std::get<G>(values), slot)...));
