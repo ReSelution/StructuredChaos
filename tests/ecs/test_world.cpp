@@ -472,6 +472,11 @@ TEST_CASE("World Entities", "[ecs][world]") {
       std::vector<std::jthread> threads;
       for (size_t t = 0; t < threadCount; ++t) {
         threads.emplace_back([&, t] {
+          // TODO: under TSan this spin can keep go.store below from getting
+          // TSan's lock on go for minutes (seen 2026-10-22: the main thread in
+          // FutexWait of __tsan_atomic8_store, the 8 threads here; runs of 15
+          // s and of over 300 s, which hit meson's timeout). std::latch or a
+          // yield in the loop would leave it the lock.
           while (!go.load(std::memory_order_acquire)) {
           }
           for (size_t i = 0; i < perThread; ++i) {
