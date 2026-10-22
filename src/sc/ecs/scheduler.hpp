@@ -133,15 +133,22 @@ namespace sc::ecs::internal {
   };
 
   // Gives the index a component made from the recorded value unless it has
-  // one, or only drops the value if page is null. The value is gone
-  // afterwards either way, also if making the component throws. Null for a
-  // component without members.
-  template<typename T>
+  // one, or only drops the value if page is null; with REPLACE, the one it
+  // has gets the value moved in instead. Nothing runs next to it, see
+  // CommandApplier. The value is gone afterwards either way, also if making
+  // the component throws. Null for a component without members.
+  template<typename T, bool REPLACE>
   void finishEmplace(ColumnBase &column, uint32_t index, void *value, PageAdds *page) {
     auto &typed = static_cast<Column<T> &>(column);
     if constexpr (Column<T>::HAS_VALUE) {
       const auto drop = [](T *made) { std::destroy_at(made); };
       const std::unique_ptr<T, decltype(drop)> made{static_cast<T *>(value), drop};
+      if constexpr (REPLACE) {
+        if (page != nullptr && typed.contains(index)) {
+          typed.get(index) = std::move(*made);
+          return;
+        }
+      }
       if (page != nullptr) {
         uint32_t &added = page->reserve(column);
         added += typed.emplaceCounted(index, std::move(*made)) ? 1 : 0;
@@ -183,17 +190,12 @@ namespace sc::ecs::internal {
 
     template<typename T, typename... Args>
     void emplace(Entity entity, Column<T> &column, Args &&...args) {
-      // First, so that a value that was made is always one of a change.
-      m_changes.push_back({.entity = entity, .column = &column, .finish = &finishEmplace<T>, .value = nullptr});
-      if constexpr (Column<T>::HAS_VALUE) {
-        try {
-          m_changes.back().value = ::new (m_values.allocate(sizeof(T), alignof(T))) T{std::forward<Args>(args)...};
-        } catch (...) {
-          m_changes.pop_back();
-          throw;
-        }
-      }
-      note(entity);
+      record<&finishEmplace<T, false>>(entity, column, std::forward<Args>(args)...);
+    }
+
+    template<typename T, typename... Args>
+    void emplaceOrReplace(Entity entity, Column<T> &column, Args &&...args) {
+      record<&finishEmplace<T, true>>(entity, column, std::forward<Args>(args)...);
     }
 
     template<typename T, typename Function>
@@ -222,9 +224,9 @@ namespace sc::ecs::internal {
     struct Change {
       Entity entity;
       ColumnBase *column;
-      // finishEmplace of a component to add or finishModify of one to
-      // modify, which also drop the value; null for one to remove, and once
-      // the change is done.
+      // finishEmplace of a component to add or replace, or finishModify of
+      // one to modify, which also drop the value; null for one to remove, and
+      // once the change is done.
       void (*finish)(ColumnBase &column, uint32_t index, void *value, PageAdds *page);
       // The component to add, or the function of modify.
       void *value;
@@ -260,6 +262,22 @@ namespace sc::ecs::internal {
     static constexpr uint32_t NO_PAGE = ~uint32_t{0};
 
   private:
+    // A component to add with FINISH, made from the arguments now.
+    template<auto FINISH, typename T, typename... Args>
+    void record(Entity entity, Column<T> &column, Args &&...args) {
+      // First, so that a value that was made is always one of a change.
+      m_changes.push_back({.entity = entity, .column = &column, .finish = FINISH, .value = nullptr});
+      if constexpr (Column<T>::HAS_VALUE) {
+        try {
+          m_changes.back().value = ::new (m_values.allocate(sizeof(T), alignof(T))) T{std::forward<Args>(args)...};
+        } catch (...) {
+          m_changes.pop_back();
+          throw;
+        }
+      }
+      note(entity);
+    }
+
     // Keeps page up to date. One comparison per change, which spares
     // CommandApplier counting 1M changes (about 0.6 ms on all threads) to
     // find that they all hit one page.
@@ -905,6 +923,22 @@ namespace sc::ecs {
     void emplace(Entity entity, Args &&...args) const {
       auto &column = m_world->template column<Component>();
       withList([&](internal::CommandList &list) { list.emplace(entity, column, std::forward<Args>(args)...); });
+    }
+
+    // The same, but an entity that has the component by then gets the made
+    // one moved into it, as World::emplaceOrReplace does now:
+    //
+    //   commands.emplaceOrReplace<State>(entity, State::Dead);
+    //
+    // Of several recorded for one component of an entity, the last one done
+    // stays, see modify for their order. Like emplace, this does not count as
+    // writing the component: the systems that use it run at the same time
+    // and see it as it was.
+    template<typename Component, typename... Args>
+    void emplaceOrReplace(Entity entity, Args &&...args) const {
+      auto &column = m_world->template column<Component>();
+      withList(
+          [&](internal::CommandList &list) { list.emplaceOrReplace(entity, column, std::forward<Args>(args)...); });
     }
 
     // Does nothing if the entity does not exist any more by then or does not

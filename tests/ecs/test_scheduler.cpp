@@ -1037,6 +1037,46 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     REQUIRE(alive.use_count() == 1);
   }
 
+  SECTION("Recorded Components Replace The Ones The Entities Have") {
+    // Over several pages, on several threads: every other entity has the
+    // component already.
+    for (size_t i = 0; i < entities.size(); i += 2) {
+      world.emplace<Spawner>(entities[i], -1);
+    }
+    const auto alive = std::make_shared<int>(0);
+    world.emplace<Named>(entities[0], "old", alive);
+    const Entity gone = entities[1];
+    scheduler.addParallel([&](Entity entity, Commands commands, const Position &pos) {
+      commands.emplaceOrReplace<Spawner>(entity, static_cast<int>(pos.x));
+    });
+    scheduler.add([&](Commands commands) {
+      // In their order with the other changes: the last one stays.
+      commands.emplaceOrReplace<Named>(entities[0], "first", alive);
+      commands.modify(entities[0], [](Named &named) { named.name += " changed"; });
+      commands.emplaceOrReplace<Named>(entities[0], "last", alive);
+      commands.emplaceOrReplace<Named>(entities[2], "made", alive);
+      // Dropped: an entity that is no more.
+      commands.emplaceOrReplace<Named>(gone, "nobody", alive);
+    });
+    world.destroy(gone);
+    scheduler.run(world);
+
+    size_t spawners = 0;
+    for (size_t i = 0; i < entities.size(); ++i) {
+      if (i != 1) {
+        REQUIRE(world.get<const Spawner>(entities[i]).count == static_cast<int>(i));
+        ++spawners;
+      }
+    }
+    size_t looped = 0;
+    world.each<const Spawner>([&](const Spawner &) { ++looped; });
+    REQUIRE(looped == spawners);
+    REQUIRE(world.get<const Named>(entities[0]).name == "last");
+    REQUIRE(world.get<const Named>(entities[2]).name == "made");
+    // The two that stay; every other one that was made is gone.
+    REQUIRE(alive.use_count() == 3);
+  }
+
   SECTION("Recorded Changes Of Many Entities Keep Their Order Per Entity") {
     // Done on several threads, a page each, with the erases of a page
     // gathered: whatever comes after an erase of the same entity must see it
