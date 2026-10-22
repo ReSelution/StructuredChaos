@@ -373,6 +373,116 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
 
 namespace {
 
+  // Every change of Velocity moves the entity, with Position and Health, to
+  // the table of its new set.
+  struct Churn {
+    using Handle = flecs::entity;
+    World base;
+    flecs::world &world = base.world;
+    flecs::query<Position, const Velocity> moving = world.query<Position, const Velocity>();
+    flecs::query<Health> healing = world.query<Health>();
+
+    Handle spawn(size_t number) {
+      return world.entity().set<Position>({static_cast<float>(number), 1.0f}).set<Health>({50.0f});
+    }
+    void add_velocity(Handle entity) { entity.set<Velocity>({1.0f, 2.0f}); }
+    void remove_velocity(Handle entity) { entity.remove<Velocity>(); }
+    void frame() {
+      moving.each([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      healing.each([](Health &health) { heal(health); });
+    }
+  };
+
+  void run_churn_cases(size_t count, const char *section) {
+    for (const double percent: CHURN_PERCENTS) {
+      Churn churn;
+      const ChurnTimes times = run_churn(churn, percent, count);
+      report(percent, times, false, "", section);
+      REQUIRE(static_cast<size_t>(churn.world.count<Velocity>()) == times.moving);
+    }
+  }
+
+} // namespace
+
+TEST_CASE(CHURN_WORLD, "[ecs_compare][!benchmark]") { run_churn_cases(ENTITY_COUNT, CHURN_WORLD); }
+TEST_CASE(CHURN_LARGE_WORLD, "[ecs_compare][!benchmark]") { run_churn_cases(PARALLEL_ENTITY_COUNT, CHURN_LARGE_WORLD); }
+
+namespace {
+
+  // The phases of two pipelines, so that the changes and the systems are
+  // timed apart without enabling and disabling systems every frame, which
+  // would itself change the structure of the world.
+  struct ChangePhase {};
+  struct SystemsPhase {};
+
+  // A multi_threaded system records the changes, which flecs defers while
+  // the threads run and merges once they are done.
+  struct ParallelChurn {
+    using Handle = flecs::entity;
+    World base;
+    flecs::world &world = base.world;
+    const uint8_t *picked = nullptr;
+    const uint8_t *moving = nullptr;
+    flecs::entity changes;
+    flecs::entity systems;
+
+    explicit ParallelChurn(int32_t threads) {
+      world.component<Number>();
+      world.set_threads(threads);
+      changes = world.pipeline().with(flecs::System).with<ChangePhase>().build();
+      systems = world.pipeline().with(flecs::System).with<SystemsPhase>().build();
+      world.system<const Number>("change").kind<ChangePhase>().write<Velocity>().multi_threaded().each(
+          [this](flecs::entity entity, const Number &number) {
+            if (picked[number.value] == 0) {
+              return;
+            }
+            if (moving[number.value] != 0) {
+              entity.remove<Velocity>();
+            } else {
+              entity.set<Velocity>({1.0f, 2.0f});
+            }
+          });
+      world.system<Position, const Velocity>("integrate")
+          .kind<SystemsPhase>()
+          .multi_threaded()
+          .each([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      world.system<Health>("heal").kind<SystemsPhase>().multi_threaded().each([](Health &health) { heal(health); });
+    }
+
+    Handle spawn(size_t number) {
+      return world.entity()
+          .set<Position>({static_cast<float>(number), 1.0f})
+          .set<Health>({50.0f})
+          .set<Number>({static_cast<uint32_t>(number)});
+    }
+    void add_velocity(Handle entity) { entity.set<Velocity>({1.0f, 2.0f}); }
+    void change(const uint8_t *frame_picked, const uint8_t *frame_moving) {
+      picked = frame_picked;
+      moving = frame_moving;
+      world.run_pipeline(changes, DT);
+    }
+    void frame() { world.run_pipeline(systems, DT); }
+  };
+
+  void run_churn_parallel_cases(size_t count, const char *section) {
+    const auto threads = static_cast<int32_t>(thread_count());
+    for (const double percent: CHURN_PERCENTS) {
+      ParallelChurn churn{threads};
+      const ChurnTimes times = run_churn_parallel(churn, percent, count);
+      report(percent, times, true, "", section);
+      REQUIRE(static_cast<size_t>(churn.world.count<Velocity>()) == times.moving);
+    }
+  }
+
+} // namespace
+
+TEST_CASE(CHURN_PARALLEL, "[ecs_compare][!benchmark]") { run_churn_parallel_cases(ENTITY_COUNT, CHURN_WORLD); }
+TEST_CASE(CHURN_LARGE_PARALLEL, "[ecs_compare][!benchmark]") {
+  run_churn_parallel_cases(PARALLEL_ENTITY_COUNT, CHURN_LARGE_WORLD);
+}
+
+namespace {
+
   struct Heavy {
     using Handle = flecs::entity;
     flecs::world world;

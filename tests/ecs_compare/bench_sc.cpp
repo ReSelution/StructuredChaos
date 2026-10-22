@@ -523,6 +523,100 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
 
 namespace {
 
+  // Created with Position and Health, in the area of that set; Velocity comes
+  // and goes without moving the entity.
+  struct Churn {
+    using Handle = Entity;
+    sc::ecs::World world{PAGES};
+
+    Handle spawn(size_t number) { return world.create(Position{static_cast<float>(number), 1.0f}, Health{50.0f}); }
+    void add_velocity(Handle entity) { world.emplace<Velocity>(entity, 1.0f, 2.0f); }
+    void remove_velocity(Handle entity) { world.erase<Velocity>(entity); }
+    void frame() {
+      world.each<Position, const Velocity>([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      world.each<Health>([](Health &health) { heal(health); });
+    }
+  };
+
+  void run_churn_cases(size_t count, const char *section) {
+    sc::threading::init(thread_count() - 1);
+    for (const double percent: CHURN_PERCENTS) {
+      Churn churn;
+      const ChurnTimes times = run_churn(churn, percent, count);
+      report(percent, times, false, "", section);
+      size_t moving = 0;
+      churn.world.each<const Velocity>([&](const Velocity &) { ++moving; });
+      REQUIRE(moving == times.moving);
+    }
+  }
+
+} // namespace
+
+TEST_CASE(CHURN_WORLD, "[ecs_compare][!benchmark]") { run_churn_cases(ENTITY_COUNT, CHURN_WORLD); }
+TEST_CASE(CHURN_LARGE_WORLD, "[ecs_compare][!benchmark]") { run_churn_cases(PARALLEL_ENTITY_COUNT, CHURN_LARGE_WORLD); }
+
+namespace {
+
+  // A parallel loop records the changes with Commands, which the scheduler
+  // makes once the loop is over, a page of entities on each thread. The
+  // systems run in a scheduler of their own, so that the two are timed apart.
+  struct ParallelChurn {
+    using Handle = Entity;
+    sc::ecs::World world{PAGES};
+    const uint8_t *picked = nullptr;
+    const uint8_t *moving = nullptr;
+    Scheduler changer;
+    Scheduler systems;
+
+    ParallelChurn() {
+      changer.addParallel([this](Entity entity, Commands commands, const Number &number) {
+        if (picked[number.value] == 0) {
+          return;
+        }
+        if (moving[number.value] != 0) {
+          commands.erase<Velocity>(entity);
+        } else {
+          commands.emplace<Velocity>(entity, 1.0f, 2.0f);
+        }
+      });
+      systems.addParallel([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      systems.addParallel([](Health &health) { heal(health); });
+    }
+
+    Handle spawn(size_t number) {
+      return world.create(Position{static_cast<float>(number), 1.0f}, Health{50.0f},
+                          Number{static_cast<uint32_t>(number)});
+    }
+    void add_velocity(Handle entity) { world.emplace<Velocity>(entity, 1.0f, 2.0f); }
+    void change(const uint8_t *frame_picked, const uint8_t *frame_moving) {
+      picked = frame_picked;
+      moving = frame_moving;
+      changer.run(world);
+    }
+    void frame() { systems.run(world); }
+  };
+
+  void run_churn_parallel_cases(size_t count, const char *section) {
+    sc::threading::init(thread_count() - 1);
+    for (const double percent: CHURN_PERCENTS) {
+      ParallelChurn churn;
+      const ChurnTimes times = run_churn_parallel(churn, percent, count);
+      report(percent, times, true, "", section);
+      size_t moving = 0;
+      churn.world.each<const Velocity>([&](const Velocity &) { ++moving; });
+      REQUIRE(moving == times.moving);
+    }
+  }
+
+} // namespace
+
+TEST_CASE(CHURN_PARALLEL, "[ecs_compare][!benchmark]") { run_churn_parallel_cases(ENTITY_COUNT, CHURN_WORLD); }
+TEST_CASE(CHURN_LARGE_PARALLEL, "[ecs_compare][!benchmark]") {
+  run_churn_parallel_cases(PARALLEL_ENTITY_COUNT, CHURN_LARGE_WORLD);
+}
+
+namespace {
+
   struct Heavy {
     using Handle = Entity;
     sc::ecs::World world{PAGES};

@@ -292,6 +292,18 @@ namespace compare {
   inline constexpr const char *LARGE_WORLD = "1 000 000 entities";
   // ENTITY_COUNT and STEADY_CHANGES.
   inline constexpr const char *STEADY_WORLD = "100 000 entities in use, 1 000 replaced and 1 000 changed per frame";
+  // ENTITY_COUNT and CHURN_PERCENTS, see run_churn. Without a comma, which a
+  // test spec of Catch2 reads as "or", so that it can be run on its own.
+  inline constexpr const char *CHURN_WORLD = "100 000 entities of which a share gains or loses Velocity per frame";
+  // The test case of run_churn_parallel. Its rows go into the section of
+  // CHURN_WORLD, next to those on one thread.
+  inline constexpr const char *CHURN_PARALLEL =
+      "100 000 entities of which a share gains or loses Velocity per frame on all threads";
+  // The same two with PARALLEL_ENTITY_COUNT.
+  inline constexpr const char *CHURN_LARGE_WORLD =
+      "1 000 000 entities of which a share gains or loses Velocity per frame";
+  inline constexpr const char *CHURN_LARGE_PARALLEL =
+      "1 000 000 entities of which a share gains or loses Velocity per frame on all threads";
 
   inline constexpr const char *HEAVY_WORLD = "100 000 entities with components of 64 and 256 bytes";
 
@@ -415,6 +427,155 @@ namespace compare {
     return {.median = at(50), .percentile90 = at(90), .percentile99 = at(99), .slowest = times.back()};
   }
 
+  // Where keeping the components of a set together pays and where it costs:
+  // every entity has Position and Health, half of them Velocity, spread
+  // without a pattern, as random adds and removes leave it. Every frame a
+  // share of the entities, the same ones for every library, gains Velocity
+  // or loses it, and then the systems run. A library that moves an entity
+  // with all of its components on every change pays in the changes; one that
+  // leaves it where it is pays in loops over the gaps. The share at which the
+  // two cost the same is the break-even. On one thread with run_churn, on all
+  // of them with run_churn_parallel.
+  constexpr std::array<double, 7> CHURN_PERCENTS{0.0, 0.1, 1.0, 5.0, 10.0, 25.0, 50.0};
+  constexpr size_t CHURN_FRAMES = 200;
+  // Frames before the measured ones, so that what the first changes make
+  // (tables, pages) is not in the timing.
+  constexpr size_t CHURN_WARM_UP = 20;
+
+  // The place of an entity in the order in which the parallel churn spawned
+  // it, by which the system that makes the changes finds out whether the
+  // frame picked it.
+  struct Number {
+    uint32_t value;
+  };
+
+  // Medians over the frames in nanoseconds, and how many entities have
+  // Velocity at the end, to check the library against.
+  struct ChurnTimes {
+    double changes;
+    double iterate;
+    double frame;
+    size_t moving;
+  };
+
+  // The world before the first frame: count entities, Velocity on a random
+  // half of them, which moving records.
+  template <typename World>
+  std::vector<typename World::Handle> spawn_churn(World &world, size_t count, std::mt19937 &random,
+                                                  std::vector<uint8_t> &moving) {
+    std::vector<typename World::Handle> entities;
+    entities.reserve(count);
+    moving.assign(count, 0);
+    for (size_t i = 0; i < count; ++i) {
+      entities.push_back(world.spawn(i));
+      if (random() % 2 == 0) {
+        world.add_velocity(entities.back());
+        moving[i] = 1;
+      }
+    }
+    return entities;
+  }
+
+  // Times every frame: change, the changes of the frame, then frame, the
+  // systems.
+  template <typename Change, typename Frame> ChurnTimes time_churn(Change &&change, Frame &&frame) {
+    std::vector<double> changing;
+    std::vector<double> iterating;
+    std::vector<double> frames;
+    changing.reserve(CHURN_FRAMES);
+    iterating.reserve(CHURN_FRAMES);
+    frames.reserve(CHURN_FRAMES);
+    for (size_t number = 0; number < CHURN_WARM_UP + CHURN_FRAMES; ++number) {
+      const auto start = std::chrono::steady_clock::now();
+      change();
+      const auto changed = std::chrono::steady_clock::now();
+      frame();
+      const auto end = std::chrono::steady_clock::now();
+      if (number >= CHURN_WARM_UP) {
+        changing.push_back(std::chrono::duration<double, std::nano>(changed - start).count());
+        iterating.push_back(std::chrono::duration<double, std::nano>(end - changed).count());
+        frames.push_back(std::chrono::duration<double, std::nano>(end - start).count());
+      }
+    }
+    const auto median = [](std::vector<double> &times) {
+      std::ranges::sort(times);
+      return times[times.size() / 2];
+    };
+    return {.changes = median(changing), .iterate = median(iterating), .frame = median(frames), .moving = 0};
+  }
+
+  inline size_t churn_changes(size_t count, double percent) {
+    return static_cast<size_t>(static_cast<double>(count) * percent / 100.0);
+  }
+
+  // Runs the frames on a world of a library, which is a type with
+  //   Handle                       an entity
+  //   Handle spawn(size_t n)       an entity with Position and Health
+  //   void add_velocity(Handle)    adds Velocity, which the entity does not have
+  //   void remove_velocity(Handle)
+  //   void frame()                 integrate for every entity with Position and Velocity, heal for every one with
+  //   Health
+  // The changes are made one after the other, right away. ENTITY_COUNT
+  // entities or, for CHURN_LARGE_WORLD, PARALLEL_ENTITY_COUNT.
+  template <typename World> ChurnTimes run_churn(World &world, double percent, size_t count = ENTITY_COUNT) {
+    std::mt19937 random{42};
+    std::vector<uint8_t> moving;
+    const auto entities = spawn_churn(world, count, random, moving);
+    const size_t changes = churn_changes(count, percent);
+    ChurnTimes times = time_churn(
+        [&] {
+          for (size_t change = 0; change < changes; ++change) {
+            const size_t i = random() % count;
+            moving[i] != 0 ? world.remove_velocity(entities[i]) : world.add_velocity(entities[i]);
+            moving[i] ^= 1;
+          }
+        },
+        [&] { world.frame(); });
+    times.moving = static_cast<size_t>(std::ranges::count(moving, uint8_t{1}));
+    return times;
+  }
+
+  // The same on all threads, on a world of a library that is a type with
+  //   Handle spawn(size_t n)       an entity with Position, Health and Number{n}
+  //   void add_velocity(Handle)    on one thread, while the world is built
+  //   void change(const uint8_t *picked, const uint8_t *moving)
+  //                                a parallel system over every entity: where picked[number] is 1, Velocity is
+  //                                removed if moving[number] is 1 and added otherwise, in the way the library
+  //                                provides for structural changes from several threads
+  //   void frame()                 the systems of run_churn, each spread over the threads
+  // The entities a frame picks are those of run_churn; picked twice is not
+  // picked, as two changes of one entity undo each other.
+  template <typename World> ChurnTimes run_churn_parallel(World &world, double percent, size_t count = ENTITY_COUNT) {
+    std::mt19937 random{42};
+    std::vector<uint8_t> moving;
+    spawn_churn(world, count, random, moving);
+    const size_t changes = churn_changes(count, percent);
+    std::vector<uint8_t> picked(count, 0);
+    std::vector<size_t> chosen;
+    chosen.reserve(changes);
+    ChurnTimes times = time_churn(
+        [&] {
+          for (const size_t i : chosen) {
+            moving[i] ^= picked[i];
+            picked[i] = 0;
+          }
+          chosen.clear();
+          for (size_t change = 0; change < changes; ++change) {
+            const size_t i = random() % count;
+            picked[i] ^= 1;
+            chosen.push_back(i);
+          }
+          world.change(picked.data(), moving.data());
+        },
+        [&] { world.frame(); });
+    for (const size_t i : chosen) {
+      moving[i] ^= picked[i];
+      picked[i] = 0;
+    }
+    times.moving = static_cast<size_t>(std::ranges::count(moving, uint8_t{1}));
+    return times;
+  }
+
   // Catch2 only reports the benchmarks it ran itself. These lines on the
   // standard output are what scripts/ecs_compare.py reads instead: the test
   // case, the name of the row and the nanoseconds, separated by tabs.
@@ -427,6 +588,21 @@ namespace compare {
     report(STEADY_WORLD, "frame, 90th percentile", times.percentile90);
     report(STEADY_WORLD, "frame, 99th percentile", times.percentile99);
     report(STEADY_WORLD, "frame, slowest", times.slowest);
+  }
+  // One row per share and part of the frame, e.g. "5 % change: frame
+  // [1 thread]", with the variant after it where a library has more than
+  // one, e.g. "5 % change: frame, owning group [1 thread]".
+  inline void report(double percent, const ChurnTimes &times, bool parallel, const char *variant = "",
+                     const char *section = CHURN_WORLD) {
+    char share[32];
+    std::snprintf(share, sizeof(share), "%g %% change", percent);
+    const auto row = [&](const char *part) {
+      const std::string label = std::string{share} + ": " + part + variant;
+      return parallel ? name::parallel(label.c_str()) : name::serial(label.c_str());
+    };
+    report(section, row("changes").c_str(), times.changes);
+    report(section, row("systems").c_str(), times.iterate);
+    report(section, row("frame").c_str(), times.frame);
   }
 
   // What a world costs in memory rather than in time. The section of the

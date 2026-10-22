@@ -303,6 +303,62 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
 
 namespace {
 
+  // Velocity has a storage of its own, from which a remove takes the entity by
+  // swapping in the last one; the loop goes through that storage and looks
+  // Position up for each entity in it.
+  struct Churn {
+    using Handle = entt::entity;
+    entt::registry registry;
+
+    Handle spawn(size_t number) {
+      const entt::entity entity = registry.create();
+      registry.emplace<Position>(entity, static_cast<float>(number), 1.0f);
+      registry.emplace<Health>(entity, 50.0f);
+      return entity;
+    }
+    void add_velocity(Handle entity) { registry.emplace<Velocity>(entity, 1.0f, 2.0f); }
+    void remove_velocity(Handle entity) { registry.erase<Velocity>(entity); }
+    void frame() {
+      registry.view<Position, const Velocity>().each([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      registry.view<Health>().each([](Health &health) { heal(health); });
+    }
+  };
+
+  // The same with an owning group of Position and Velocity, made before the
+  // first entity: the entities with both stay packed at the front of the two
+  // storages, and every add or remove of Velocity swaps the entity into the
+  // group or out of it.
+  struct GroupedChurn : Churn {
+    decltype(entt::registry{}.group<Position, Velocity>()) moving = registry.group<Position, Velocity>();
+
+    void frame() {
+      moving.each([](Position &pos, const Velocity &vel) { integrate(pos, vel); });
+      registry.view<Health>().each([](Health &health) { heal(health); });
+    }
+  };
+
+  void run_churn_cases(size_t count, const char *section) {
+    for (const double percent: CHURN_PERCENTS) {
+      Churn churn;
+      const ChurnTimes times = run_churn(churn, percent, count);
+      report(percent, times, false, "", section);
+      REQUIRE(churn.registry.view<Velocity>().size() == times.moving);
+    }
+    for (const double percent: CHURN_PERCENTS) {
+      GroupedChurn churn;
+      const ChurnTimes times = run_churn(churn, percent, count);
+      report(percent, times, false, ", owning group", section);
+      REQUIRE(churn.moving.size() == times.moving);
+    }
+  }
+
+} // namespace
+
+TEST_CASE(CHURN_WORLD, "[ecs_compare][!benchmark]") { run_churn_cases(ENTITY_COUNT, CHURN_WORLD); }
+TEST_CASE(CHURN_LARGE_WORLD, "[ecs_compare][!benchmark]") { run_churn_cases(PARALLEL_ENTITY_COUNT, CHURN_LARGE_WORLD); }
+
+namespace {
+
   struct Heavy {
     using Handle = entt::entity;
     entt::registry registry;
