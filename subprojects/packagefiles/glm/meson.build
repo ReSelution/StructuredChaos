@@ -17,7 +17,8 @@ if get_option('lang_extensions')
     glm_compile_args += '-fms-extensions'
   endif
 else
-  if compiler.get_id() == 'msvc' or compiler.get_argument_syntax() == 'msvc'
+  # MSVC only, as upstream: clang-cl ignores /Za and warns about it.
+  if compiler.get_id() == 'msvc'
     glm_compile_args += ['/Za', '/permissive-']
   endif
 endif
@@ -106,6 +107,9 @@ endif
 
 glm_inc = include_directories('.')
 
+# The flags of glm_compile_args are for glm's own sources only, as upstream
+# keeps them to its directory; users of glm_dep get the defines alone.
+
 if get_option('build_library')
   glm_lib = library(
     'glm',
@@ -117,9 +121,9 @@ if get_option('build_library')
 
   glm_dep = declare_dependency(
     include_directories: glm_inc,
-    compile_args: glm_args + glm_compile_args,
+    compile_args: glm_args,
     link_with: glm_lib,
   )
 else
-  glm_dep = declare_dependency(include_directories: glm_inc, compile_args: glm_args + glm_compile_args)
+  glm_dep = declare_dependency(include_directories: glm_inc, compile_args: glm_args)
 endif
