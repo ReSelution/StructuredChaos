@@ -163,6 +163,12 @@ namespace sc::ecs::internal {
     virtual bool eraseAlone(uint32_t index) noexcept = 0;
     // eraseAlone for the entities of the pages, a word at a time.
     virtual void eraseAlone(std::span<const KillPage> pages) noexcept = 0;
+    // Counts so many components more in a page, and gives the page its
+    // memory if it has none: for the adds a thread is about to do with
+    // emplaceCounted, while no other thread changes the page in this column.
+    virtual void occupyPage(uint32_t number, uint32_t count) = 0;
+    // Counts so many less, after occupyPage for adds that were not done.
+    virtual void forsakePage(uint32_t number, uint32_t count) noexcept = 0;
   };
 
   // The components of one type, each at the index of its entity.
@@ -694,6 +700,39 @@ namespace sc::ecs::internal {
       }
       forsake(header, number, 1);
       return true;
+    }
+
+    // An add that occupyPage counted already, by the only thread that changes
+    // the page in this column, as CommandApplier gives a page to one thread:
+    // no making bit, and the mask with a plain load and store.
+    // False, with nothing made, if the index has the component.
+    template<typename... Args>
+    bool emplaceCounted(uint32_t index, [[maybe_unused]] Args &&...args) {
+      assert(index < INDEX_LIMIT);
+      Header *const header = findHeader(index >> PAGE_BITS);
+      assert(header != nullptr && "sc::ecs: emplaceCounted without occupyPage");
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      if (has(*header, slot)) {
+        return false;
+      }
+      if constexpr (HAS_VALUE) {
+        ::new (static_cast<void *>(valueAt(index))) T{std::forward<Args>(args)...};
+      }
+      std::atomic<uint64_t> &word = header->mask[slot / 64];
+      word.store(word.load(std::memory_order_relaxed) | (uint64_t{1} << (slot % 64)), std::memory_order_relaxed);
+      markWord(*header, slot / 64);
+      return true;
+    }
+
+    void occupyPage(uint32_t number, uint32_t count) override {
+      assert(count != 0);
+      occupy(makeHeader(number), number, 0, count);
+    }
+
+    void forsakePage(uint32_t number, uint32_t count) noexcept override {
+      if (count != 0) {
+        forsake(headers()[number], number, count);
+      }
     }
 
     // The same without the making bit, also for a component that DESTROYS:

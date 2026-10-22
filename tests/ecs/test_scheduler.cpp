@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <memory>
 #include <stdexcept>
@@ -911,6 +912,61 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     REQUIRE(world.get<Fragile>(entities[0]).value == 2);
     REQUIRE(alive.use_count() == 2);
     REQUIRE_FALSE(world.valid(entities[1]));
+  }
+
+  SECTION("Recorded Changes Of Several Components Over Several Pages Leave The Counts Right") {
+    // Every page of every column is done on one thread, its adds counted
+    // ahead and the ones not done given back: the count of every page must
+    // be what its mask says.
+    const Entity gone = world.create();
+    world.destroy(gone);
+    scheduler.addParallel([gone](Entity entity, Commands commands, const Position &pos) {
+      const auto x = static_cast<int>(pos.x);
+      commands.emplace<Spawner>(entity, x);
+      commands.emplace<Target>(entity, x);
+      // Erased and made again: the later one stays.
+      commands.erase<Spawner>(entity);
+      commands.emplace<Spawner>(entity, -x);
+      // Has one already: not done, its count given back.
+      commands.emplace<Health>(entity);
+      // Of an entity that is gone: dropped.
+      commands.emplace<Target>(gone, 1);
+      if (x % 3 == 0) {
+        commands.erase<Target>(entity);
+      }
+    });
+    scheduler.run(world);
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.get<Spawner>(entities[i]).count == -static_cast<int>(i));
+      REQUIRE(world.contains<Target>(entities[i]) == (i % 3 != 0));
+      REQUIRE(world.get<Health>(entities[i]).value == 100);
+    }
+    const auto countsRight = [&](const auto &column) {
+      for (uint32_t number = 0; number < world.pageCount(); ++number) {
+        const auto page = column.page(number);
+        uint32_t bits = 0;
+        if (page) {
+          for (size_t word = 0; word < sc::ecs::internal::PAGE_WORDS; ++word) {
+            const uint64_t mask = page.mask[word].load();
+            bits += static_cast<uint32_t>(std::popcount(mask));
+            // Loops and erases look at the words of the summary only.
+            if (mask != 0 && (page.summary & (uint64_t{1} << word)) == 0) {
+              return false;
+            }
+          }
+        }
+        if (bits != page.count) {
+          return false;
+        }
+      }
+      return true;
+    };
+    REQUIRE(countsRight(world.column<Spawner>()));
+    REQUIRE(countsRight(world.column<Target>()));
+    REQUIRE(countsRight(world.column<Health>()));
+    // A full page adds Spawner twice per entity, more than counted ahead at
+    // first: had the count of the page reached zero with the last erase, the
+    // summary would have lost the words of the components made again.
   }
 
   SECTION("Recorded Changes Of Values Are Done In Their Order") {

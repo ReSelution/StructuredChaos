@@ -80,34 +80,88 @@ namespace sc::ecs::internal {
     size_t m_used = 0;
   };
 
+  // The adds to one page of entities, which CommandApplier gives one thread:
+  // counted ahead per column (Column::occupyPage) at the first add to it, and
+  // again whenever all that was counted is used up, then the count of those
+  // not done given back once the page is through, also if a change throws.
+  // So two locked instructions per page and column instead of several per
+  // add, and only for the adds: modify keeps no count, which cost 1M
+  // recorded changes of Health 0.45 ms (11 %) where the count of a unit was
+  // kept for every change.
+  class PageAdds {
+  public:
+    // Step is at most the number of changes of the page, as occupyPage
+    // brings that many components of a new page into memory.
+    PageAdds(uint32_t number, size_t changes) noexcept :
+        m_number(number), m_step(static_cast<uint32_t>(std::min<size_t>(changes, PAGE_SIZE))) {}
+
+    PageAdds(const PageAdds &) = delete;
+    PageAdds &operator=(const PageAdds &) = delete;
+
+    ~PageAdds() {
+      for (const Counted &each: m_counted) {
+        each.column->forsakePage(m_number, each.counted - each.added);
+      }
+    }
+
+    // Before an add to the column. The number of adds done there, to raise
+    // for one that is.
+    uint32_t &reserve(ColumnBase &column) {
+      auto found = std::ranges::find(m_counted, &column, &Counted::column);
+      if (found == m_counted.end()) {
+        m_counted.push_back({.column = &column, .counted = 0, .added = 0});
+        found = m_counted.end() - 1;
+      }
+      if (found->added == found->counted) {
+        column.occupyPage(m_number, m_step);
+        found->counted += m_step;
+      }
+      return found->added;
+    }
+
+  private:
+    struct Counted {
+      ColumnBase *column;
+      uint32_t counted;
+      uint32_t added;
+    };
+
+    // The columns added to, mostly a few.
+    std::vector<Counted> m_counted;
+    uint32_t m_number;
+    uint32_t m_step;
+  };
+
   // Gives the index a component made from the recorded value unless it has
-  // one, or only drops the value. The value is gone afterwards either way,
-  // also if making the component throws. Null for a component without
-  // members.
+  // one, or only drops the value if page is null. The value is gone
+  // afterwards either way, also if making the component throws. Null for a
+  // component without members.
   template<typename T>
-  void finishEmplace(ColumnBase &column, uint32_t index, void *value, bool give) {
+  void finishEmplace(ColumnBase &column, uint32_t index, void *value, PageAdds *page) {
     auto &typed = static_cast<Column<T> &>(column);
     if constexpr (Column<T>::HAS_VALUE) {
       const auto drop = [](T *made) { std::destroy_at(made); };
       const std::unique_ptr<T, decltype(drop)> made{static_cast<T *>(value), drop};
-      if (give) {
-        typed.tryEmplace(index, std::move(*made));
+      if (page != nullptr) {
+        uint32_t &added = page->reserve(column);
+        added += typed.emplaceCounted(index, std::move(*made)) ? 1 : 0;
       }
-    } else if (give) {
-      typed.tryEmplace(index);
+    } else if (page != nullptr) {
+      uint32_t &added = page->reserve(column);
+      added += typed.emplaceCounted(index) ? 1 : 0;
     }
   }
 
   // Calls the recorded function with the component at the index if there is
-  // one, or only drops the function. Nothing runs next to it, see
-  // CommandList::apply, so without the making bit. The function is gone
-  // afterwards either way, also if it throws.
+  // one, or only drops the function if page is null. Nothing runs next to
+  // it, see CommandList::apply, so without the making bit. The function is
+  // gone afterwards either way, also if it throws.
   template<typename T, typename Function>
-  void finishModify(ColumnBase &column, uint32_t index, void *value, bool give) {
+  void finishModify(ColumnBase &column, uint32_t index, void *value, PageAdds *page) {
     auto &typed = static_cast<Column<T> &>(column);
     const auto drop = [](Function *function) { std::destroy_at(function); };
     const std::unique_ptr<Function, decltype(drop)> function{static_cast<Function *>(value), drop};
-    if (give && typed.contains(index)) {
+    if (page != nullptr && typed.contains(index)) {
       (*function)(typed.get(index));
     }
   }
@@ -171,7 +225,7 @@ namespace sc::ecs::internal {
       // finishEmplace of a component to add or finishModify of one to
       // modify, which also drop the value; null for one to remove, and once
       // the change is done.
-      void (*finish)(ColumnBase &column, uint32_t index, void *value, bool give);
+      void (*finish)(ColumnBase &column, uint32_t index, void *value, PageAdds *page);
       // The component to add, or the function of modify.
       void *value;
     };
@@ -195,7 +249,7 @@ namespace sc::ecs::internal {
     void clear() noexcept {
       for (const Change &change: m_changes) {
         if (change.finish != nullptr) {
-          change.finish(*change.column, indexOf(change.entity), change.value, false);
+          change.finish(*change.column, indexOf(change.entity), change.value, nullptr);
         }
       }
       m_changes.clear();
@@ -231,11 +285,21 @@ namespace sc::ecs::internal {
   //
   // The changes are sorted by the page of their entity with PageSort,
   // keeping their order (the lists one after the other, each in the order it
-  // was recorded), and every page goes to one thread. So the changes of an entity are done in
-  // their order, and no other thread touches the page in any column, which
-  // lets the erases of a page be done a word of the mask at a time
-  // (Column::eraseAlone of a KillPage). The entities are destroyed at once,
-  // with World::parallelDestroy.
+  // was recorded), and every page goes to one thread. So the changes of an
+  // entity are done in their order, and no other thread touches the page in
+  // any column: a page takes no making bit and changes the mask with plain
+  // loads and stores, the erases a word at a time (Column::eraseAlone of a
+  // KillPage), the adds one at a time (Column::emplaceCounted). Only the
+  // count of the page is changed with locked instructions, as a page emptied
+  // on another thread may look at it when it leaves the spares: per column
+  // twice for the adds (PageAdds) and once per run of erases. Units of a page
+  // and a column, which spread a page over the threads by its columns, made
+  // 4 components on 1M entities 48 % slower to add and remove (44 instead of
+  // 30 ms) and 1M recorded changes of 4 components up to 3 times slower, as
+  // grouping by column went through all changes twice more; they were
+  // ahead only for functions of modify with real work on fewer pages than
+  // threads. The entities are destroyed at once, with
+  // World::parallelDestroy.
   class CommandApplier {
   public:
     // Does what the lists recorded and clears them. If a change throws, the
@@ -248,11 +312,11 @@ namespace sc::ecs::internal {
         total += list->changes().size();
       }
       if (onePage(lists)) {
-        applyInOrder(world, lists);
+        applyInOrder(world, lists, pageOf(lists), total);
       } else {
         // A thread for every so many changes, as World::parallelEach does for
         // entities.
-        applySpread(world, lists, total / CHANGES_PER_THREAD);
+        applySpread(world, lists, total, total / CHANGES_PER_THREAD);
       }
 
       m_destroyed.clear();
@@ -297,21 +361,43 @@ namespace sc::ecs::internal {
       return true;
     }
 
-    // Every change on the calling thread, in the order of the lists.
-    static void applyInOrder(World &world, std::span<CommandList *const> lists) {
-      std::vector<Kill> kills;
+    // The page of the changes, after onePage: none if there are none or they
+    // are all of the null entity.
+    [[nodiscard]] static uint32_t pageOf(std::span<CommandList *const> lists) noexcept {
       for (CommandList *const list: lists) {
-        for (Change &change: list->changes()) {
-          applyChange(world, change, kills);
+        if (!list->changes().empty()) {
+          return list->page() < PAGE_COUNT ? list->page() : CommandList::NO_PAGE;
         }
       }
+      return CommandList::NO_PAGE;
+    }
+
+    // Every change on the calling thread, in the order of the lists: so many
+    // changes, all of the given page.
+    static void applyInOrder(World &world, std::span<CommandList *const> lists, uint32_t number, size_t changes) {
+      std::vector<Kill> kills;
+      PageAdds adds{number, changes};
+      for (CommandList *const list: lists) {
+        applyList(world, list->changes(), kills, adds);
+      }
       flush(kills);
+    }
+
+    // The changes of one list, in their order. Not inlined: in the loop over
+    // the lists GCC kept two of its registers on the stack around every
+    // change, which made 1M recorded changes of one page 7 % slower to apply
+    // (3.37 instead of 3.15 ms).
+    [[gnu::noinline]] static void applyList(World &world, std::span<Change> changes, std::vector<Kill> &kills,
+                                            PageAdds &adds) {
+      for (Change &change: changes) {
+        applyChange(world, change, kills, adds);
+      }
     }
 
     // Every page on one thread. If a change throws, the pages that are not
     // started yet are left, and the first exception is rethrown once the
     // pages that other threads are working on are finished.
-    void applySpread(World &world, std::span<CommandList *const> lists, size_t helpers) {
+    void applySpread(World &world, std::span<CommandList *const> lists, size_t changes, size_t helpers) {
       m_sort.clear();
       for (CommandList *const list: lists) {
         m_sort.add(list->changes());
@@ -323,14 +409,15 @@ namespace sc::ecs::internal {
         if (change.finish != nullptr) {
           const auto finish = change.finish;
           change.finish = nullptr;
-          finish(*change.column, indexOf(change.entity), change.value, false);
+          finish(*change.column, indexOf(change.entity), change.value, nullptr);
         }
       });
       if (m_sort.pages().size() <= 1) {
         // Only one after all, past those of the null entity. The counts go
         // back to zero first, whatever happens then.
+        const uint32_t number = m_sort.pages().empty() ? CommandList::NO_PAGE : m_sort.pages().front();
         m_sort.uncount();
-        applyInOrder(world, lists);
+        applyInOrder(world, lists, number, changes);
         return;
       }
       m_sort.place(helpers, index);
@@ -343,7 +430,7 @@ namespace sc::ecs::internal {
             return;
           }
           try {
-            applyPage(world, m_sort.page(i), kills);
+            applyPage(world, m_sort.page(i), m_sort.pages()[i], kills);
           } catch (...) {
             if (!failed.test_and_set(std::memory_order_acq_rel)) {
               error = std::current_exception();
@@ -360,14 +447,15 @@ namespace sc::ecs::internal {
     // The changes of one page, in their order. The erases that come one
     // after the other are gathered per column and done together before the
     // next change of another kind.
-    static void applyPage(World &world, std::span<Change *const> changes, std::vector<Kill> &kills) {
+    static void applyPage(World &world, std::span<Change *const> changes, uint32_t number, std::vector<Kill> &kills) {
+      PageAdds adds{number, changes.size()};
       for (Change *const change: changes) {
-        applyChange(world, *change, kills);
+        applyChange(world, *change, kills, adds);
       }
       flush(kills);
     }
 
-    static void applyChange(World &world, Change &change, std::vector<Kill> &kills) {
+    static void applyChange(World &world, Change &change, std::vector<Kill> &kills, PageAdds &adds) {
       const uint32_t index = indexOf(change.entity);
       // Not that of an entity that got the index since.
       const bool valid = world.valid(change.entity);
@@ -381,7 +469,7 @@ namespace sc::ecs::internal {
       // Done before the call: finish drops the value whatever happens.
       const auto finish = change.finish;
       change.finish = nullptr;
-      finish(*change.column, index, change.value, valid);
+      finish(*change.column, index, change.value, valid ? &adds : nullptr);
     }
 
     static void kill(std::vector<Kill> &kills, ColumnBase &column, uint32_t index) {
