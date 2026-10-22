@@ -286,8 +286,8 @@ namespace sc::ecs {
     struct Entry : Base {
       Key key;
 
-      Entry(const Key &key, uint8_t owner, std::atomic<Base *> *unused, bool claimed = true) :
-          Base(owner, unused, claimed), key(key) {}
+      Entry(Key key, uint8_t owner, std::atomic<Base *> *unused, bool claimed = true) :
+          Base(owner, unused, claimed), key(std::move(key)) {}
     };
 
   public:

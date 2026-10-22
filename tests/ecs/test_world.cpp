@@ -294,8 +294,8 @@ TEST_CASE("World Entities", "[ecs][world]") {
     // Within the first pages of the area that starts at the page.
     const auto inArea = [&](Entity entity, uint32_t start) { return pageOf(entity) - start < 3; };
     const Entity plain = world.create();
-    const Entity moving = world.create(Position{1.0f, 2.0f}, Velocity{3.0f, 4.0f});
-    const Entity turned = world.create(Velocity{5.0f, 6.0f}, Position{7.0f, 8.0f});
+    const Entity moving = world.create(Position{.x = 1.0f, .y = 2.0f}, Velocity{.dx = 3.0f, .dy = 4.0f});
+    const Entity turned = world.create(Velocity{.dx = 5.0f, .dy = 6.0f}, Position{.x = 7.0f, .y = 8.0f});
     const Entity still = world.create(Position{});
     const Entity special = world.create(sc::ecs::rare);
     // The areas in the order of the van der Corput sequence, whatever the
@@ -324,7 +324,7 @@ TEST_CASE("World Entities", "[ecs][world]") {
     world.create<Tag>(std::span<Entity>{plannedMany});
     size_t inFifth = 0;
     for (const Entity entity: plannedMany) {
-      inFifth += inArea(entity, 1u << 17) && world.valid(entity);
+      inFifth += static_cast<size_t>(inArea(entity, 1u << 17) && world.valid(entity));
     }
     REQUIRE(inFifth == plannedMany.size());
     REQUIRE(world.destroy(planned));
@@ -335,7 +335,7 @@ TEST_CASE("World Entities", "[ecs][world]") {
     world.create(std::span<Entity>{many}, Velocity{}, Position{});
     size_t inMoving = 0;
     for (const Entity entity: many) {
-      inMoving += inArea(entity, 1u << 18);
+      inMoving += static_cast<size_t>(inArea(entity, 1u << 18));
     }
     REQUIRE(inMoving == many.size());
 
@@ -351,7 +351,7 @@ TEST_CASE("World Entities", "[ecs][world]") {
     REQUIRE(world.destroy(std::span<const Entity>{gone}) == gone.size());
     size_t back = 0;
     for (size_t i = 0; i < gone.size(); ++i) {
-      back += inArea(world.create(Position{}, Velocity{}), 1u << 18);
+      back += static_cast<size_t>(inArea(world.create(Position{}, Velocity{}), 1u << 18));
     }
     REQUIRE(back == gone.size());
     const std::vector<Entity> goneOnPool(many.begin() + 100, many.end());
@@ -359,7 +359,7 @@ TEST_CASE("World Entities", "[ecs][world]") {
     REQUIRE(pageOf(world.create(Position{})) == pageOf(still));
     back = 0;
     for (size_t i = 0; i < goneOnPool.size(); ++i) {
-      back += inArea(world.create(Velocity{}, Position{}), 1u << 18);
+      back += static_cast<size_t>(inArea(world.create(Velocity{}, Position{}), 1u << 18));
     }
     REQUIRE(back == goneOnPool.size());
     REQUIRE(world.alive() == 8 + many.size());
@@ -511,7 +511,8 @@ TEST_CASE("World Components", "[ecs][world]") {
     std::vector<Entity> entities((2 * size_t{PAGE_SIZE}) + 100);
     const auto alive = std::make_shared<int>(0);
     world.create<Position, Named, Tag>(entities, [&](size_t i) {
-      return std::tuple{Position{.x = static_cast<float>(i), .y = 1.0f}, Named{std::to_string(i), alive}, Tag{}};
+      return std::tuple{Position{.x = static_cast<float>(i), .y = 1.0f},
+                        Named{.name = std::to_string(i), .alive = alive}, Tag{}};
     });
     size_t right = 0;
     for (size_t i = 0; i < entities.size(); ++i) {
@@ -521,7 +522,7 @@ TEST_CASE("World Components", "[ecs][world]") {
     }
     REQUIRE(right == entities.size());
     REQUIRE(alive.use_count() == 1 + static_cast<long>(entities.size()));
-    const Entity same = world.create(Tag{}, Position{}, Named{"", alive});
+    const Entity same = world.create(Tag{}, Position{}, Named{.name = "", .alive = alive});
     REQUIRE(sc::ecs::indexOf(same) >> sc::ecs::PAGE_BITS == sc::ecs::indexOf(entities.back()) >> sc::ecs::PAGE_BITS);
 
     // A make that throws in the second page: the first one keeps its
@@ -532,7 +533,7 @@ TEST_CASE("World Components", "[ecs][world]") {
       if (i == PAGE_SIZE + 5) {
         throw std::runtime_error("make");
       }
-      return std::tuple{Named{"", counted}, Velocity{}};
+      return std::tuple{Named{.name = "", .alive = counted}, Velocity{}};
     };
     const auto createMore = [&] { world.create<Named, Velocity>(more, make); };
     REQUIRE_THROWS_AS(createMore(), std::runtime_error);
@@ -541,7 +542,8 @@ TEST_CASE("World Components", "[ecs][world]") {
     size_t second = 0;
     for (size_t i = 0; i < more.size(); ++i) {
       REQUIRE(world.valid(more[i]));
-      (i < PAGE_SIZE ? first : second) += world.contains<Named>(more[i]) && world.contains<Velocity>(more[i]);
+      (i < PAGE_SIZE ? first : second) +=
+          static_cast<size_t>(world.contains<Named>(more[i]) && world.contains<Velocity>(more[i]));
     }
     REQUIRE(first == PAGE_SIZE);
     REQUIRE(second == 0);
@@ -1178,7 +1180,7 @@ TEST_CASE("World Components", "[ecs][world]") {
     for (const Entity entity: kept) {
       REQUIRE(world.valid(entity));
       REQUIRE(world.contains<Position>(entity));
-      named += world.contains<Named>(entity);
+      named += static_cast<size_t>(world.contains<Named>(entity));
     }
     REQUIRE(alive.use_count() == 1 + static_cast<long>(named));
     size_t positions = 0;
@@ -1216,7 +1218,7 @@ TEST_CASE("World Components", "[ecs][world]") {
     // No column yet.
     REQUIRE(world.tryGet<Position>(entity) == nullptr);
     world.emplace<Position>(entity, 1.0f, 2.0f);
-    Position *const found = world.tryGet<Position>(entity);
+    auto *const found = world.tryGet<Position>(entity);
     REQUIRE(found == &world.get<Position>(entity));
     found->x = 3.0f;
     REQUIRE(world.get<Position>(entity).x == 3.0f);
@@ -1455,10 +1457,10 @@ TEST_CASE("World Components", "[ecs][world]") {
       World other;
       REQUIRE(other.tryGlobal<Settings>() == nullptr);
       REQUIRE_THROWS_AS(other.global<Settings>(), std::logic_error);
-      Settings &made = other.setGlobal<Settings>(1, alive);
+      auto &made = other.setGlobal<Settings>(1, alive);
       REQUIRE(alive.use_count() == 2);
       // Assigned: where it is stays.
-      Settings &again = other.setGlobal<Settings>(2, alive);
+      auto &again = other.setGlobal<Settings>(2, alive);
       REQUIRE(&again == &made);
       REQUIRE(alive.use_count() == 2);
       const World &seen = other;

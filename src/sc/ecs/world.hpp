@@ -1305,7 +1305,7 @@ namespace sc::ecs {
     // How many entities of the first pages handed out have all of the
     // components, at most. Stops counting at the limit.
     template<typename... Each>
-    size_t countUpTo(const std::tuple<Each...> &columns, uint32_t pages, size_t limit) const {
+    [[nodiscard]] size_t countUpTo(const std::tuple<Each...> &columns, uint32_t pages, size_t limit) const {
       size_t count = 0;
       for (uint32_t place = 0; place < pages && count < limit; ++place) {
         const uint32_t number = m_entities.pageAt(place);

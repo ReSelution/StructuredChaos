@@ -135,7 +135,7 @@ namespace sc::ecs {
         }
         return;
       }
-      const Entity before = std::exchange(internal::goingTarget<Kind>, target);
+      const auto before = std::exchange(internal::goingTarget<Kind>, target);
       for (const Entity source: related.sources) {
         if (!world.valid(source)) {
           continue;
@@ -157,7 +157,7 @@ namespace sc::ecs {
   // target.
   template<typename Kind, typename From, typename Function>
   void forEachRelated(const From &from, Entity target, Function &&function) {
-    if (const Related<Kind> *const related = from.template tryGet<const Related<Kind>>(target); related != nullptr) {
+    if (const auto *const related = from.template tryGet<const Related<Kind>>(target); related != nullptr) {
       for (const Entity source: related->sources) {
         function(source);
       }

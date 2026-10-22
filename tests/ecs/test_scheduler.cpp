@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "sc/ecs/scheduler.hpp"
@@ -366,7 +367,7 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     size_t without = 0;
     scheduler.add([&](Query<const Velocity> query) {
       for (const Entity entity: entities) {
-        const Velocity *const vel = query.tryGet<const Velocity>(entity);
+        const auto *const vel = query.tryGet<const Velocity>(entity);
         without += vel == nullptr ? 1 : 0;
       }
     });
@@ -1407,7 +1408,7 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
       }
     });
     world.onRemove<Spawner>([&](Entity entity, Spawner &spawner) {
-      if (spawner.count == static_cast<int>(sc::ecs::indexOf(entity))) {
+      if (std::cmp_equal(spawner.count, sc::ecs::indexOf(entity))) {
         spawned.fetch_add(1, std::memory_order_relaxed);
       }
     });
@@ -1442,7 +1443,7 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     std::atomic<int> calls = 0;
     world.onRemove<Spawner>([&](Entity entity, Spawner &spawner) {
       calls.fetch_add(1, std::memory_order_relaxed);
-      if (spawner.count == static_cast<int>(sc::ecs::indexOf(entity))) {
+      if (std::cmp_equal(spawner.count, sc::ecs::indexOf(entity))) {
         right.fetch_add(1, std::memory_order_relaxed);
       }
     });

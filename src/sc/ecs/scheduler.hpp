@@ -613,7 +613,7 @@ namespace sc::ecs::internal {
               }
             }
           }
-        } keep{*this, {}, {}};
+        } keep{.applier = *this, .hooked = {}, .removed = {}};
         for (size_t i = first; i < last; ++i) {
           if (failed.test(std::memory_order_relaxed)) {
             return;
@@ -724,7 +724,7 @@ namespace sc::ecs::internal {
   };
 
   template<typename F>
-  using ModifiedBy = typename OnlyParam<typename SystemSignature<F>::Params>::Type;
+  using ModifiedBy = OnlyParam<typename SystemSignature<F>::Params>::Type;
 
 } // namespace sc::ecs::internal
 
@@ -1733,7 +1733,7 @@ namespace sc::ecs::internal {
   };
   template<typename... Terms>
   struct GottenOf<Query<Terms...>> {
-    using Type = typename Split<List<>, List<>, Terms...>::GetList;
+    using Type = Split<List<>, List<>, Terms...>::GetList;
   };
 
   template<typename Component, typename... Gotten>
@@ -1747,10 +1747,14 @@ namespace sc::ecs::internal {
   // Whether a system with these parameters uses a component it edits also
   // through a query, whose loop would get to an edited entity or not,
   // depending on where it lies.
+  // Every typename here is needed: these are template arguments, where C++20
+  // does not assume a type. clang-tidy 22 finds them redundant all the same.
   template<typename... Params>
+  // NOLINTBEGIN(readability-redundant-typename)
   inline constexpr bool usesModifiedOtherwise =
       overlaps<typename Concat<typename ModifiedOf<std::remove_cvref_t<Params>>::Type...>::Type,
                typename Concat<typename GottenOf<std::remove_cvref_t<Params>>::Type...>::Type>;
+  // NOLINTEND(readability-redundant-typename)
 
   // The same for the parameters of a system, the first of which is the
   // query of its loop when LOOP is true: the loop may go through what the
