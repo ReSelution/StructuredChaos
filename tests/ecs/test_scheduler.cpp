@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -99,6 +100,11 @@ namespace {
   // A global value of the world.
   struct GameTime {
     float seconds;
+  };
+
+  // Another entity that goes with this one, see the onRemove hooks.
+  struct Link {
+    Entity child;
   };
 
   using Stages = std::vector<std::vector<size_t>>;
@@ -303,6 +309,15 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
     // Without the world, and for Commands, whose hooks run after the stage.
     REQUIRE(scheduler.stages() == Stages{{0, 1, 2, 3}});
     REQUIRE(scheduler.stages(world) == Stages{{0, 2}, {1, 3}});
+  }
+
+  SECTION("A System Counts As Using What The Remove Hooks Of What It Edits Use") {
+    World world;
+    world.onRemove<Health>([](Entity, Health &, Edit<Target>) {});
+    scheduler.add([](Edit<Health>) {});
+    scheduler.add([](Query<const Target>) {});
+    REQUIRE(scheduler.stages() == Stages{{0, 1}});
+    REQUIRE(scheduler.stages(world) == Stages{{0}, {1}});
   }
 
   SECTION("A Hook Must Not Edit What Its System Takes Through LocalEdit") {
@@ -1378,6 +1393,120 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     });
     scheduler.add([&](Commands commands) { commands.emplace<Spawner>(entities[0]); });
     REQUIRE_THROWS_AS(scheduler.run(world), std::logic_error);
+  }
+
+  SECTION("Remove Hooks See Every Component Before It Goes") {
+    // Named DESTROYS: the hook must see it whole. Spawner does not.
+    const auto alive = std::make_shared<int>(0);
+    std::atomic<int> named = 0;
+    std::atomic<int> spawned = 0;
+    world.onRemove<Named>([&](Entity, Named &value) {
+      if (value.name == "kept" && value.alive != nullptr) {
+        named.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+    world.onRemove<Spawner>([&](Entity entity, Spawner &spawner) {
+      if (spawner.count == static_cast<int>(sc::ecs::indexOf(entity))) {
+        spawned.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+    for (const Entity entity: entities) {
+      world.emplace<Named>(entity, "kept", alive);
+      world.emplace<Spawner>(entity, static_cast<int>(sc::ecs::indexOf(entity)));
+    }
+    // World::erase, twice: once.
+    REQUIRE(world.erase<Named>(entities[0]));
+    REQUIRE_FALSE(world.erase<Named>(entities[0]));
+    REQUIRE(named == 1);
+    // destroy of one, and of many with one twice.
+    world.destroy(entities[1]);
+    REQUIRE(named == 2);
+    REQUIRE(spawned == 1);
+    const std::vector<Entity> some{entities[2], entities[3], entities[2]};
+    world.destroy(std::span<const Entity>{some});
+    REQUIRE(named == 4);
+    REQUIRE(spawned == 3);
+    // Edit and LocalEdit in loops.
+    scheduler.addParallel([](Entity entity, Edit<Named> edit, const Position &) { edit.erase<Named>(entity); });
+    scheduler.addParallel(
+        [](Entity entity, LocalEdit<Spawner> edit, const Position &) { edit.erase<Spawner>(entity); });
+    scheduler.run(world);
+    REQUIRE(named == static_cast<int>(entities.size()));
+    REQUIRE(spawned == static_cast<int>(entities.size()));
+    REQUIRE(alive.use_count() == 1);
+  }
+
+  SECTION("Remove Hooks Of Erases Through Commands Get The Value After The Changes") {
+    std::atomic<int> right = 0;
+    std::atomic<int> calls = 0;
+    world.onRemove<Spawner>([&](Entity entity, Spawner &spawner) {
+      calls.fetch_add(1, std::memory_order_relaxed);
+      if (spawner.count == static_cast<int>(sc::ecs::indexOf(entity))) {
+        right.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+    for (const Entity entity: entities) {
+      world.emplace<Spawner>(entity, static_cast<int>(sc::ecs::indexOf(entity)));
+    }
+    // Erased twice: one hook. Changed before the erase: the hook sees it.
+    scheduler.addParallel([](Entity entity, Commands commands, const Position &) {
+      commands.modify(entity, [](Spawner &spawner) { spawner.count *= 2; });
+      commands.modify(entity, [](Spawner &spawner) { spawner.count /= 2; });
+      commands.erase<Spawner>(entity);
+      commands.erase<Spawner>(entity);
+    });
+    scheduler.run(world);
+    REQUIRE(calls == static_cast<int>(entities.size()));
+    REQUIRE(right == static_cast<int>(entities.size()));
+  }
+
+  SECTION("Removed And Added Again Through Commands, The Hooks See The Old One Then The New One") {
+    std::mutex mutex;
+    std::vector<std::string> seen;
+    world.onRemove<Spawner>([&](Entity, Spawner &spawner) {
+      const std::scoped_lock lock{mutex};
+      seen.push_back("removed " + std::to_string(spawner.count));
+    });
+    world.onAdd<Spawner>([&](Entity, Spawner &spawner) {
+      const std::scoped_lock lock{mutex};
+      seen.push_back("added " + std::to_string(spawner.count));
+    });
+    world.emplace<Spawner>(entities[0], 1);
+    scheduler.add([&](Commands commands) {
+      commands.erase<Spawner>(entities[0]);
+      commands.emplace<Spawner>(entities[0], 2);
+      // Added and destroyed in the same stage: added first.
+      const Entity made = commands.create();
+      commands.emplace<Spawner>(made, 3);
+      commands.destroy(made);
+    });
+    scheduler.run(world);
+    REQUIRE(seen == std::vector<std::string>{"added 1", "removed 1", "added 2", "added 3", "removed 3"});
+  }
+
+  SECTION("Remove Hooks Of Destroys Through Commands Destroy What Goes With Them, In Rounds") {
+    std::atomic<int> calls = 0;
+    world.onRemove<Link>([&](Entity, Link &link, Commands commands) {
+      calls.fetch_add(1, std::memory_order_relaxed);
+      commands.destroy(link.child);
+    });
+    // Chains of three: every entity of the first third links one of the
+    // second, which links one of the third.
+    const size_t third = entities.size() / 3;
+    for (size_t i = 0; i < third; ++i) {
+      world.emplace<Link>(entities[i], entities[third + i]);
+      world.emplace<Link>(entities[third + i], entities[(2 * third) + i]);
+    }
+    scheduler.addParallel([&](Entity entity, Commands commands, const Position &) {
+      if (sc::ecs::indexOf(entity) < sc::ecs::indexOf(entities[third])) {
+        commands.destroy(entity);
+      }
+    });
+    scheduler.run(world);
+    REQUIRE(calls == static_cast<int>(2 * third));
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.valid(entities[i]) == (i >= 3 * third));
+    }
   }
 
   SECTION("A Hook With Commands Outside A System Throws") {

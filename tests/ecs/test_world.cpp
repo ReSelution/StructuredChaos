@@ -1390,7 +1390,7 @@ TEST_CASE("World Components", "[ecs][world]") {
       column.emplace(sc::ecs::makeEntity(number * PAGE_SIZE, 0), static_cast<float>(number), 0.0f);
     }
     for (uint32_t number = 0; number < pages; ++number) {
-      REQUIRE(column.erase(number * PAGE_SIZE));
+      REQUIRE(column.erase(sc::ecs::makeEntity(number * PAGE_SIZE, 0)));
     }
     // The first two gave their memory back.
     REQUIRE(column.pages() == Column::SPARE_PAGES);
@@ -1402,7 +1402,7 @@ TEST_CASE("World Components", "[ecs][world]") {
     REQUIRE(column.spares() == Column::SPARE_PAGES - 1);
     for (uint32_t number = 0; number < Column::SPARE_PAGES; ++number) {
       column.emplace(sc::ecs::makeEntity(number * PAGE_SIZE, 0), 0.0f, 0.0f);
-      REQUIRE(column.erase(number * PAGE_SIZE));
+      REQUIRE(column.erase(sc::ecs::makeEntity(number * PAGE_SIZE, 0)));
     }
     REQUIRE(column.get((pages - 1) * PAGE_SIZE).y == 2.0f);
     REQUIRE(usedPages(column) == 1);
@@ -1480,7 +1480,7 @@ TEST_CASE("World Components", "[ecs][world]") {
     // Asking makes nothing.
     REQUIRE_FALSE(column.contains(5));
     REQUIRE_FALSE(column.page(0));
-    REQUIRE_FALSE(column.erase(5));
+    REQUIRE_FALSE(column.erase(sc::ecs::makeEntity(5, 0)));
     REQUIRE(column.headerBlocks() == 0);
     REQUIRE(column.chunks() == 0);
 
@@ -1508,8 +1508,8 @@ TEST_CASE("World Components", "[ecs][world]") {
 
     // Pages that are emptied give back their memory once they are trimmed,
     // not their addresses.
-    REQUIRE(column.erase(far));
-    REQUIRE(column.erase(last));
+    REQUIRE(column.erase(sc::ecs::makeEntity(far, 0)));
+    REQUIRE(column.erase(sc::ecs::makeEntity(last, 0)));
     REQUIRE(column.pages() == 3);
     column.trim();
     REQUIRE(column.pages() == 1);

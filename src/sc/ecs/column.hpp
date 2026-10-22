@@ -156,11 +156,65 @@ namespace sc::ecs::internal {
 #endif
   }
 
+  struct ColumnBase;
+
+  // Components CommandApplier took from their entities, moved out of their
+  // columns for their onRemove hooks, which run once all changes of the
+  // stage are done. The values lie in blocks of its own.
+  class RemovedStash {
+  public:
+    struct Removed {
+      Entity entity;
+      ColumnBase *column;
+      // Null for a component without members.
+      void *value;
+    };
+
+    [[nodiscard]] void *allocate(size_t bytes, size_t alignment) {
+      if (!m_blocks.empty()) {
+        void *at = m_blocks.back().get() + m_used;
+        size_t space = m_blockSize - m_used;
+        if (std::align(alignment, bytes, at, space) != nullptr) {
+          m_used = m_blockSize - space + bytes;
+          return at;
+        }
+      }
+      m_blockSize = std::max(BLOCK_BYTES, bytes + alignment);
+      m_blocks.push_back(std::make_unique_for_overwrite<std::byte[]>(m_blockSize));
+      m_used = 0;
+      return allocate(bytes, alignment);
+    }
+
+    void add(Entity entity, ColumnBase &column, void *value) {
+      m_items.push_back({.entity = entity, .column = &column, .value = value});
+    }
+
+    [[nodiscard]] std::span<const Removed> items() const noexcept { return m_items; }
+
+    // Once every value is gone, see ColumnBase::runStashed.
+    void clear() noexcept {
+      m_items.clear();
+      m_blocks.clear();
+      m_used = 0;
+      m_blockSize = 0;
+    }
+
+  private:
+    static constexpr size_t BLOCK_BYTES = size_t{64} << 10;
+
+    std::vector<Removed> m_items;
+    std::vector<std::unique_ptr<std::byte[]>> m_blocks;
+    // Of the last block.
+    size_t m_used = 0;
+    size_t m_blockSize = 0;
+  };
+
   // What the world needs of a column without knowing its component.
   struct ColumnBase {
     virtual ~ColumnBase() = default;
-    // False if there was no component at the index.
-    virtual bool erase(uint32_t index) noexcept = 0;
+    // False if the entity had no component, at the index; the onRemove hooks
+    // otherwise.
+    virtual bool erase(Entity entity) noexcept = 0;
     // The same while no other thread uses the column.
     virtual bool eraseAlone(uint32_t index) noexcept = 0;
     // eraseAlone for the entities of the pages, a word at a time.
@@ -174,6 +228,19 @@ namespace sc::ecs::internal {
     // Calls the onAdd hooks with the component of the entity, if it has one,
     // under its making bit: for the adds CommandApplier did without hooks.
     virtual void runAdded(Entity entity) = 0;
+    // The same for the onRemove hooks, of a component about to go with its
+    // entity, see World::destroy.
+    virtual void runRemoved(Entity entity) noexcept = 0;
+    // Moves the component of the entity into the stash, if it has one, for
+    // runStashed: CommandApplier, which takes it away right after.
+    virtual void stash(Entity entity, RemovedStash &stash) = 0;
+    // The onRemove hooks with a stashed component, which goes then.
+    virtual void runStashed(Entity entity, void *value) noexcept = 0;
+    // Only the stashed component goes, after an exception.
+    virtual void dropStashed(void *value) noexcept = 0;
+
+    // Whether the column has onRemove hooks. Set before the column is used.
+    bool removeHooked = false;
   };
 
 #ifndef NDEBUG
@@ -718,7 +785,56 @@ namespace sc::ecs::internal {
       forsake(headers()[number], number, count);
     }
 
-    bool erase(uint32_t index) noexcept override {
+    // m_hooks is what Edit looks at too, so that inlined into it, one look
+    // decides both: with removeHooked here, adding and removing 100K
+    // components on all threads through Edit took 127 instead of 108 µs.
+    bool erase(Entity entity) noexcept override {
+      if (m_hooks != nullptr) [[unlikely]] {
+        return eraseHooked(entity);
+      }
+      return eraseAt(indexOf(entity));
+    }
+
+  private:
+    // erase with onRemove hooks, which run while the making bit is held,
+    // also for a component that does not DESTROYS: no tryEmplace of another
+    // thread makes a new one where the hooks read the old one. A hook that
+    // throws ends the program, as the component is gone from the mask by
+    // then.
+    [[gnu::noinline]] bool eraseHooked(Entity entity) noexcept {
+      const uint32_t index = indexOf(entity);
+      if (!removeHooked) {
+        return eraseAt(index);
+      }
+      if (index >= INDEX_LIMIT) {
+        return false;
+      }
+      const uint32_t number = index >> PAGE_BITS;
+      Header *const found = findHeader(number);
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      if (found == nullptr || !has(*found, slot)) {
+        return false;
+      }
+      assertNotLooped(this, index);
+      Header &header = *found;
+      std::atomic<uint64_t> &making = header.making[slot / 64];
+      const uint64_t bit = uint64_t{1} << (slot % 64);
+      take(making, bit);
+      const bool removed = (header.mask[slot / 64].fetch_and(~bit, std::memory_order_acq_rel) & bit) != 0;
+      if (removed) {
+        callHooks(m_hooks->removed, entity, valueOf(index), &making, bit);
+        if constexpr (DESTROYS) {
+          std::destroy_at(valueAt(index));
+        }
+      }
+      making.fetch_and(~bit, std::memory_order_release);
+      if (removed) {
+        forsake(header, number, 1);
+      }
+      return removed;
+    }
+
+    bool eraseAt(uint32_t index) noexcept {
       if (index >= INDEX_LIMIT) {
         return false;
       }
@@ -755,6 +871,7 @@ namespace sc::ecs::internal {
       return true;
     }
 
+  public:
     // An add that occupyPage counted already, by the only thread that changes
     // the page in this column, as CommandApplier gives a page to one thread:
     // no making bit, and the mask and the summary with a plain load and
@@ -791,27 +908,79 @@ namespace sc::ecs::internal {
       }
     }
 
-    // Called with an entity and its component once the entity has one, see
-    // World::onAdd: on whichever thread adds it, on several at once.
-    using AddHook = std::move_only_function<void(Entity, T &) const>;
+    // Called with an entity and its component once the entity has one, or
+    // while it still has it, see World::onAdd and World::onRemove: on
+    // whichever thread adds or removes it, on several at once.
+    using Hook = std::move_only_function<void(Entity, T &) const>;
 
     // Not while the column is used.
-    void addHook(AddHook hook) {
+    void addHook(Hook hook) {
       static_assert(HAS_VALUE || std::is_default_constructible_v<T>,
                     "a hook of a component without members gets one made for the call");
-      if (m_hooks == nullptr) {
-        m_hooks = std::make_unique<Hooks>();
-      }
-      m_hooks->added.push_back(std::move(hook));
+      hooks().added.push_back(std::move(hook));
+    }
+    void addRemoveHook(Hook hook) {
+      static_assert(HAS_VALUE || std::is_default_constructible_v<T>,
+                    "a hook of a component without members gets one made for the call");
+      static_assert(std::is_move_constructible_v<T>,
+                    "a component removed through Commands is moved out for its onRemove hooks");
+      hooks().removed.push_back(std::move(hook));
+      removeHooked = true;
     }
 
     [[nodiscard]] bool hasAddHooks() const noexcept { return m_hooks != nullptr && !m_hooks->added.empty(); }
+    [[nodiscard]] bool hasHooks() const noexcept { return m_hooks != nullptr; }
 
     // The onAdd hooks of a component the entity just got without the making
     // bit, from the only thread that may go for it.
     void added(Entity entity) {
       if (m_hooks != nullptr) [[unlikely]] {
         runAddHooks(entity, nullptr, 0);
+      }
+    }
+
+    void runRemoved(Entity entity) noexcept override {
+      if (!removeHooked) {
+        return;
+      }
+      const uint32_t index = indexOf(entity);
+      Header *const header = findHeader(index >> PAGE_BITS);
+      if (header == nullptr) {
+        return;
+      }
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      std::atomic<uint64_t> &making = header->making[slot / 64];
+      const uint64_t bit = uint64_t{1} << (slot % 64);
+      take(making, bit);
+      if (heldHas(*header, slot)) {
+        callHooks(m_hooks->removed, entity, valueOf(index), &making, bit);
+      }
+      making.fetch_and(~bit, std::memory_order_release);
+    }
+
+    void stash(Entity entity, RemovedStash &stash) override {
+      const uint32_t index = indexOf(entity);
+      if (!contains(index)) {
+        return;
+      }
+      if constexpr (HAS_VALUE && std::is_move_constructible_v<T>) {
+        void *const at = stash.allocate(sizeof(T), alignof(T));
+        ::new (at) T(std::move(*valueAt(index)));
+        stash.add(entity, *this, at);
+      } else {
+        stash.add(entity, *this, nullptr);
+      }
+    }
+
+    void runStashed(Entity entity, void *value) noexcept override {
+      T *const stashed = static_cast<T *>(value);
+      callHooks(m_hooks->removed, entity, stashed, nullptr, 0);
+      dropStashed(value);
+    }
+
+    void dropStashed(void *value) noexcept override {
+      if constexpr (HAS_VALUE) {
+        std::destroy_at(static_cast<T *>(value));
       }
     }
 
@@ -845,7 +1014,9 @@ namespace sc::ecs::internal {
     // other indices of the page. A component that owns a unique_ptr, 1M
     // entities one after the other, ns per erase: 7.7 with the bit, 4.2
     // without.
-    bool eraseWithoutBit(uint32_t index) noexcept {
+    // The onRemove hooks run before the component goes, without the bit.
+    bool eraseWithoutBit(Entity entity) noexcept {
+      const uint32_t index = indexOf(entity);
       if (index >= INDEX_LIMIT) {
         return false;
       }
@@ -861,6 +1032,9 @@ namespace sc::ecs::internal {
       // seq_cst for heldHas, as erase without the bit.
       if ((header.mask[slot / 64].fetch_and(~bit, std::memory_order_seq_cst) & bit) == 0) {
         return false;
+      }
+      if (removeHooked) [[unlikely]] {
+        callHooks(m_hooks->removed, entity, valueOf(index), nullptr, 0);
       }
       if constexpr (DESTROYS) {
         // Before the page may give its memory back.
@@ -1127,7 +1301,10 @@ namespace sc::ecs::internal {
     [[nodiscard]] Chunk *chunkTable() const noexcept { return reinterpret_cast<Chunk *>(m_chunkBytes); }
 
     // The header of a page, null as long as no page of its block was used.
-    [[nodiscard]] Header *findHeader(uint32_t number) const noexcept {
+    // Always inlined: since the hooks call it from more places, GCC kept it
+    // out of line, also in CommandApplier, whose add + remove of 100K
+    // components ran 3 % more instructions for it.
+    [[nodiscard, gnu::always_inline]] Header *findHeader(uint32_t number) const noexcept {
       const uint32_t block = number / HEADER_BLOCK_PAGES;
       const uint64_t blocks = m_headerBlocks[block / 64].load(std::memory_order_acquire);
       return ((blocks >> (block % 64)) & 1u) != 0 ? headers() + number : nullptr;
@@ -1258,25 +1435,34 @@ namespace sc::ecs::internal {
     }
 
     // Counts so many components less in a page, which are gone already.
+    // The rest out of line, so that this stays small enough to be inlined
+    // where a component is removed: with the erase of onRemove hooks next to
+    // it, GCC kept it out of the loop of Edit::erase, which ran 11 % more
+    // instructions for it (100K components added and removed on all
+    // threads).
     void forsake(Header &header, uint32_t number, uint32_t count) noexcept {
       if (header.count.fetch_sub(count, std::memory_order_seq_cst) == count) [[unlikely]] {
-        // No word has a bit any more. A thread that gave the page a
-        // component meanwhile may have found its word still in the summary
-        // and left it as it was: the summary is made anew from the mask
-        // then.
-        header.summary.store(0, std::memory_order_seq_cst);
-        if (header.count.load(std::memory_order_seq_cst) != 0) {
-          for (uint32_t word = 0; word < PAGE_WORDS; ++word) {
-            if (header.mask[word].load(std::memory_order_seq_cst) != 0) {
-              header.summary.fetch_or(uint64_t{1} << word, std::memory_order_seq_cst);
-            }
+        emptied(header, number);
+      }
+    }
+
+    // A page whose count reached zero in forsake.
+    [[gnu::noinline, gnu::cold]] void emptied(Header &header, uint32_t number) noexcept {
+      // No word has a bit any more. A thread that gave the page a component
+      // meanwhile may have found its word still in the summary and left it as
+      // it was: the summary is made anew from the mask then.
+      header.summary.store(0, std::memory_order_seq_cst);
+      if (header.count.load(std::memory_order_seq_cst) != 0) {
+        for (uint32_t word = 0; word < PAGE_WORDS; ++word) {
+          if (header.mask[word].load(std::memory_order_seq_cst) != 0) {
+            header.summary.fetch_or(uint64_t{1} << word, std::memory_order_seq_cst);
           }
         }
-        if constexpr (HAS_VALUE) {
-          park(header, number);
-        } else {
-          vacate(header, number);
-        }
+      }
+      if constexpr (HAS_VALUE) {
+        park(header, number);
+      } else {
+        vacate(header, number);
       }
     }
 
@@ -1465,13 +1651,36 @@ namespace sc::ecs::internal {
     }
 
     struct Hooks {
-      std::vector<AddHook> added;
+      std::vector<Hook> added;
+      std::vector<Hook> removed;
     };
 
-    // The hooks with the component of the entity, under the making bit if
-    // making is not null.
-    [[gnu::noinline, gnu::cold]] void runAddHooks(Entity entity, [[maybe_unused]] const std::atomic<uint64_t> *making,
-                                                  [[maybe_unused]] uint64_t bit) {
+    [[nodiscard]] Hooks &hooks() {
+      if (m_hooks == nullptr) {
+        m_hooks = std::make_unique<Hooks>();
+      }
+      return *m_hooks;
+    }
+
+    // The value at the index, null for a component without members.
+    [[nodiscard]] T *valueOf([[maybe_unused]] uint32_t index) const noexcept {
+      if constexpr (HAS_VALUE) {
+        return valueAt(index);
+      } else {
+        return nullptr;
+      }
+    }
+
+    // The onAdd hooks with the component of the entity, under the making
+    // bit if making is not null.
+    [[gnu::noinline, gnu::cold]] void runAddHooks(Entity entity, const std::atomic<uint64_t> *making, uint64_t bit) {
+      callHooks(m_hooks->added, entity, valueOf(indexOf(entity)), making, bit);
+    }
+
+    // The hooks with the value, one made for the call for a component
+    // without members.
+    void callHooks(const std::vector<Hook> &hooks, Entity entity, T *value,
+                   [[maybe_unused]] const std::atomic<uint64_t> *making, [[maybe_unused]] uint64_t bit) {
 #ifndef NDEBUG
       struct Hold {
         HeldBit before = heldBit;
@@ -1480,13 +1689,12 @@ namespace sc::ecs::internal {
       heldBit = {.word = making, .bit = bit};
 #endif
       if constexpr (HAS_VALUE) {
-        T &value = *valueAt(indexOf(entity));
-        for (const AddHook &hook: m_hooks->added) {
-          hook(entity, value);
+        for (const Hook &hook: hooks) {
+          hook(entity, *value);
         }
       } else if constexpr (std::is_default_constructible_v<T>) {
         T none{};
-        for (const AddHook &hook: m_hooks->added) {
+        for (const Hook &hook: hooks) {
           hook(entity, none);
         }
       }

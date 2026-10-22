@@ -594,10 +594,14 @@ namespace sc::ecs {
     // CommandList::apply, which calls it for Commands::destroy: it takes the
     // components away without locked instructions (Column::eraseAlone), and
     // gives the index back to a list that create takes from without a lock.
-    // From a system, Commands::destroy records it for later.
+    // From a system, Commands::destroy records it for later. The onRemove
+    // hooks of its components run first, while it has all of them.
     bool destroy(Entity entity) {
       if (!valid(entity)) {
         return false;
+      }
+      if (!m_removeHooked.empty()) [[unlikely]] {
+        runRemoveHooks(entity);
       }
       const size_t count = m_columnCount.load(std::memory_order_relaxed);
       for (size_t i = 0; i < count; ++i) {
@@ -612,8 +616,37 @@ namespace sc::ecs {
     // it, as next to destroy. First a bit for every entity in a kill mask of
     // its page, then per column one call that takes them away a word at a
     // time (up to 64 entities with one change of the mask) and changes the
-    // count once per page, instead of everything per entity and column.
+    // count once per page, instead of everything per entity and column. The
+    // onRemove hooks of all of them run first.
     size_t destroy(std::span<const Entity> entities) {
+      if (!m_removeHooked.empty()) [[unlikely]] {
+        // Once per entity, also for one given twice.
+        std::vector<Entity> each(entities.begin(), entities.end());
+        std::ranges::sort(each);
+        const auto [last, end] = std::ranges::unique(each);
+        each.erase(last, end);
+        for (const Entity entity: each) {
+          if (valid(entity)) {
+            runRemoveHooks(entity);
+          }
+        }
+      }
+      return destroyQuietly(entities);
+    }
+
+    // The onRemove hooks of the components of the entity, on the calling
+    // thread, each under its making bit, while the entity has them all, for
+    // what destroys it without them (parallelDestroy).
+    void runRemoveHooks(Entity entity) noexcept {
+      for (internal::ColumnBase *const column: m_removeHooked) {
+        column->runRemoved(entity);
+      }
+    }
+
+    [[nodiscard]] bool hasRemoveHooks() const noexcept { return !m_removeHooked.empty(); }
+
+  private:
+    size_t destroyQuietly(std::span<const Entity> entities) {
       if (m_killPlace == nullptr) {
         m_killPlace = static_cast<uint32_t *>(memory::reserve(KILL_PLACE_BYTES));
         memory::commit(m_killPlace, KILL_PLACE_BYTES);
@@ -642,6 +675,7 @@ namespace sc::ecs {
       return destroyed;
     }
 
+  public:
     // The same on the calling thread and on every pool thread that has
     // nothing else to do, for many entities: sorted by page with PageSort,
     // and every page on one thread, which ends its entities and takes their
@@ -650,10 +684,12 @@ namespace sc::ecs {
     // Ending the entities was most of it on one thread: 6.6 ns per entity
     // without components, and 0.4 to 0.6 ns more per column. Fewer than
     // ENTITIES_PER_THREAD, or all in one page, are done as destroy does.
+    // Without the onRemove hooks, which CommandApplier runs before on all
+    // threads (runRemoveHooks).
     size_t parallelDestroy(std::span<const Entity> entities) {
       const size_t helpers = entities.size() / ENTITIES_PER_THREAD;
       if (helpers == 0) {
-        return destroy(entities);
+        return destroyQuietly(entities);
       }
       m_destroySort.clear();
       m_destroySort.add(entities);
@@ -661,7 +697,7 @@ namespace sc::ecs {
       m_destroySort.count(helpers, index, [](const Entity &) {});
       if (m_destroySort.pages().size() <= 1) {
         m_destroySort.uncount();
-        return destroy(entities);
+        return destroyQuietly(entities);
       }
       m_destroySort.place(helpers, index);
       const std::span<const uint32_t> pages = m_destroySort.pages();
@@ -707,7 +743,7 @@ namespace sc::ecs {
       assert(valid(entity));
       const size_t count = m_columnCount.load(std::memory_order_acquire);
       for (size_t i = 0; i < count; ++i) {
-        m_columnList[i]->erase(indexOf(entity));
+        m_columnList[i]->erase(entity);
       }
     }
 
@@ -791,7 +827,7 @@ namespace sc::ecs {
     template<typename Component>
     bool erase(Entity entity) {
       assert(valid(entity));
-      return column<Component>().erase(indexOf(entity));
+      return column<Component>().erase(entity);
     }
 
     // Any entity may be asked for: one that does not exist (any more) has no
@@ -933,6 +969,25 @@ namespace sc::ecs {
     // run.
     template<typename Component, typename F>
     World &onAdd(F &&hook);
+
+    // The same for every entity that loses the component, or is destroyed
+    // with it, while it still has it, on the thread that takes it away:
+    //
+    //   world.onRemove<Parent>([](Entity entity, Parent &parent, Commands commands) { ... });
+    //
+    // The parameters are counted as for onAdd. Where the way takes the making
+    // bit, the hook runs under it, and erase takes it for a component with
+    // these hooks also where it would not otherwise. The component is gone
+    // from loops and contains by then, and the hook must not go for it, as
+    // for onAdd. Components removed through Commands are moved out before
+    // they go and get their hooks once the changes of the stage are done,
+    // those of entities destroyed through Commands right before they go, on
+    // all threads, after the onAdd hooks of the stage. A hook that throws
+    // ends the program: the component is half gone by then, as with a
+    // destructor that throws. Not when the world goes. Defined in
+    // scheduler.hpp.
+    template<typename Component, typename F>
+    World &onRemove(F &&hook);
 
     // What the scheduler counts the hooks of the world as using, and a
     // number that changes with every hook.
@@ -1313,6 +1368,8 @@ namespace sc::ecs {
     std::vector<std::shared_ptr<void>> m_globals;
     std::vector<internal::HookAccess> m_hookAccess;
     uint64_t m_hookVersion = 0;
+    // The columns with onRemove hooks.
+    std::vector<internal::ColumnBase *> m_removeHooked;
 
     // The onAdd hooks of the component for every entity of the span that has
     // it, made by create.
