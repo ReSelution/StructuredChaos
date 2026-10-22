@@ -324,10 +324,9 @@ TEST_CASE("ECS Resource Load Async", "[ecs][resource][threading]") {
     CHECK(!texture.ready());
     CHECK(cache.size() == 0);
     texture.reset();
-    // TODO: failed once in 6 runs under TSan with collect() == 0 (2026-10-21).
-    // Likely the task of loadAsync still holds its count after wait() saw the
-    // failure and returned, so the reset above is not the last handle yet;
-    // not looked into.
+    // wait() returns once the state is Failed, but the task may still hold its
+    // count then; the entry is queued by whoever lets go last.
+    sc::threading::waitUntilFinished();
     CHECK(cache.collect() == 1);
   }
 
