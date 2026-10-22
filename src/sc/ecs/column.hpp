@@ -244,14 +244,21 @@ namespace sc::ecs::internal {
   };
 
 #ifndef NDEBUG
-  // The making bit the thread holds while a hook runs, for the assert in
-  // Column::take: a hook that goes for its own component would wait for
-  // itself.
+  // The making bits the thread holds while hooks run, for the assert in
+  // Column::take: a hook that goes for its own component, or for that of a
+  // hook it set off in turn, would wait for itself. All of them, not only the
+  // last: a hook of relate destroying a child under the bit of its parent's
+  // list waited for that bit in the child's own hook, unseen.
   struct HeldBit {
-    const std::atomic<uint64_t> *word = nullptr;
-    uint64_t bit = 0;
+    const std::atomic<uint64_t> *word;
+    uint64_t bit;
   };
-  inline thread_local HeldBit heldBit;
+  inline thread_local std::vector<HeldBit> heldBits;
+
+  [[nodiscard]] inline bool holds(const std::atomic<uint64_t> &making, uint64_t bit) noexcept {
+    return std::ranges::any_of(heldBits,
+                               [&](const HeldBit &held) { return held.word == &making && (held.bit & bit) != 0; });
+  }
 #endif
 
   // The components of one type, each at the index of its entity.
@@ -1276,9 +1283,9 @@ namespace sc::ecs::internal {
     // Takes the making bit of an index, waiting while another thread has it,
     // which is about to be done with the index. seq_cst for heldHas.
     static void take(std::atomic<uint64_t> &making, uint64_t bit) noexcept {
-      assert((heldBit.word != &making || (heldBit.bit & bit) == 0) &&
-             "sc::ecs: a hook went for the component of the entity it was called for; change it through the "
-             "reference it got");
+      assert(!holds(making, bit) &&
+             "sc::ecs: a hook went for the component of the entity it was called for, or one whose hook set it off; "
+             "change it through the reference it got");
       while ((making.fetch_or(bit, std::memory_order_seq_cst) & bit) != 0) {
         std::this_thread::yield();
       }
@@ -1683,10 +1690,19 @@ namespace sc::ecs::internal {
                    [[maybe_unused]] const std::atomic<uint64_t> *making, [[maybe_unused]] uint64_t bit) {
 #ifndef NDEBUG
       struct Hold {
-        HeldBit before = heldBit;
-        ~Hold() { heldBit = before; }
-      } hold;
-      heldBit = {.word = making, .bit = bit};
+        explicit Hold(const std::atomic<uint64_t> *making, uint64_t bit) {
+          if (making != nullptr) {
+            heldBits.push_back({.word = making, .bit = bit});
+          }
+          held = making != nullptr;
+        }
+        ~Hold() {
+          if (held) {
+            heldBits.pop_back();
+          }
+        }
+        bool held;
+      } hold{making, bit};
 #endif
       if constexpr (HAS_VALUE) {
         for (const Hook &hook: hooks) {
