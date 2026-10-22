@@ -422,6 +422,9 @@ namespace sc::ecs::internal {
           --left;
         }
       }
+      if (m_ticks != nullptr) {
+        memory::release(m_ticks, TICK_BYTES);
+      }
       // The headers and chunks have nothing to do at their end; their
       // memory goes with the column, see operator delete.
       static_assert(std::is_trivially_destructible_v<Header> && std::is_trivially_destructible_v<Chunk>);
@@ -536,6 +539,7 @@ namespace sc::ecs::internal {
       // Only now: an index that has the component has one that was made.
       header.mask[slot / 64].fetch_or(uint64_t{1} << (slot % 64), std::memory_order_relaxed);
       markWord(header, slot / 64);
+      touch(index);
       return Emplaced::Made;
     }
 
@@ -585,6 +589,7 @@ namespace sc::ecs::internal {
       // try.
       header.mask[slot / 64].fetch_or(bit, std::memory_order_acq_rel);
       markWord(header, slot / 64);
+      touch(index);
       if (m_hooks != nullptr) [[unlikely]] {
         try {
           runAddHooks(entity, &making, bit);
@@ -656,6 +661,7 @@ namespace sc::ecs::internal {
             // No values, and so no address for one.
             there(nullptr);
           }
+          touch(index);
         } else {
           occupy(header, number, slot, 1);
           if constexpr (HAS_VALUE) {
@@ -668,6 +674,7 @@ namespace sc::ecs::internal {
           }
           header.mask[slot / 64].fetch_or(bit, std::memory_order_acq_rel);
           markWord(header, slot / 64);
+          touch(index);
           made = true;
           if (m_hooks != nullptr) [[unlikely]] {
             runAddHooks(entity, &making, bit);
@@ -713,6 +720,7 @@ namespace sc::ecs::internal {
         // Asked again under the bit: an erase may have taken it meanwhile.
         if (heldHas(header, slot)) {
           function(*valueAt(index));
+          touch(index);
           called = true;
         }
       } catch (...) {
@@ -784,6 +792,7 @@ namespace sc::ecs::internal {
         [[maybe_unused]] const uint64_t before = header.mask[bit / 64].fetch_or(bits, std::memory_order_relaxed);
         assert((before & bits) == 0);
         markWord(header, bit / 64);
+        touch((index & ~(PAGE_SIZE - 1)) + bit);
         bit += width;
       }
     }
@@ -902,6 +911,7 @@ namespace sc::ecs::internal {
       word.store(word.load(std::memory_order_relaxed) | (uint64_t{1} << (slot % 64)), std::memory_order_relaxed);
       const uint64_t summary = header->summary.load(std::memory_order_relaxed);
       header->summary.store(summary | (uint64_t{1} << (slot / 64)), std::memory_order_relaxed);
+      touch(index);
       return true;
     }
 
@@ -938,6 +948,61 @@ namespace sc::ecs::internal {
 
     [[nodiscard]] bool hasAddHooks() const noexcept { return m_hooks != nullptr && !m_hooks->added.empty(); }
     [[nodiscard]] bool hasHooks() const noexcept { return m_hooks != nullptr; }
+
+    // Keeps a tick of the clock for every word of 64 indices of every page,
+    // from then on: the time the component of one of them was last added or
+    // may have been changed, see World::trackChanges. Its own range of
+    // addresses, given memory with the blocks of headers, so a column that
+    // does not track costs nothing but a look at m_ticks. Not while the
+    // column is used; components there before count as unchanged.
+    void trackChanges(const std::atomic<uint32_t> &clock) {
+      if (m_ticks != nullptr) {
+        return;
+      }
+      auto *const ticks = static_cast<std::atomic<uint32_t> *>(memory::reserve(TICK_BYTES));
+      for (size_t word = 0; word < m_headerBlocks.size(); ++word) {
+        for (uint64_t blocks = m_headerBlocks[word].load(std::memory_order_relaxed); blocks != 0;
+             blocks &= blocks - 1) {
+          const size_t block = (word * 64) + static_cast<size_t>(std::countr_zero(blocks));
+          memory::commit(ticks + (block * TICKS_PER_BLOCK), TICK_BLOCK_BYTES);
+        }
+      }
+      m_clock = &clock;
+      m_ticks = ticks;
+    }
+
+    [[nodiscard]] bool tracksChanges() const noexcept { return m_ticks != nullptr; }
+
+    // The component at the index was added, or may have been changed.
+    void touch(uint32_t index) const noexcept {
+      if (m_ticks != nullptr) [[unlikely]] {
+        m_ticks[index >> 6].store(m_clock->load(std::memory_order_relaxed), std::memory_order_relaxed);
+      }
+    }
+
+    // The same for the words of a page, a bit for each, for a loop that may
+    // have written them. The column must track changes.
+    void touchWords(uint32_t number, uint64_t words) const noexcept {
+      const uint32_t tick = m_clock->load(std::memory_order_relaxed);
+      std::atomic<uint32_t> *const ticks = m_ticks + (size_t{number} * PAGE_WORDS);
+      for (; words != 0; words &= words - 1) {
+        ticks[std::countr_zero(words)].store(tick, std::memory_order_relaxed);
+      }
+    }
+
+    // The words of a page with a tick after since, a bit for each: compared
+    // across the overflow, so that a tick that went past 2^32 still counts
+    // as later, as long as since is less than 2^31 ticks back. The column
+    // must track changes and have the page.
+    [[nodiscard]] uint64_t changedWords(uint32_t number, uint32_t since) const noexcept {
+      const std::atomic<uint32_t> *const ticks = m_ticks + (size_t{number} * PAGE_WORDS);
+      uint64_t words = 0;
+      for (uint32_t word = 0; word < PAGE_WORDS; ++word) {
+        const auto ahead = static_cast<int32_t>(ticks[word].load(std::memory_order_relaxed) - since);
+        words |= uint64_t{ahead > 0} << word;
+      }
+      return words;
+    }
 
     // For a component whose hooks keep something else in step with it, which
     // a replace would get past (no hook runs for it): emplaceOrReplace of
@@ -1215,6 +1280,10 @@ namespace sc::ecs::internal {
     static constexpr size_t HEADER_BLOCK_COUNT = (PAGE_COUNT + HEADER_BLOCK_PAGES - 1) / HEADER_BLOCK_PAGES;
     static constexpr size_t HEADER_BLOCK_BYTES = sizeof(Header) * HEADER_BLOCK_PAGES;
     static constexpr size_t HEADER_BYTES = HEADER_BLOCK_BYTES * HEADER_BLOCK_COUNT;
+    // The ticks of trackChanges, a block of them with every block of headers.
+    static constexpr size_t TICKS_PER_BLOCK = size_t{HEADER_BLOCK_PAGES} * PAGE_WORDS;
+    static constexpr size_t TICK_BLOCK_BYTES = TICKS_PER_BLOCK * sizeof(uint32_t);
+    static constexpr size_t TICK_BYTES = TICK_BLOCK_BYTES * HEADER_BLOCK_COUNT;
     // A block gets its memory without touching its neighbours.
     static_assert(HEADER_BLOCK_BYTES % memory::OS_PAGE_SIZE == 0);
 
@@ -1347,6 +1416,9 @@ namespace sc::ecs::internal {
     // inlined where it is called.
     [[gnu::noinline]] void startHeaderBlock(size_t block) {
       memory::commit(headers() + (block * HEADER_BLOCK_PAGES), HEADER_BLOCK_BYTES);
+      if (m_ticks != nullptr) {
+        memory::commit(m_ticks + (block * TICKS_PER_BLOCK), TICK_BLOCK_BYTES);
+      }
       m_headerBlocks[block / 64].fetch_or(uint64_t{1} << (block % 64), std::memory_order_acq_rel);
     }
 
@@ -1733,6 +1805,9 @@ namespace sc::ecs::internal {
     // a component looks at then, next to m_headerBlocks, which it reads
     // anyway.
     std::unique_ptr<Hooks> m_hooks;
+    // See trackChanges: null as long as the column does not track them.
+    std::atomic<uint32_t> *m_ticks = nullptr;
+    const std::atomic<uint32_t> *m_clock = nullptr;
     // A bit for every block of headers that has memory, see m_headerBytes.
     std::array<std::atomic<uint64_t>, (HEADER_BLOCK_COUNT + 63) / 64> m_headerBlocks{};
     std::atomic<size_t> m_chunkCount{0};

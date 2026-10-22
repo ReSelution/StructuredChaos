@@ -203,6 +203,7 @@ namespace sc::ecs::internal {
         if (page != nullptr && typed.contains(index)) {
           assert(!typed.replaceForbidden() && "sc::ecs: this component is not replaced, see Column::forbidReplace");
           typed.get(index) = std::move(*made);
+          typed.touch(index);
           return;
         }
       }
@@ -219,8 +220,10 @@ namespace sc::ecs::internal {
   // Calls the recorded function with the component at the index if there is
   // one, or only drops the function if page is null. Nothing runs next to
   // it, see CommandList::apply, so without the making bit. The function is
-  // gone afterwards either way, also if it throws.
-  template<typename T, typename Function>
+  // gone afterwards either way, also if it throws. TRACKED for a column that
+  // tracks changes, chosen when the change is recorded: a look per change
+  // here made 1M recorded changes of one page take 4.06 instead of 3.84 ms.
+  template<typename T, typename Function, bool TRACKED>
   void finishModify(ColumnBase &column, Entity entity, void *value, PageAdds *page) {
     auto &typed = static_cast<Column<T> &>(column);
     const uint32_t index = indexOf(entity);
@@ -228,6 +231,9 @@ namespace sc::ecs::internal {
     const std::unique_ptr<Function, decltype(drop)> function{static_cast<Function *>(value), drop};
     if (page != nullptr && typed.contains(index)) {
       (*function)(typed.get(index));
+      if constexpr (TRACKED) {
+        typed.touch(index);
+      }
     }
   }
 
@@ -260,7 +266,11 @@ namespace sc::ecs::internal {
     void modify(Entity entity, Column<T> &column, Function &&function) {
       using Stored = std::decay_t<Function>;
       // First, as in emplace.
-      m_changes.push_back({.entity = entity, .column = &column, .finish = &finishModify<T, Stored>, .value = nullptr});
+      m_changes.push_back(
+          {.entity = entity,
+           .column = &column,
+           .finish = column.tracksChanges() ? &finishModify<T, Stored, true> : &finishModify<T, Stored, false>,
+           .value = nullptr});
       try {
         m_changes.back().value =
             ::new (m_values.allocate(sizeof(Stored), alignof(Stored))) Stored(std::forward<Function>(function));
@@ -735,18 +745,21 @@ namespace sc::ecs {
     static constexpr bool named = (std::same_as<Component, Terms> || ...);
 
   public:
-    explicit Query(World &world) : m_world(&world), m_columns(columnsOf(world, typename Lists::GetList{})) {}
+    // Changed terms count from the tick since, see World::eachSince: in a
+    // system, the end of its last run.
+    explicit Query(World &world, uint32_t since = 0) :
+        m_world(&world), m_columns(columnsOf(world, typename Lists::GetList{})), m_since(since) {}
 
     // See World::each.
     template<typename Function>
     void each(Function &&function) const {
-      m_world->template each<Terms...>(function);
+      m_world->template eachSince<Terms...>(m_since, function);
     }
 
     // See World::parallelEach.
     template<typename Function>
     void parallelEach(Function &&function, size_t grain = 1) const {
-      m_world->template parallelEach<Terms...>(function, grain);
+      m_world->template parallelEachSince<Terms...>(m_since, function, grain);
     }
 
     // The component of any entity that exists and has it, named the way the
@@ -758,7 +771,12 @@ namespace sc::ecs {
       requires named<Component>
     [[nodiscard]] Component &get(Entity entity) const {
       assert(m_world->valid(entity));
-      return std::get<World::ColumnOf<Component> *>(m_columns)->get(indexOf(entity));
+      auto *const column = std::get<World::ColumnOf<Component> *>(m_columns);
+      if constexpr (!std::is_const_v<Component>) {
+        // Taken to be written, see World::trackChanges.
+        column->touch(indexOf(entity));
+      }
+      return column->get(indexOf(entity));
     }
 
     // The same, or null if the entity does not have it or does not exist
@@ -771,6 +789,9 @@ namespace sc::ecs {
       auto *const column = std::get<World::ColumnOf<Component> *>(m_columns);
       if (!column->contains(indexOf(entity)) || !m_world->valid(entity)) {
         return nullptr;
+      }
+      if constexpr (!std::is_const_v<Component>) {
+        column->touch(indexOf(entity));
       }
       return &column->get(indexOf(entity));
     }
@@ -792,6 +813,7 @@ namespace sc::ecs {
     World *m_world;
     // Looked up once, so that get does not have to.
     decltype(columnsOf(std::declval<World &>(), typename Lists::GetList{})) m_columns;
+    uint32_t m_since;
   };
 
   // Lets a system make entities, right away and from any thread, also from
@@ -1006,7 +1028,11 @@ namespace sc::ecs {
     [[nodiscard]] Component &get(Entity entity) const {
       static_assert(World::ColumnOf<Component>::HAS_VALUE,
                     "a component without members has no value to get; ask with contains");
-      return columnFor<std::remove_const_t<Component>>(entity).get(indexOf(entity));
+      auto &column = columnFor<std::remove_const_t<Component>>(entity);
+      if constexpr (!std::is_const_v<Component>) {
+        column.touch(indexOf(entity));
+      }
+      return column.get(indexOf(entity));
     }
 
     // The same, or null if the entity does not have it or does not exist
@@ -1019,6 +1045,9 @@ namespace sc::ecs {
       auto *const column = std::get<World::ColumnOf<std::remove_const_t<Component>> *>(m_columns);
       if (!column->contains(indexOf(entity)) || !m_world->valid(entity)) {
         return nullptr;
+      }
+      if constexpr (!std::is_const_v<Component>) {
+        column->touch(indexOf(entity));
       }
       return &column->get(indexOf(entity));
     }
@@ -1064,6 +1093,7 @@ namespace sc::ecs {
     template<typename Column>
     [[nodiscard]] static auto &changed(Column &column, Entity entity) noexcept {
       internal::assertNotLooped(&column, indexOf(entity));
+      column.touch(indexOf(entity));
       return column.get(indexOf(entity));
     }
 
@@ -1420,6 +1450,9 @@ namespace sc::ecs::internal {
     std::span<const EventListeners> events;
     // Of the system, for errors.
     const std::string &name;
+    // The tick of the clock of the world at the end of the system's last
+    // run, for its queries with Changed terms; 0 before the first.
+    uint32_t since = 0;
   };
 
 } // namespace sc::ecs::internal
@@ -1475,19 +1508,24 @@ namespace sc::ecs::internal {
   struct SystemParam<Query<Terms...>> {
     static void declare(SystemAccess &access) {
       using Lists = Split<List<>, List<>, Terms...>;
-      declare(access, typename Lists::GetList{}, typename Lists::ExcludedList{});
+      declare(access, typename Lists::GetList{}, typename Lists::ExcludedList{}, ChangedList<Terms...>{});
     }
 
-    static Query<Terms...> fetch(const SystemContext &context) { return Query<Terms...>{context.world}; }
+    static Query<Terms...> fetch(const SystemContext &context) { return Query<Terms...>{context.world, context.since}; }
 
   private:
-    template<typename... Get, typename... Excluded>
-    static void declare(SystemAccess &access, List<Get...>, List<Excluded...>) {
+    template<typename... Get, typename... Excluded, typename... Changes>
+    static void declare(SystemAccess &access, List<Get...>, List<Excluded...>, List<Changes...>) {
       (access.add(componentIndex<std::remove_const_t<Get>>(), !std::is_const_v<Get>), ...);
       (access.gotten.push_back(componentIndex<std::remove_const_t<Get>>()), ...);
       (access.addColumn(columnMaker<std::remove_const_t<Get>>()), ...);
       // An excluded component is only looked up, never changed.
       (access.add(componentIndex<std::remove_const_t<Excluded>>(), false), ...);
+      // Changed reads the ticks of the component and its mask: no system that
+      // writes it runs next to the query, so the end of its run is a tick no
+      // write of another one falls behind, see World::tick.
+      (access.add(componentIndex<std::remove_const_t<Changes>>(), false), ...);
+      (access.gotten.push_back(componentIndex<std::remove_const_t<Changes>>()), ...);
     }
   };
 
@@ -1896,11 +1934,14 @@ namespace sc::ecs {
         try {
           internal::runAll(stage, [this, &world](size_t index) {
             System &system = m_systems[index];
+            world.advanceTick();
             system.run({.world = world,
                         .commands = system.commands,
                         .caches = m_caches,
                         .events = m_events,
-                        .name = system.name});
+                        .name = system.name,
+                        .since = system.lastRun});
+            system.lastRun = world.tick();
           });
         } catch (...) {
           clearCommands(stage);
@@ -1915,6 +1956,8 @@ namespace sc::ecs {
               m_stageLists.push_back(&list);
             }
           }
+          // After the end of every system of the stage, see SystemContext::since.
+          world.advanceTick();
           m_applier.apply(world, m_stageLists, hookContext(world, 0));
           runHookRounds(world);
         } catch (...) {
@@ -2053,6 +2096,7 @@ namespace sc::ecs {
         }
         const size_t next = 1 - recorded;
         const internal::SystemContext context = hookContext(world, next);
+        world.advanceTick();
         m_applier.apply(world, m_stageLists, context);
         recorded = next;
       }
@@ -2074,6 +2118,9 @@ namespace sc::ecs {
       std::vector<internal::CommandList> commands;
       // Added with addParallel: its listeners run on all threads of the loop.
       bool loop;
+      // The tick of the world at the end of its last run, see
+      // SystemContext::since.
+      uint32_t lastRun = 0;
     };
 
     // What a system uses with what the listeners of its events use and the

@@ -17,6 +17,7 @@
 
 namespace {
 
+  using sc::ecs::Changed;
   using sc::ecs::Commands;
   using sc::ecs::Edit;
   using sc::ecs::Emit;
@@ -1620,5 +1621,94 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     for (const Entity entity: entities) {
       REQUIRE(world.valid(entity));
     }
+  }
+}
+
+TEST_CASE("ECS Changes", "[ecs][scheduler][changes][threading]") {
+  sc::threading::init();
+
+  World world;
+  world.trackChanges<Position>();
+  std::vector<Entity> entities;
+  for (size_t i = 0; i < (2 * PAGE_SIZE) + 300; ++i) {
+    entities.push_back(world.create(Position{.x = static_cast<float>(i), .y = 0.0f}, Velocity{}));
+  }
+  // The entities of the word of an entity that have Position.
+  const auto wordOf = [&](Entity entity) {
+    return static_cast<size_t>(std::ranges::count_if(
+        entities, [&](Entity other) { return (sc::ecs::indexOf(other) >> 6) == (sc::ecs::indexOf(entity) >> 6); }));
+  };
+
+  // What the reader saw last time it ran.
+  std::atomic<size_t> seen = 0;
+  Scheduler reader;
+  reader.addParallel<Query<const Position, Changed<Position>>>(
+      [&](const Position &) { seen.fetch_add(1, std::memory_order_relaxed); });
+  const auto read = [&] {
+    seen = 0;
+    reader.run(world);
+    return seen.load();
+  };
+
+  SECTION("The First Run Sees What Was Added, The Next Only What Changed Since") {
+    REQUIRE(read() == entities.size());
+    REQUIRE(read() == 0);
+    // Outside a system: get to write, modify, emplaceOrReplace, each.
+    (void) world.get<Position>(entities[5]);
+    REQUIRE(read() == wordOf(entities[5]));
+    (void) world.get<const Position>(entities[5]);
+    REQUIRE(read() == 0);
+    world.modify<Position>(entities[PAGE_SIZE], [](Position &pos) { pos.y = 1.0f; });
+    REQUIRE(read() == wordOf(entities[PAGE_SIZE]));
+    world.emplaceOrReplace<Position>(entities.back(), 1.0f, 2.0f);
+    REQUIRE(read() == wordOf(entities.back()));
+    world.each<Position>([](Position &) {});
+    REQUIRE(read() == entities.size());
+    world.each<const Position>([](const Position &) {});
+    REQUIRE(read() == 0);
+  }
+
+  SECTION("Changes Of Systems Through Edit, Commands And Loops") {
+    REQUIRE(read() == entities.size());
+    Scheduler writers;
+    writers.add([&](Edit<Position> edit) { edit.modify(entities[1], [](Position &pos) { pos.y = 1.0f; }); });
+    writers.add(
+        [&](Commands commands) { commands.modify(entities[PAGE_SIZE + 1], [](Position &pos) { pos.y = 2.0f; }); });
+    writers.run(world);
+    REQUIRE(read() == wordOf(entities[1]) + wordOf(entities[PAGE_SIZE + 1]));
+    Scheduler mover;
+    mover.addParallel([](Position &pos, const Velocity &vel) { pos.x += vel.dx; });
+    mover.run(world);
+    REQUIRE(read() == entities.size());
+  }
+
+  SECTION("A System Does Not See Its Own Changes, And Waits For Writers") {
+    // As another system of the stage that starts meanwhile moves the clock
+    // on: the writes after it are still the system's own.
+    std::atomic<size_t> own = 0;
+    Scheduler self;
+    self.addParallel<Query<Position, Changed<Position>>>([&](Position &pos) {
+      if (own.fetch_add(1, std::memory_order_relaxed) == 0) {
+        world.advanceTick();
+      }
+      pos.y += 1.0f;
+    });
+    self.run(world);
+    REQUIRE(own == entities.size());
+    own = 0;
+    self.run(world);
+    REQUIRE(own == 0);
+
+    // Changed reads: a writer of the component runs in another stage.
+    Scheduler both;
+    both.add([](Query<Position>) {});
+    both.add([](Query<const Velocity, Changed<Position>>) {});
+    both.add([](Query<const Velocity>) {});
+    REQUIRE(both.stages() == Stages{{0, 2}, {1}});
+  }
+
+  SECTION("Changed Of A Component Whose Changes Are Not Tracked Throws") {
+    const auto loop = [&] { world.each<const Position, Changed<Velocity>>([](const Position &) {}); };
+    REQUIRE_THROWS_AS(loop(), std::logic_error);
   }
 }
