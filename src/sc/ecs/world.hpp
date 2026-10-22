@@ -415,7 +415,7 @@ namespace sc::ecs::internal {
   struct ChangedIn<List<Found...>, Term, Rest...> : ChangedIn<List<Found...>, Rest...> {};
 
   template<typename... Terms>
-  using ChangedList = typename ChangedIn<List<>, Terms...>::Type;
+  using ChangedList = ChangedIn<List<>, Terms...>::Type;
 
   // The component at a slot of a page's values, nothing for a component
   // without members.
