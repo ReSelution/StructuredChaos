@@ -1389,7 +1389,14 @@ namespace sc::ecs {
           constexpr bool WITH_ENTITY = internal::takesEntity<Function, Components>;
           [[maybe_unused]] const uint32_t *generations = WITH_ENTITY ? m_entities.generation(base) : nullptr;
 
-          const auto call = [&](uint32_t slot) {
+          // values by copy, not by reference: taken by reference, the tuple
+          // had its address taken and stayed on the stack, and every asm with
+          // a "memory" clobber in the function (benchmark::DoNotOptimize)
+          // reloaded both page pointers from it for each entity. By copy they
+          // stay in registers. IterateTwoComponents of ecs_benchmark, GCC 16,
+          // 1M entities: 744 instead of 232 µs; with a body that writes the
+          // components unchanged (0.158 ns per entity either way).
+          const auto call = [&function, &watcher, values, base, generations](uint32_t slot) {
             watcher.at(base + slot);
             if constexpr (WITH_ENTITY) {
               std::apply(function, std::tuple_cat(std::tuple{makeEntity(base + slot, generations[slot])},
