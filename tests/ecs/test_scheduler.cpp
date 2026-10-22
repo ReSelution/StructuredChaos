@@ -21,6 +21,7 @@ namespace {
   using sc::ecs::Emit;
   using sc::ecs::Entity;
   using sc::ecs::Exclude;
+  using sc::ecs::Global;
   using sc::ecs::LocalEdit;
   using sc::ecs::PAGE_SIZE;
   using sc::ecs::Query;
@@ -93,6 +94,11 @@ namespace {
 
   struct Died {
     Entity entity;
+  };
+
+  // A global value of the world.
+  struct GameTime {
+    float seconds;
   };
 
   using Stages = std::vector<std::vector<size_t>>;
@@ -253,6 +259,36 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
     REQUIRE(scheduler.stages() == Stages{{0}, {1}, {2}, {3}, {4}});
     REQUIRE(scheduler.name(1) == "load");
     REQUIRE(scheduler.size() == 5);
+  }
+
+  SECTION("Readers Of A Global Run Together, A Writer Alone") {
+    scheduler.add([](Global<const GameTime>) {});
+    scheduler.add([](Global<const GameTime>, Query<Position>) {});
+    scheduler.add([](Global<GameTime>) {});
+    scheduler.add([](Global<const GameTime>) {});
+    REQUIRE(scheduler.stages() == Stages{{0, 1}, {2}, {3}});
+  }
+
+  SECTION("A Global And A Component Of The Same Type Are Apart") {
+    scheduler.add([](Global<Health>) {});
+    scheduler.add([](Query<Health>) {});
+    REQUIRE(scheduler.stages() == Stages{{0, 1}});
+  }
+
+  SECTION("A Loop Reads A Global") {
+    scheduler.addParallel([](Global<const GameTime>, Position &) {});
+    scheduler.add([](Global<GameTime>) {});
+    scheduler.addParallel([](Global<const GameTime>, Health &) {});
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}, {2}});
+  }
+
+  SECTION("A Listener Writes A Global For A System, Not For A Loop") {
+    scheduler.add([](Query<const Position>, Emit<Hit>) {}, "fight");
+    scheduler.add([](Global<const GameTime>) {});
+    scheduler.on([](const Hit &, Global<GameTime>) {});
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}});
+    scheduler.addParallel([](Emit<Hit>, const Position &) {}, "fight on all threads");
+    REQUIRE_THROWS_AS(scheduler.stages(), std::logic_error);
   }
 
   SECTION("The Parameters Of A Loop Say What It Uses") {
@@ -1185,6 +1221,32 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     collector.run(world);
     REQUIRE(collected == 4);
     REQUIRE(textures.size() == 0);
+  }
+
+  SECTION("Systems Write And Read A Global Of The World") {
+    world.setGlobal<GameTime>(0.0f);
+    scheduler.add([](Global<GameTime> time) { time->seconds += 1.0f; });
+    // Every thread of the loop sees what the stage before wrote.
+    std::atomic<size_t> seen = 0;
+    std::atomic<size_t> late = 0;
+    scheduler.addParallel([&](Global<const GameTime> time, const Position &) {
+      seen.fetch_add(1, std::memory_order_relaxed);
+      if (time->seconds != 1.0f) {
+        late.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}});
+    scheduler.run(world);
+    REQUIRE(seen == entities.size());
+    REQUIRE(late == 0);
+    REQUIRE(world.global<GameTime>().seconds == 1.0f);
+  }
+
+  SECTION("A Global The World Does Not Have Ends The Run") {
+    bool ran = false;
+    scheduler.add([&](Global<const GameTime>) { ran = true; }, "tick");
+    REQUIRE_THROWS_AS(scheduler.run(world), std::logic_error);
+    REQUIRE_FALSE(ran);
   }
 
   SECTION("A Cache That Was Not Provided Ends The Run") {

@@ -996,6 +996,32 @@ namespace sc::ecs {
     Cache *m_cache;
   };
 
+  // A global value of the world (World::setGlobal) as a parameter of a
+  // system: Global<const T> reads it, Global<T> writes it, and the scheduler
+  // keeps a system that writes it apart from the others that use it. In the
+  // function of addParallel only Global<const T>, as all threads of the loop
+  // would write the one value; the same goes for a listener of an event a
+  // loop emits. A system of add that runs a parallelEach of its own is not
+  // checked: writing the value from that loop is its own to keep apart.
+  // std::logic_error when the system runs on a world without the value.
+  //
+  //   scheduler.add([](Global<GameTime> time) { time->seconds += 1.0f / 60.0f; });
+  //   scheduler.addParallel([](Global<const GameTime> time, Position &pos, const Velocity &vel) { ... });
+  template<typename T>
+  class Global {
+    static_assert(std::is_same_v<std::remove_const_t<T>, std::remove_cvref_t<T>>,
+                  "Global names the type of the value, const to only read it");
+
+  public:
+    explicit Global(T &value) noexcept : m_value(&value) {}
+
+    [[nodiscard]] T *operator->() const noexcept { return m_value; }
+    [[nodiscard]] T &operator*() const noexcept { return *m_value; }
+
+  private:
+    T *m_value;
+  };
+
 } // namespace sc::ecs
 
 namespace sc::ecs::internal {
@@ -1036,6 +1062,8 @@ namespace sc::ecs::internal {
     };
 
     std::vector<Component> components;
+    // The same for global values, by internal::globalIndex.
+    std::vector<Component> globals;
     // The system takes the world itself and may do anything with it.
     bool exclusive = false;
     bool commands = false;
@@ -1051,15 +1079,11 @@ namespace sc::ecs::internal {
     std::vector<ColumnMaker> columns;
 
     // Several parameters may name the same component; writing wins.
-    void add(size_t index, bool write) {
-      for (Component &component: components) {
-        if (component.index == index) {
-          component.write = component.write || write;
-          return;
-        }
-      }
-      components.push_back({.index = index, .write = write});
-    }
+    void add(size_t index, bool write) { addTo(components, index, write); }
+
+    void addGlobal(size_t index, bool write) { addTo(globals, index, write); }
+
+    [[nodiscard]] bool writesGlobal() const noexcept { return std::ranges::any_of(globals, &Component::write); }
 
     void addColumn(const ColumnMaker &maker) {
       if (std::ranges::find(columns, maker.index, &ColumnMaker::index) == columns.end()) {
@@ -1077,6 +1101,9 @@ namespace sc::ecs::internal {
     void merge(const SystemAccess &other) {
       for (const Component &component: other.components) {
         add(component.index, component.write);
+      }
+      for (const Component &global: other.globals) {
+        addGlobal(global.index, global.write);
       }
       exclusive = exclusive || other.exclusive;
       commands = commands || other.commands;
@@ -1101,12 +1128,26 @@ namespace sc::ecs::internal {
 
     // Whether the two must not run at the same time.
     [[nodiscard]] bool conflictsWith(const SystemAccess &other) const noexcept {
-      if (exclusive || other.exclusive) {
-        return true;
+      return exclusive || other.exclusive || overlap(components, other.components) || overlap(globals, other.globals);
+    }
+
+  private:
+    static void addTo(std::vector<Component> &list, size_t index, bool write) {
+      for (Component &component: list) {
+        if (component.index == index) {
+          component.write = component.write || write;
+          return;
+        }
       }
-      for (const Component &mine: components) {
-        for (const Component &theirs: other.components) {
-          if (mine.index == theirs.index && (mine.write || theirs.write)) {
+      list.push_back({.index = index, .write = write});
+    }
+
+    // Whether one of the two writes something the other one uses.
+    [[nodiscard]] static bool overlap(const std::vector<Component> &mine,
+                                      const std::vector<Component> &theirs) noexcept {
+      for (const Component &one: mine) {
+        for (const Component &other: theirs) {
+          if (one.index == other.index && (one.write || other.write)) {
             return true;
           }
         }
@@ -1263,6 +1304,28 @@ namespace sc::ecs::internal {
     }
   };
 
+  template<typename T>
+  struct SystemParam<Global<T>> {
+    static void declare(SystemAccess &access) {
+      access.addGlobal(globalIndex<std::remove_const_t<T>>(), !std::is_const_v<T>);
+    }
+
+    // One look per run of the system, not per entity.
+    static Global<T> fetch(const SystemContext &context) {
+      T *const value = context.world.template tryGlobal<std::remove_const_t<T>>();
+      if (value == nullptr) {
+        throw std::logic_error("the system \"" + context.name + "\" takes a global value the world does not have");
+      }
+      return Global<T>(*value);
+    }
+  };
+
+  // Whether a parameter of a system writes a global value.
+  template<typename Param>
+  inline constexpr bool writesGlobal = false;
+  template<typename T>
+  inline constexpr bool writesGlobal<Global<T>> = !std::is_const_v<T>;
+
   template<typename Event>
   struct SystemParam<Emit<Event>> {
     static void declare(SystemAccess &access) { access.addEmit(&eventTag<Event>); }
@@ -1318,10 +1381,12 @@ namespace sc::ecs::internal {
   inline constexpr bool isLoopExtra<Resources<T, Key, Hash>> = true;
   template<typename Event>
   inline constexpr bool isLoopExtra<Emit<Event>> = true;
+  template<typename T>
+  inline constexpr bool isLoopExtra<Global<T>> = true;
 
   // The parameters of a function for Scheduler::addParallel: the entity, then
-  // Edit, Spawn, Commands and queries, all of them optional, and then the
-  // components.
+  // Edit, Spawn, Commands, queries, Resources, Emit and Global, all of them
+  // optional, and then the components.
   template<bool WithEntity, typename Extras, typename... Rest>
   struct LoopRest;
 
@@ -1455,6 +1520,7 @@ namespace sc::ecs {
   //   void spawn(Query<const Spawner> query, Spawn spawn);   // makes entities
   //   void reap(Query<const Lifetime> query, Commands commands);   // destroys entities, later
   //   void stream(Resources<Texture> textures);            // loads into a cache given with provide
+  //   void tick(Global<GameTime> time);                    // writes a global value of the world
   //   void fight(Query<const Weapon> query, Emit<Hit> emit);   // uses what the listeners of Hit use
   //   void load(World &world);                             // may do anything, runs alone
   //
@@ -1479,8 +1545,8 @@ namespace sc::ecs {
     //
     // A component taken by reference to non-const is written, any other one is
     // only read. Before the components, the function may take the entity and,
-    // after it, Edit, Spawn, Commands, queries, Resources and Emit, Edit and
-    // queries for entities other than its own:
+    // after it, Edit, Spawn, Commands, queries, Resources, Emit and
+    // Global<const T>, Edit and queries for entities other than its own:
     //
     //   scheduler.addParallel([](Entity entity, Commands commands, const Health &health) { ... });
     //   scheduler.addParallel([](Query<const Health> others, const Target &target) { ... });
@@ -1613,7 +1679,8 @@ namespace sc::ecs {
     //
     // std::logic_error for a system that takes a component through a query
     // which it or a listener of an event it emits edits, as addSystem's
-    // static_assert for a system alone.
+    // static_assert for a system alone, and for a loop of addParallel with a
+    // listener that writes a global value, as addLoopOver's for the loop.
     [[nodiscard]] const std::vector<std::vector<size_t>> &stages() {
       if (!m_stagesValid) {
         for (System &system: m_systems) {
@@ -1623,6 +1690,12 @@ namespace sc::ecs {
                                    "\" or a listener of an event it emits edits a component that one of them also "
                                    "takes through a query: a loop of the query would get to an edited entity or not, "
                                    "depending on where it lies");
+          }
+          // The loop itself cannot, see addLoopOver.
+          if (system.loop && system.effective.writesGlobal()) {
+            throw std::logic_error("a listener of an event the loop \"" + system.name +
+                                   "\" emits writes a global value: all threads of the loop would write the one "
+                                   "value; take it as Global<const T>");
           }
         }
 
@@ -1667,6 +1740,8 @@ namespace sc::ecs {
       // thread and one for all others; empty for a system that does not take
       // Commands.
       std::vector<internal::CommandList> commands;
+      // Added with addParallel: its listeners run on all threads of the loop.
+      bool loop;
     };
 
     // What a system uses with what the listeners of its events use, and those
@@ -1765,6 +1840,7 @@ namespace sc::ecs {
           .access = std::move(access),
           .effective = {},
           .commands = {},
+          .loop = LOOP,
       });
       m_stagesValid = false;
       return *this;
@@ -1798,6 +1874,9 @@ namespace sc::ecs {
     template<typename... Terms, typename F, typename... Extras>
     Scheduler &addLoopOver(std::type_identity<Query<Terms...>>, F &&function, std::string name, size_t grain,
                            internal::List<Extras...>) {
+      static_assert(!(internal::writesGlobal<std::remove_cvref_t<Extras>> || ...),
+                    "the function of a loop takes a global value as Global<const T>: all threads of the loop would "
+                    "write the one value");
       using Function = std::decay_t<F>;
       using Signature = internal::LoopSignature<typename internal::SystemSignature<Function>::Params>;
       return addSystem<true>(

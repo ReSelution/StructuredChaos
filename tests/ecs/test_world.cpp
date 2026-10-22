@@ -1445,6 +1445,31 @@ TEST_CASE("World Components", "[ecs][world]") {
     REQUIRE(world.column<Named>().pages() == 0);
   }
 
+  SECTION("A Global Value Is Made Once, Assigned After, And Goes With The World") {
+    struct Settings {
+      int level;
+      std::shared_ptr<int> alive;
+    };
+    const auto alive = std::make_shared<int>(0);
+    {
+      World other;
+      REQUIRE(other.tryGlobal<Settings>() == nullptr);
+      REQUIRE_THROWS_AS(other.global<Settings>(), std::logic_error);
+      Settings &made = other.setGlobal<Settings>(1, alive);
+      REQUIRE(alive.use_count() == 2);
+      // Assigned: where it is stays.
+      Settings &again = other.setGlobal<Settings>(2, alive);
+      REQUIRE(&again == &made);
+      REQUIRE(alive.use_count() == 2);
+      const World &seen = other;
+      REQUIRE(seen.global<Settings>().level == 2);
+      REQUIRE(seen.tryGlobal<Settings>() == &made);
+      // The value of one world is not that of another.
+      REQUIRE(world.tryGlobal<Settings>() == nullptr);
+    }
+    REQUIRE(alive.use_count() == 1);
+  }
+
   SECTION("Headers And Values Get Memory Only Where Pages Are Used") {
     using Column = sc::ecs::internal::Column<Position>;
     // On the heap: a column holds the headers of all pages.

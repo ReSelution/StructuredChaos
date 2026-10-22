@@ -315,6 +315,17 @@ namespace sc::ecs::internal {
     return index;
   }
 
+  inline std::atomic<size_t> nextGlobalIndex{0};
+
+  // A number for every type of global value (World::setGlobal), the same in
+  // all worlds and apart from the component types: where a world keeps the
+  // value, and what the scheduler tells the globals of two systems apart by.
+  template<typename T>
+  size_t globalIndex() {
+    static const size_t index = nextGlobalIndex.fetch_add(1, std::memory_order_relaxed);
+    return index;
+  }
+
   // Far more sets of components than a program creates entities with, see
   // setIndex.
   inline constexpr size_t MAX_COMPONENT_SETS = size_t{1} << 16;
@@ -834,6 +845,58 @@ namespace sc::ecs {
       return static_cast<const ColumnOf<Component> *>(slotOf<Component>().load(std::memory_order_acquire));
     }
 
+    // A value the world has once, not per entity, such as the time of the
+    // frame or the input: made from the arguments, or assigned if the world
+    // has one already, which stays where it is. Systems take it as Global<T>,
+    // which tells the scheduler whether they read or write it:
+    //
+    //   world.setGlobal<GameTime>(0.0f);
+    //   scheduler.add([](Global<GameTime> time) { time->seconds += 1.0f / 60.0f; });
+    //
+    // Not while systems that take globals run: the first value of a type may
+    // move the others' places (a system that takes the world runs alone).
+    template<typename T, typename... Args>
+    T &setGlobal(Args &&...args) {
+      static_assert(std::is_same_v<T, std::remove_cvref_t<T>>, "setGlobal names the type of the value");
+      const size_t index = internal::globalIndex<T>();
+      if (index >= m_globals.size()) {
+        m_globals.resize(index + 1);
+      }
+      std::shared_ptr<void> &held = m_globals[index];
+      if (held != nullptr) {
+        T &value = *static_cast<T *>(held.get());
+        value = T{std::forward<Args>(args)...};
+        return value;
+      }
+      held = std::make_shared<T>(std::forward<Args>(args)...);
+      return *static_cast<T *>(held.get());
+    }
+
+    // The global value of the type, std::logic_error if the world has none.
+    template<typename T>
+    [[nodiscard]] T &global() {
+      T *const value = tryGlobal<T>();
+      if (value == nullptr) {
+        throw std::logic_error("sc::ecs: the world has no global value of this type");
+      }
+      return *value;
+    }
+    template<typename T>
+    [[nodiscard]] const T &global() const {
+      return const_cast<World *>(this)->global<T>();
+    }
+
+    // The same, or null if the world has none.
+    template<typename T>
+    [[nodiscard]] T *tryGlobal() noexcept {
+      const size_t index = internal::globalIndex<T>();
+      return index < m_globals.size() ? static_cast<T *>(m_globals[index].get()) : nullptr;
+    }
+    template<typename T>
+    [[nodiscard]] const T *tryGlobal() const noexcept {
+      return const_cast<World *>(this)->tryGlobal<T>();
+    }
+
     // Calls the function with the components of every entity that has all of
     // them. A const component is only read; the entity comes first if the
     // function takes one:
@@ -1203,6 +1266,9 @@ namespace sc::ecs {
     std::vector<uint32_t> m_freed;
     std::vector<uint32_t> m_freedCounts;
     std::vector<std::span<const uint32_t>> m_freedPages;
+    // The global values, at internal::globalIndex; null for a type the world
+    // has none of.
+    std::vector<std::shared_ptr<void>> m_globals;
   };
 
 } // namespace sc::ecs
