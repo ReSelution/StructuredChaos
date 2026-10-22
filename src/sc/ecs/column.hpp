@@ -610,6 +610,7 @@ namespace sc::ecs::internal {
       const bool made = emplaceOr(
           entity,
           [&](T *value) {
+            assert(!m_replaceForbidden && "sc::ecs: this component is not replaced, see forbidReplace");
             if constexpr (HAS_VALUE) {
               *value = T{std::forward<Args>(args)...};
             }
@@ -937,6 +938,13 @@ namespace sc::ecs::internal {
 
     [[nodiscard]] bool hasAddHooks() const noexcept { return m_hooks != nullptr && !m_hooks->added.empty(); }
     [[nodiscard]] bool hasHooks() const noexcept { return m_hooks != nullptr; }
+
+    // For a component whose hooks keep something else in step with it, which
+    // a replace would get past (no hook runs for it): emplaceOrReplace of
+    // one that is there asserts in debug builds, also through Edit and
+    // Commands. Not while the column is used.
+    void forbidReplace() noexcept { m_replaceForbidden = true; }
+    [[nodiscard]] bool replaceForbidden() const noexcept { return m_replaceForbidden; }
 
     // The onAdd hooks of a component the entity just got without the making
     // bit, from the only thread that may go for it.
@@ -1719,6 +1727,8 @@ namespace sc::ecs::internal {
     // Changes once at most, from small pages to huge ones, see Pages::Auto.
     std::atomic<bool> m_hugePages{true};
     bool m_grows = false;
+    // In the gap before m_hooks, which leaves m_headerBlocks where it was.
+    bool m_replaceForbidden = false;
     // Null as long as nobody gave the column a hook: that is all that adding
     // a component looks at then, next to m_headerBlocks, which it reads
     // anyway.

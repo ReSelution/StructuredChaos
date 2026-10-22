@@ -25,6 +25,7 @@ test_ecs = executable(
   'test_ecs',
   sources: [
     'ecs/test_resource.cpp',
+    'ecs/test_relation.cpp',
     'ecs/test_scheduler.cpp',
     'ecs/test_world.cpp',
   ],

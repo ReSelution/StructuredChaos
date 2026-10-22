@@ -201,6 +201,7 @@ namespace sc::ecs::internal {
       const std::unique_ptr<T, decltype(drop)> made{static_cast<T *>(value), drop};
       if constexpr (REPLACE) {
         if (page != nullptr && typed.contains(index)) {
+          assert(!typed.replaceForbidden() && "sc::ecs: this component is not replaced, see Column::forbidReplace");
           typed.get(index) = std::move(*made);
           return;
         }
@@ -937,6 +938,7 @@ namespace sc::ecs {
         if (!column.contains(indexOf(entity))) {
           return column.emplace(entity, std::forward<Args>(args)...);
         }
+        assert(!column.replaceForbidden() && "sc::ecs: this component is not replaced, see Column::forbidReplace");
         if constexpr (!std::is_empty_v<Component>) {
           changed(column, entity) = Component{std::forward<Args>(args)...};
         }
