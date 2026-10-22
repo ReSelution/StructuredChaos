@@ -704,8 +704,10 @@ namespace sc::ecs::internal {
 
     // An add that occupyPage counted already, by the only thread that changes
     // the page in this column, as CommandApplier gives a page to one thread:
-    // no making bit, and the mask with a plain load and store.
-    // False, with nothing made, if the index has the component.
+    // no making bit, and the mask and the summary with a plain load and
+    // store, as in eraseAlone (park and vacate on other threads leave the
+    // summary alone). False, with nothing made, if the index has the
+    // component.
     template<typename... Args>
     bool emplaceCounted(uint32_t index, [[maybe_unused]] Args &&...args) {
       assert(index < INDEX_LIMIT);
@@ -720,7 +722,8 @@ namespace sc::ecs::internal {
       }
       std::atomic<uint64_t> &word = header->mask[slot / 64];
       word.store(word.load(std::memory_order_relaxed) | (uint64_t{1} << (slot % 64)), std::memory_order_relaxed);
-      markWord(*header, slot / 64);
+      const uint64_t summary = header->summary.load(std::memory_order_relaxed);
+      header->summary.store(summary | (uint64_t{1} << (slot / 64)), std::memory_order_relaxed);
       return true;
     }
 
