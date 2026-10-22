@@ -170,19 +170,21 @@ namespace sc::ecs::internal {
       void *value;
     };
 
+    // At most two rounds: a new block has room for any padding.
     [[nodiscard]] void *allocate(size_t bytes, size_t alignment) {
-      if (!m_blocks.empty()) {
-        void *at = m_blocks.back().get() + m_used;
-        size_t space = m_blockSize - m_used;
-        if (std::align(alignment, bytes, at, space) != nullptr) {
-          m_used = m_blockSize - space + bytes;
-          return at;
+      for (;;) {
+        if (!m_blocks.empty()) {
+          void *at = m_blocks.back().get() + m_used;
+          size_t space = m_blockSize - m_used;
+          if (std::align(alignment, bytes, at, space) != nullptr) {
+            m_used = m_blockSize - space + bytes;
+            return at;
+          }
         }
+        m_blockSize = std::max(BLOCK_BYTES, bytes + alignment);
+        m_blocks.push_back(std::make_unique_for_overwrite<std::byte[]>(m_blockSize));
+        m_used = 0;
       }
-      m_blockSize = std::max(BLOCK_BYTES, bytes + alignment);
-      m_blocks.push_back(std::make_unique_for_overwrite<std::byte[]>(m_blockSize));
-      m_used = 0;
-      return allocate(bytes, alignment);
     }
 
     void add(Entity entity, ColumnBase &column, void *value) {
