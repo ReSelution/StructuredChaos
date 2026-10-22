@@ -431,7 +431,9 @@ namespace sc::ecs::internal {
     // which giveMany does afterwards for all of them on one thread. kill only
     // touches the generation of the index, so threads may kill entities of
     // different pages at the same time, but nothing else may run.
-    [[nodiscard]] bool kill(Entity entity) noexcept {
+    // Not const though tidy finds it could be: it ends the entity, only
+    // through the pointer generation() hands out.
+    [[nodiscard]] bool kill(Entity entity) noexcept { // NOLINT(readability-make-member-function-const)
       if (!valid(entity)) {
         return false;
       }
