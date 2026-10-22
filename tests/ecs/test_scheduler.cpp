@@ -291,6 +291,35 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
     REQUIRE_THROWS_AS(scheduler.stages(), std::logic_error);
   }
 
+  SECTION("A System Counts As Using What The Hooks Of What It Edits Use") {
+    World world;
+    // Health sets off Spawner, which sets off Target.
+    world.onAdd<Health>([](Entity, Health &, Edit<Spawner>) {});
+    world.onAdd<Spawner>([](Entity, Spawner &, Edit<Target>) {});
+    scheduler.add([](Edit<Health>) {});
+    scheduler.add([](Query<const Target>) {});
+    scheduler.add([](Commands) {});
+    scheduler.add([](Query<const Target>) {});
+    // Without the world, and for Commands, whose hooks run after the stage.
+    REQUIRE(scheduler.stages() == Stages{{0, 1, 2, 3}});
+    REQUIRE(scheduler.stages(world) == Stages{{0, 2}, {1, 3}});
+  }
+
+  SECTION("A Hook Must Not Edit What Its System Takes Through LocalEdit") {
+    World world;
+    world.onAdd<Spawner>([](Entity, Spawner &, Edit<Health>) {});
+    scheduler.addParallel([](LocalEdit<Spawner, Health>, const Position &) {}, "spawn");
+    REQUIRE(scheduler.stages() == Stages{{0}});
+    REQUIRE_THROWS_AS(scheduler.stages(world), std::logic_error);
+  }
+
+  SECTION("Hooks Must Not Edit What Other Hooks Query") {
+    World world;
+    world.onAdd<Spawner>([](Entity, Spawner &, Edit<Health>) {});
+    world.onAdd<Target>([](Entity, Target &, Query<const Health>) {});
+    REQUIRE_THROWS_AS(scheduler.stages(world), std::logic_error);
+  }
+
   SECTION("The Parameters Of A Loop Say What It Uses") {
     scheduler.addParallel([](Position &, const Velocity &) {});
     scheduler.addParallel([](Health &, Velocity) {});
@@ -1280,6 +1309,80 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     REQUIRE(seen == entities.size());
     REQUIRE(late == 0);
     REQUIRE(world.global<GameTime>().seconds == 1.0f);
+  }
+
+  SECTION("Hooks See Every Component Added Right Away") {
+    std::atomic<int> calls = 0;
+    world.onAdd<Spawner>([&](Entity, Spawner &spawner) {
+      calls.fetch_add(1, std::memory_order_relaxed);
+      spawner.count += 100;
+    });
+    const Entity entity = world.create();
+    world.emplace<Spawner>(entity, 1);
+    REQUIRE(world.get<const Spawner>(entity).count == 101);
+    world.erase<Spawner>(entity);
+    REQUIRE(world.tryEmplace<Spawner>(entity, 2) == sc::ecs::Emplaced::Made);
+    REQUIRE(world.tryEmplace<Spawner>(entity, 3) == sc::ecs::Emplaced::There);
+    // Replaced, not added: no call.
+    REQUIRE(world.emplaceOrReplace<Spawner>(entity, 4) == sc::ecs::Emplaced::Replaced);
+    REQUIRE(world.get<const Spawner>(entity).count == 4);
+    world.erase<Spawner>(entity);
+    world.emplaceOrModify<Spawner>(entity, [](Spawner &) {}, 5);
+    REQUIRE(world.get<const Spawner>(entity).count == 105);
+    const Entity made = world.create(Spawner{6}, Target{});
+    REQUIRE(world.get<const Spawner>(made).count == 106);
+    REQUIRE(calls == 4);
+    std::vector<Entity> many(PAGE_SIZE + 10);
+    world.create(many, Spawner{7});
+    REQUIRE(calls == 4 + static_cast<int>(many.size()));
+    REQUIRE(world.get<const Spawner>(many.back()).count == 107);
+  }
+
+  SECTION("Hooks Of Adds In A Loop Get The Parameters Of Its System") {
+    std::atomic<size_t> calls = 0;
+    world.onAdd<Spawner>([&](Entity entity, Spawner &, Commands commands) {
+      calls.fetch_add(1, std::memory_order_relaxed);
+      commands.emplace<Target>(entity, 7);
+    });
+    scheduler.addParallel(
+        [](Entity entity, Edit<Spawner> edit, const Position &) { edit.tryEmplace<Spawner>(entity); });
+    scheduler.addParallel(
+        [](Entity entity, LocalEdit<Frozen> edit, const Position &) { edit.emplace<Frozen>(entity); });
+    scheduler.run(world);
+    REQUIRE(calls == entities.size());
+    for (const Entity entity: entities) {
+      REQUIRE(world.get<const Target>(entity).value == 7);
+    }
+  }
+
+  SECTION("Hooks Of Adds Through Commands Run After Them, In Rounds") {
+    std::atomic<size_t> targets = 0;
+    world.onAdd<Spawner>([](Entity entity, Spawner &, Commands commands) { commands.emplace<Target>(entity, 8); });
+    world.onAdd<Target>([&](Entity, Target &target) {
+      targets.fetch_add(1, std::memory_order_relaxed);
+      target.value += 1;
+    });
+    scheduler.addParallel(
+        [](Entity entity, Commands commands, const Position &) { commands.emplace<Spawner>(entity, 1); });
+    scheduler.run(world);
+    REQUIRE(targets == entities.size());
+    for (const Entity entity: entities) {
+      REQUIRE(world.get<const Target>(entity).value == 9);
+    }
+  }
+
+  SECTION("Hooks That Never Stop Adding End The Run") {
+    world.onAdd<Spawner>([](Entity entity, Spawner &, Commands commands) {
+      commands.erase<Spawner>(entity);
+      commands.emplace<Spawner>(entity);
+    });
+    scheduler.add([&](Commands commands) { commands.emplace<Spawner>(entities[0]); });
+    REQUIRE_THROWS_AS(scheduler.run(world), std::logic_error);
+  }
+
+  SECTION("A Hook With Commands Outside A System Throws") {
+    world.onAdd<Frozen>([](Entity, Frozen &, Commands) {});
+    REQUIRE_THROWS_AS(world.emplace<Frozen>(entities[0]), std::logic_error);
   }
 
   SECTION("A Global The World Does Not Have Ends The Run") {

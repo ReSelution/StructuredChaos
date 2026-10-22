@@ -1387,7 +1387,7 @@ TEST_CASE("World Components", "[ecs][world]") {
     Column &column = *made;
     constexpr uint32_t pages = Column::SPARE_PAGES + 2;
     for (uint32_t number = 0; number < pages; ++number) {
-      column.emplace(number * PAGE_SIZE, static_cast<float>(number), 0.0f);
+      column.emplace(sc::ecs::makeEntity(number * PAGE_SIZE, 0), static_cast<float>(number), 0.0f);
     }
     for (uint32_t number = 0; number < pages; ++number) {
       REQUIRE(column.erase(number * PAGE_SIZE));
@@ -1398,10 +1398,10 @@ TEST_CASE("World Components", "[ecs][world]") {
 
     // A spare that gets a component again keeps its memory, it is not
     // given back when it comes out of the spares.
-    column.emplace((pages - 1) * PAGE_SIZE, 1.0f, 2.0f);
+    column.emplace(sc::ecs::makeEntity((pages - 1) * PAGE_SIZE, 0), 1.0f, 2.0f);
     REQUIRE(column.spares() == Column::SPARE_PAGES - 1);
     for (uint32_t number = 0; number < Column::SPARE_PAGES; ++number) {
-      column.emplace(number * PAGE_SIZE, 0.0f, 0.0f);
+      column.emplace(sc::ecs::makeEntity(number * PAGE_SIZE, 0), 0.0f, 0.0f);
       REQUIRE(column.erase(number * PAGE_SIZE));
     }
     REQUIRE(column.get((pages - 1) * PAGE_SIZE).y == 2.0f);
@@ -1488,17 +1488,17 @@ TEST_CASE("World Components", "[ecs][world]") {
     static_assert(Column::CHUNK_SIZE * sizeof(Position) >= sc::memory::HUGE_PAGE_SIZE);
     static_assert(Column::CHUNK_SIZE / PAGE_SIZE == Column::HEADER_BLOCK_PAGES);
     const uint32_t far = (130 * PAGE_SIZE) + 5;
-    column.emplace(far, 1.0f, 2.0f);
+    column.emplace(sc::ecs::makeEntity(far, 0), 1.0f, 2.0f);
     REQUIRE(column.headerBlocks() == 1);
     REQUIRE(column.chunks() == 1);
     // Another page of the same block and chunk.
     const uint32_t near = 129 * PAGE_SIZE;
-    column.emplace(near, 3.0f, 4.0f);
+    column.emplace(sc::ecs::makeEntity(near, 0), 3.0f, 4.0f);
     REQUIRE(column.headerBlocks() == 1);
     REQUIRE(column.chunks() == 1);
     // The last index there is.
     const uint32_t last = sc::ecs::INDEX_LIMIT - 1;
-    column.emplace(last, 5.0f, 6.0f);
+    column.emplace(sc::ecs::makeEntity(last, 0), 5.0f, 6.0f);
     REQUIRE(column.headerBlocks() == 2);
     REQUIRE(column.chunks() == 2);
     REQUIRE(column.pages() == 3);

@@ -88,12 +88,48 @@ namespace sc::ecs::internal {
   // add, and only for the adds: modify keeps no count, which cost 1M
   // recorded changes of Health 0.45 ms (11 %) where the count of a unit was
   // kept for every change.
+  struct SystemContext;
+
+  // What the hooks of a component make their parameters from on this
+  // thread: the system that set them off, or what runs them after the
+  // changes of a stage (CommandApplier::runHooked); null outside a system.
+  inline thread_local const SystemContext *hookContext = nullptr;
+
+  // Sets hookContext for as long as it lives, unless context is null.
+  class HookScope {
+  public:
+    explicit HookScope(const SystemContext *context) noexcept : m_before(hookContext), m_set(context != nullptr) {
+      if (m_set) {
+        hookContext = context;
+      }
+    }
+    HookScope(const HookScope &) = delete;
+    HookScope &operator=(const HookScope &) = delete;
+    ~HookScope() {
+      if (m_set) {
+        hookContext = m_before;
+      }
+    }
+
+  private:
+    const SystemContext *m_before;
+    bool m_set;
+  };
+
   class PageAdds {
   public:
+    // An add whose column has onAdd hooks, for CommandApplier to run them
+    // once all changes are done.
+    struct Hooked {
+      Entity entity;
+      ColumnBase *column;
+    };
+
     // Step is at most the number of changes of the page, as occupyPage
-    // brings that many components of a new page into memory.
-    PageAdds(uint32_t number, size_t changes) noexcept :
-        m_number(number), m_step(static_cast<uint32_t>(std::min<size_t>(changes, PAGE_SIZE))) {}
+    // brings that many components of a new page into memory. The adds with
+    // hooks go to hooked.
+    PageAdds(uint32_t number, size_t changes, std::vector<Hooked> &hooked) noexcept :
+        m_number(number), m_step(static_cast<uint32_t>(std::min<size_t>(changes, PAGE_SIZE))), m_hooked(&hooked) {}
 
     PageAdds(const PageAdds &) = delete;
     PageAdds &operator=(const PageAdds &) = delete;
@@ -119,6 +155,8 @@ namespace sc::ecs::internal {
       return found->added;
     }
 
+    void hooked(Entity entity, ColumnBase &column) { m_hooked->push_back({.entity = entity, .column = &column}); }
+
   private:
     struct Counted {
       ColumnBase *column;
@@ -130,6 +168,7 @@ namespace sc::ecs::internal {
     std::vector<Counted> m_counted;
     uint32_t m_number;
     uint32_t m_step;
+    std::vector<Hooked> *m_hooked;
   };
 
   // Gives the index a component made from the recorded value unless it has
@@ -138,8 +177,16 @@ namespace sc::ecs::internal {
   // CommandApplier. The value is gone afterwards either way, also if making
   // the component throws. Null for a component without members.
   template<typename T, bool REPLACE>
-  void finishEmplace(ColumnBase &column, uint32_t index, void *value, PageAdds *page) {
+  void finishEmplace(ColumnBase &column, Entity entity, void *value, PageAdds *page) {
     auto &typed = static_cast<Column<T> &>(column);
+    const uint32_t index = indexOf(entity);
+    // The hooks of an add run once all changes are done, see PageAdds.
+    const auto added = [&](bool made) -> uint32_t {
+      if (made && typed.hasAddHooks()) [[unlikely]] {
+        page->hooked(entity, column);
+      }
+      return made ? 1 : 0;
+    };
     if constexpr (Column<T>::HAS_VALUE) {
       const auto drop = [](T *made) { std::destroy_at(made); };
       const std::unique_ptr<T, decltype(drop)> made{static_cast<T *>(value), drop};
@@ -150,12 +197,12 @@ namespace sc::ecs::internal {
         }
       }
       if (page != nullptr) {
-        uint32_t &added = page->reserve(column);
-        added += typed.emplaceCounted(index, std::move(*made)) ? 1 : 0;
+        uint32_t &count = page->reserve(column);
+        count += added(typed.emplaceCounted(index, std::move(*made)));
       }
     } else if (page != nullptr) {
-      uint32_t &added = page->reserve(column);
-      added += typed.emplaceCounted(index) ? 1 : 0;
+      uint32_t &count = page->reserve(column);
+      count += added(typed.emplaceCounted(index));
     }
   }
 
@@ -164,8 +211,9 @@ namespace sc::ecs::internal {
   // it, see CommandList::apply, so without the making bit. The function is
   // gone afterwards either way, also if it throws.
   template<typename T, typename Function>
-  void finishModify(ColumnBase &column, uint32_t index, void *value, PageAdds *page) {
+  void finishModify(ColumnBase &column, Entity entity, void *value, PageAdds *page) {
     auto &typed = static_cast<Column<T> &>(column);
+    const uint32_t index = indexOf(entity);
     const auto drop = [](Function *function) { std::destroy_at(function); };
     const std::unique_ptr<Function, decltype(drop)> function{static_cast<Function *>(value), drop};
     if (page != nullptr && typed.contains(index)) {
@@ -227,7 +275,7 @@ namespace sc::ecs::internal {
       // finishEmplace of a component to add or replace, or finishModify of
       // one to modify, which also drop the value; null for one to remove, and
       // once the change is done.
-      void (*finish)(ColumnBase &column, uint32_t index, void *value, PageAdds *page);
+      void (*finish)(ColumnBase &column, Entity entity, void *value, PageAdds *page);
       // The component to add, or the function of modify.
       void *value;
     };
@@ -251,7 +299,7 @@ namespace sc::ecs::internal {
     void clear() noexcept {
       for (const Change &change: m_changes) {
         if (change.finish != nullptr) {
-          change.finish(*change.column, indexOf(change.entity), change.value, nullptr);
+          change.finish(*change.column, change.entity, change.value, nullptr);
         }
       }
       m_changes.clear();
@@ -351,6 +399,38 @@ namespace sc::ecs::internal {
       }
     }
 
+    // Whether the adds of apply wait for their onAdd hooks.
+    [[nodiscard]] bool hooked() const noexcept { return !m_hooked.empty(); }
+
+    // Runs them, a thread for so many, the parameters of the hooks made from
+    // the context: what they record goes to its lists, for the next apply.
+    // An entity destroyed by then has none. A thread takes a page of them at
+    // a time, which lie together, as apply does a page at a time: with 64,
+    // the threads took the making bits of the same cache lines, and adding
+    // and removing 100K components through Commands with an empty hook took
+    // 1.17 instead of 0.48 ms (0.34 without the hook).
+    void runHooked(World &world, const SystemContext &context) {
+      m_running.swap(m_hooked);
+      m_hooked.clear();
+      threading::parallelFor(m_running.size(), PAGE_SIZE, m_running.size() / CHANGES_PER_THREAD,
+                             [&](size_t first, size_t last) {
+                               const HookScope scope{&context};
+                               for (size_t i = first; i < last; ++i) {
+                                 const PageAdds::Hooked &each = m_running[i];
+                                 if (world.valid(each.entity)) {
+                                   each.column->runAdded(each.entity);
+                                 }
+                               }
+                             });
+      m_running.clear();
+    }
+
+    // Forgets the adds that wait for their hooks, after an exception.
+    void dropHooked() noexcept {
+      m_hooked.clear();
+      m_running.clear();
+    }
+
   private:
     using Change = CommandList::Change;
 
@@ -392,9 +472,9 @@ namespace sc::ecs::internal {
 
     // Every change on the calling thread, in the order of the lists: so many
     // changes, all of the given page.
-    static void applyInOrder(World &world, std::span<CommandList *const> lists, uint32_t number, size_t changes) {
+    void applyInOrder(World &world, std::span<CommandList *const> lists, uint32_t number, size_t changes) {
       std::vector<Kill> kills;
-      PageAdds adds{number, changes};
+      PageAdds adds{number, changes, m_hooked};
       for (CommandList *const list: lists) {
         applyList(world, list->changes(), kills, adds);
       }
@@ -427,7 +507,7 @@ namespace sc::ecs::internal {
         if (change.finish != nullptr) {
           const auto finish = change.finish;
           change.finish = nullptr;
-          finish(*change.column, indexOf(change.entity), change.value, nullptr);
+          finish(*change.column, change.entity, change.value, nullptr);
         }
       });
       if (m_sort.pages().size() <= 1) {
@@ -443,12 +523,23 @@ namespace sc::ecs::internal {
       std::exception_ptr error;
       threading::parallelFor(m_sort.pages().size(), 1, helpers, [&](size_t first, size_t last) {
         std::vector<Kill> kills;
+        // Kept for runHooked whichever way the pages are left.
+        struct Keep {
+          CommandApplier &applier;
+          std::vector<PageAdds::Hooked> hooked;
+          ~Keep() {
+            if (!hooked.empty()) {
+              const std::scoped_lock lock{applier.m_hookedMutex};
+              applier.m_hooked.insert(applier.m_hooked.end(), hooked.begin(), hooked.end());
+            }
+          }
+        } keep{*this, {}};
         for (size_t i = first; i < last; ++i) {
           if (failed.test(std::memory_order_relaxed)) {
             return;
           }
           try {
-            applyPage(world, m_sort.page(i), m_sort.pages()[i], kills);
+            applyPage(world, m_sort.page(i), m_sort.pages()[i], kills, keep.hooked);
           } catch (...) {
             if (!failed.test_and_set(std::memory_order_acq_rel)) {
               error = std::current_exception();
@@ -465,8 +556,9 @@ namespace sc::ecs::internal {
     // The changes of one page, in their order. The erases that come one
     // after the other are gathered per column and done together before the
     // next change of another kind.
-    static void applyPage(World &world, std::span<Change *const> changes, uint32_t number, std::vector<Kill> &kills) {
-      PageAdds adds{number, changes.size()};
+    static void applyPage(World &world, std::span<Change *const> changes, uint32_t number, std::vector<Kill> &kills,
+                          std::vector<PageAdds::Hooked> &hooked) {
+      PageAdds adds{number, changes.size(), hooked};
       for (Change *const change: changes) {
         applyChange(world, *change, kills, adds);
       }
@@ -487,7 +579,7 @@ namespace sc::ecs::internal {
       // Done before the call: finish drops the value whatever happens.
       const auto finish = change.finish;
       change.finish = nullptr;
-      finish(*change.column, index, change.value, valid ? &adds : nullptr);
+      finish(*change.column, change.entity, change.value, valid ? &adds : nullptr);
     }
 
     static void kill(std::vector<Kill> &kills, ColumnBase &column, uint32_t index) {
@@ -520,6 +612,10 @@ namespace sc::ecs::internal {
     PageSort<Change> m_sort;
     // Of all lists.
     std::vector<Entity> m_destroyed;
+    // The adds whose hooks are still to run, and those runHooked is at.
+    std::vector<PageAdds::Hooked> m_hooked;
+    std::vector<PageAdds::Hooked> m_running;
+    std::mutex m_hookedMutex;
   };
 
   // Defined below, with the parameters of systems.
@@ -708,10 +804,14 @@ namespace sc::ecs {
     // Scheduler::run makes them before the first system.
     explicit BasicEdit(World &world) : m_world(&world), m_columns{&world.template column<Components>()...} {}
 
+    // The same in a system, whose parameters the onAdd hooks it sets off get.
+    BasicEdit(World &world, const internal::SystemContext *context) : BasicEdit(world) { m_context = context; }
+
     // An entity with named components, right away, in the area of their set.
     template<typename First, typename... Rest>
       requires(named<First> && (named<Rest> && ...))
     [[nodiscard]] Entity create(const First &first, const Rest &...rest) const {
+      const internal::HookScope scope{m_context};
       return m_world->create(first, rest...);
     }
 
@@ -720,7 +820,9 @@ namespace sc::ecs {
     template<typename Component, typename... Args>
       requires named<Component>
     Emplaced emplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
-      return columnFor<Component>(entity).emplace(indexOf(entity), std::forward<Args>(args)...);
+      World::ColumnOf<Component> &column = columnFor<Component>(entity);
+      const internal::HookScope scope{contextFor(column)};
+      return column.emplace(entity, std::forward<Args>(args)...);
     }
 
     // Gives the entity the component unless it has it: Emplaced::Made, or
@@ -732,13 +834,14 @@ namespace sc::ecs {
       requires named<Component>
     Emplaced tryEmplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
       World::ColumnOf<Component> &column = columnFor<Component>(entity);
+      const internal::HookScope scope{contextFor(column)};
       if constexpr (LOCKED) {
-        return column.tryEmplace(indexOf(entity), std::forward<Args>(args)...);
+        return column.tryEmplace(entity, std::forward<Args>(args)...);
       } else {
         if (column.contains(indexOf(entity))) {
           return Emplaced::There;
         }
-        return column.emplace(indexOf(entity), std::forward<Args>(args)...);
+        return column.emplace(entity, std::forward<Args>(args)...);
       }
     }
 
@@ -747,11 +850,12 @@ namespace sc::ecs {
       requires named<Component>
     Emplaced emplaceOrReplace(Entity entity, Args &&...args) const { // NOLINT(modernize-use-nodiscard)
       World::ColumnOf<Component> &column = columnFor<Component>(entity);
+      const internal::HookScope scope{contextFor(column)};
       if constexpr (LOCKED) {
-        return column.emplaceOrReplace(indexOf(entity), std::forward<Args>(args)...);
+        return column.emplaceOrReplace(entity, std::forward<Args>(args)...);
       } else {
         if (!column.contains(indexOf(entity))) {
-          return column.emplace(indexOf(entity), std::forward<Args>(args)...);
+          return column.emplace(entity, std::forward<Args>(args)...);
         }
         if constexpr (!std::is_empty_v<Component>) {
           changed(column, entity) = Component{std::forward<Args>(args)...};
@@ -788,12 +892,13 @@ namespace sc::ecs {
       using Component = internal::ModifiedBy<std::decay_t<Function>>;
       static_assert(named<Component>, "the function takes a component the Edit names");
       World::ColumnOf<Component> &column = columnFor<Component>(entity);
+      const internal::HookScope scope{contextFor(column)};
       if constexpr (LOCKED) {
         [[maybe_unused]] const internal::Modifying modifying;
-        return column.emplaceOrModify(indexOf(entity), std::forward<Function>(function), std::forward<Args>(args)...);
+        return column.emplaceOrModify(entity, std::forward<Function>(function), std::forward<Args>(args)...);
       } else {
         if (!column.contains(indexOf(entity))) {
-          return column.emplace(indexOf(entity), std::forward<Args>(args)...);
+          return column.emplace(entity, std::forward<Args>(args)...);
         }
         function(changed(column, entity));
         return Emplaced::Modified;
@@ -856,6 +961,13 @@ namespace sc::ecs {
       return *std::get<World::ColumnOf<Component> *>(m_columns);
     }
 
+    // The system for the hooks of the column, if it has any: setting
+    // hookContext on every call is a write per add.
+    template<typename Column>
+    [[nodiscard]] const internal::SystemContext *contextFor(const Column &column) const noexcept {
+      return column.hasAddHooks() ? m_context : nullptr;
+    }
+
     // The component of the entity, to change without the bit, checked as
     // modify is: not one a loop names on another entity.
     template<typename Column>
@@ -866,6 +978,7 @@ namespace sc::ecs {
 
     World *m_world;
     std::tuple<World::ColumnOf<Components> *...> m_columns;
+    const internal::SystemContext *m_context = nullptr;
   };
 
   template<typename... Components>
@@ -1109,6 +1222,9 @@ namespace sc::ecs::internal {
     // an edited entity or not, depending on where it lies.
     std::vector<size_t> modified;
     std::vector<size_t> gotten;
+    // Of these, the ones taken through LocalEdit, whose threads must not
+    // meet a hook or listener that edits them; not merged.
+    std::vector<size_t> localEdited;
     // The columns its parameters look up when they are made or used.
     std::vector<ColumnMaker> columns;
 
@@ -1290,10 +1406,13 @@ namespace sc::ecs::internal {
       (access.add(componentIndex<Components>(), true), ...);
       (access.modified.push_back(componentIndex<Components>()), ...);
       (access.addColumn(columnMaker<Components>()), ...);
+      if constexpr (LOCKING == Locking::None) {
+        (access.localEdited.push_back(componentIndex<Components>()), ...);
+      }
     }
 
     static BasicEdit<LOCKING, Components...> fetch(const SystemContext &context) {
-      return BasicEdit<LOCKING, Components...>{context.world};
+      return BasicEdit<LOCKING, Components...>{context.world, &context};
     }
   };
 
@@ -1309,7 +1428,12 @@ namespace sc::ecs::internal {
   struct SystemParam<Commands> {
     static void declare(SystemAccess &access) { access.commands = true; }
 
-    static Commands fetch(const SystemContext &context) { return Commands{context.world, context.commands}; }
+    static Commands fetch(const SystemContext &context) {
+      if (context.commands.empty()) {
+        throw std::logic_error("\"" + context.name + "\" takes Commands outside a system");
+      }
+      return Commands{context.world, context.commands};
+    }
   };
 
   template<>
@@ -1660,7 +1784,7 @@ namespace sc::ecs {
     // component of Commands::emplace that cannot be made: what the stage
     // recorded and is not done yet is dropped.
     void run(World &world) {
-      const std::vector<std::vector<size_t>> &stages = this->stages();
+      const std::vector<std::vector<size_t>> &stages = this->stages(world);
 
       // Here and not when the system is added: the pool may be set up later.
       const size_t threads = threading::threadSlots();
@@ -1696,8 +1820,13 @@ namespace sc::ecs {
             }
           }
           m_applier.apply(world, m_stageLists);
+          runHooks(world);
         } catch (...) {
           clearCommands(stage);
+          for (internal::CommandList &list: m_hookLists) {
+            list.clear();
+          }
+          m_applier.dropHooked();
           throw;
         }
       }
@@ -1715,10 +1844,36 @@ namespace sc::ecs {
     // which it or a listener of an event it emits edits, as addSystem's
     // static_assert for a system alone, and for a loop of addParallel with a
     // listener that writes a global value, as addLoopOver's for the loop.
-    [[nodiscard]] const std::vector<std::vector<size_t>> &stages() {
+    // Without the hooks of a world, see the next one.
+    [[nodiscard]] const std::vector<std::vector<size_t>> &stages() { return stagesFor(nullptr); }
+
+    // The same with the hooks of the world (World::onAdd), what run uses: a
+    // system counts as using what the hooks of the components it edits use.
+    // std::logic_error also for a system that takes a component through
+    // LocalEdit which a hook or listener it sets off edits, as their threads
+    // may meet at an entity without the bit, and for hooks that edit a
+    // component other hooks take through a query: those of the adds through
+    // Commands run at the same time.
+    [[nodiscard]] const std::vector<std::vector<size_t>> &stages(const World &world) { return stagesFor(&world); }
+
+  private:
+    [[nodiscard]] const std::vector<std::vector<size_t>> &stagesFor(const World *world) {
+      const uint64_t hookVersion = world != nullptr ? world->hookVersion() : 0;
+      if (world != m_stagesWorld || hookVersion != m_stagesHookVersion) {
+        m_stagesValid = false;
+      }
       if (!m_stagesValid) {
         for (System &system: m_systems) {
-          system.effective = effectiveAccess(system.access);
+          std::vector<size_t> foreign;
+          system.effective = effectiveAccess(system.access, world, foreign);
+          for (const size_t component: system.access.localEdited) {
+            if (std::ranges::find(foreign, component) != foreign.end()) {
+              throw std::logic_error("the system \"" + system.name +
+                                     "\" takes a component through LocalEdit that a hook or listener it sets off "
+                                     "edits as well: their threads may meet at an entity without the bit; take it "
+                                     "through Edit");
+            }
+          }
           if (system.effective.modifiesGotten()) {
             throw std::logic_error("the system \"" + system.name +
                                    "\" or a listener of an event it emits edits a component that one of them also "
@@ -1749,7 +1904,19 @@ namespace sc::ecs {
         for (size_t i = 0; i < m_systems.size(); ++i) {
           m_stages[stageOf[i]].push_back(i);
         }
-        m_columns.clear();
+        // The hooks run after the changes of a stage as well, all of them at
+        // once.
+        internal::SystemAccess hooks;
+        if (world != nullptr) {
+          for (const internal::HookAccess &hook: world->hookAccess()) {
+            hooks.merge(*static_cast<const internal::SystemAccess *>(hook.access.get()));
+          }
+          if (hooks.modifiesGotten()) {
+            throw std::logic_error("a hook edits a component that a hook also takes through a query: the hooks of "
+                                   "the adds through Commands run at the same time");
+          }
+        }
+        m_columns = hooks.columns;
         for (const System &system: m_systems) {
           for (const internal::ColumnMaker &maker: system.effective.columns) {
             if (std::ranges::find(m_columns, maker.index, &internal::ColumnMaker::index) == m_columns.end()) {
@@ -1757,12 +1924,39 @@ namespace sc::ecs {
             }
           }
         }
+        m_stagesWorld = world;
+        m_stagesHookVersion = hookVersion;
         m_stagesValid = true;
       }
       return m_stages;
     }
 
-  private:
+    // The onAdd hooks of what the last apply added, after it, and the
+    // changes they record in turn, in rounds until none is left.
+    void runHooks(World &world) {
+      for (size_t round = 0; m_applier.hooked(); ++round) {
+        if (round == MAX_HOOK_ROUNDS) {
+          throw std::logic_error("the hooks of components added through Commands still added components with hooks "
+                                 "after 64 rounds");
+        }
+        const size_t threads = threading::threadSlots();
+        if (m_hookLists.size() < threads + 1) {
+          m_hookLists = std::vector<internal::CommandList>(threads + 1);
+        }
+        m_applier.runHooked(
+            world,
+            {.world = world, .commands = m_hookLists, .caches = m_caches, .events = m_events, .name = HOOKS_NAME});
+        m_stageLists.clear();
+        for (internal::CommandList &list: m_hookLists) {
+          m_stageLists.push_back(&list);
+        }
+        m_applier.apply(world, m_stageLists);
+      }
+    }
+
+    static constexpr size_t MAX_HOOK_ROUNDS = 64;
+    inline static const std::string HOOKS_NAME = "the hooks of components added through Commands";
+
     struct System {
       std::move_only_function<void(const internal::SystemContext &)> run;
       std::string name;
@@ -1778,18 +1972,43 @@ namespace sc::ecs {
       bool loop;
     };
 
-    // What a system uses with what the listeners of its events use, and those
-    // of the events they emit. Every event once, also where they emit each
-    // other.
-    [[nodiscard]] internal::SystemAccess effectiveAccess(const internal::SystemAccess &own) const {
+    // What a system uses with what the listeners of its events use and the
+    // hooks of the world for the components it edits, and those of the events
+    // and components they go on to. Every event and component once, also
+    // where they set each other off. Adds through Commands set off no hook
+    // here: theirs run after the stage. foreign gets what the listeners and
+    // hooks edit.
+    [[nodiscard]] internal::SystemAccess effectiveAccess(const internal::SystemAccess &own, const World *world,
+                                                         std::vector<size_t> &foreign) const {
       internal::SystemAccess effective = own;
-      // merge appends the events of the listeners.
-      for (size_t i = 0; i < effective.emits.size(); ++i) {
-        const void *const tag = effective.emits[i];
-        for (const internal::EventListeners &event: m_events) {
-          if (event.tag == tag) {
-            for (const internal::Listener &listener: event.listeners) {
-              effective.merge(listener.access);
+      const auto take = [&](const internal::SystemAccess &other) {
+        effective.merge(other);
+        foreign.insert(foreign.end(), other.modified.begin(), other.modified.end());
+      };
+      std::vector<size_t> hooked;
+      size_t emits = 0;
+      size_t modified = 0;
+      // merge appends the events and components of what it takes.
+      while (emits < effective.emits.size() || modified < effective.modified.size()) {
+        for (; emits < effective.emits.size(); ++emits) {
+          const void *const tag = effective.emits[emits];
+          for (const internal::EventListeners &event: m_events) {
+            if (event.tag == tag) {
+              for (const internal::Listener &listener: event.listeners) {
+                take(listener.access);
+              }
+            }
+          }
+        }
+        for (; modified < effective.modified.size(); ++modified) {
+          const size_t component = effective.modified[modified];
+          if (world == nullptr || std::ranges::find(hooked, component) != hooked.end()) {
+            continue;
+          }
+          hooked.push_back(component);
+          for (const internal::HookAccess &hook: world->hookAccess()) {
+            if (hook.component == component) {
+              take(*static_cast<const internal::SystemAccess *>(hook.access.get()));
             }
           }
         }
@@ -1868,6 +2087,8 @@ namespace sc::ecs {
       m_systems.push_back(System{
           .run =
               [function = std::decay_t<F>(std::forward<F>(system))](const internal::SystemContext &context) mutable {
+                // For the hooks of what it adds through the world.
+                const internal::HookScope scope{&context};
                 function(internal::SystemParamFor<Params>::fetch(context)...);
               },
           .name = std::move(name),
@@ -1936,6 +2157,73 @@ namespace sc::ecs {
     std::vector<internal::EventListeners> m_events;
     // Of all systems and listeners, set by stages.
     std::vector<internal::ColumnMaker> m_columns;
+    // The world and its hooks the stages were made for.
+    const World *m_stagesWorld = nullptr;
+    uint64_t m_stagesHookVersion = 0;
+    // What the hooks run after the changes of a stage record, see runHooks.
+    std::vector<internal::CommandList> m_hookLists;
   };
+
+} // namespace sc::ecs
+
+namespace sc::ecs::internal {
+
+  // Whether a hook may take the parameter: not the world, which would make
+  // every system that sets it off run alone.
+  template<typename Param>
+  inline constexpr bool hookParam = !std::is_same_v<Param, World &>;
+
+  // The hook of World::onAdd for the component, called with the entity, the
+  // component and its parameters, made from hookContext.
+  template<typename Component, typename Params>
+  struct AddHookOf;
+
+  template<typename Component, typename EntityParam, typename ValueParam, typename... Params>
+  struct AddHookOf<Component, List<EntityParam, ValueParam, Params...>> {
+    static_assert(std::is_same_v<std::remove_cvref_t<EntityParam>, Entity>, "a hook takes the entity first");
+    static_assert(std::is_lvalue_reference_v<ValueParam> &&
+                      std::is_same_v<std::remove_cvref_t<ValueParam>, std::remove_const_t<Component>>,
+                  "a hook takes the component second, by reference");
+    static_assert((hookParam<Params> && ...), "a hook does not take the world");
+    static_assert(!(writesGlobal<std::remove_cvref_t<Params>> || ...),
+                  "a hook runs on several threads at once: it takes a global value as Global<const T>");
+    static_assert(!usesModifiedOtherwise<Params...>,
+                  "a component the hook edits is not also named by its queries, as for a system");
+
+    static SystemAccess access() {
+      SystemAccess access;
+      (SystemParamFor<Params>::declare(access), ...);
+      return access;
+    }
+
+    template<typename F>
+    static auto make(World &world, F &&hook) {
+      return [function = std::decay_t<F>(std::forward<F>(hook)), &world](Entity entity, Component &value) {
+        if (const SystemContext *const context = hookContext; context != nullptr) {
+          function(entity, value, SystemParamFor<Params>::fetch(*context)...);
+          return;
+        }
+        // Outside a system: no lists for Commands, no listeners for Emit.
+        static const std::string NAME = "a hook outside a system";
+        const SystemContext outside{.world = world, .commands = {}, .caches = {}, .events = {}, .name = NAME};
+        function(entity, value, SystemParamFor<Params>::fetch(outside)...);
+      };
+    }
+  };
+
+} // namespace sc::ecs::internal
+
+namespace sc::ecs {
+
+  template<typename Component, typename F>
+  World &World::onAdd(F &&hook) {
+    static_assert(std::is_same_v<Component, std::remove_cvref_t<Component>>, "onAdd names the type of the component");
+    using Hook = internal::AddHookOf<Component, typename internal::SystemSignature<std::decay_t<F>>::Params>;
+    column<Component>().addHook(Hook::make(*this, std::forward<F>(hook)));
+    m_hookAccess.push_back({.component = internal::componentIndex<Component>(),
+                            .access = std::make_shared<const internal::SystemAccess>(Hook::access())});
+    ++m_hookVersion;
+    return *this;
+  }
 
 } // namespace sc::ecs

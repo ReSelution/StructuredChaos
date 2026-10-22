@@ -326,6 +326,13 @@ namespace sc::ecs::internal {
     return index;
   }
 
+  // A hook of a component as the scheduler sees it: what it uses, a
+  // SystemAccess, opaque to the world, which does not know the type.
+  struct HookAccess {
+    size_t component;
+    std::shared_ptr<const void> access;
+  };
+
   // Far more sets of components than a program creates entities with, see
   // setIndex.
   inline constexpr size_t MAX_COMPONENT_SETS = size_t{1} << 16;
@@ -501,9 +508,8 @@ namespace sc::ecs {
       requires(!std::is_convertible_v<First &, std::span<Entity>> && !std::is_same_v<First, Rare>)
     [[nodiscard]] Entity create(const First &first, const Rest &...rest) {
       const Entity entity = m_entities.create(areaOf<First, Rest...>());
-      const uint32_t index = indexOf(entity);
-      column<First>().emplace(index, first);
-      (column<Rest>().emplace(index, rest), ...);
+      column<First>().emplace(entity, first);
+      (column<Rest>().emplace(entity, rest), ...);
       return entity;
     }
 
@@ -528,7 +534,13 @@ namespace sc::ecs {
       if constexpr (sizeof...(Components) == 0) {
         m_entities.create(entities, fill);
       } else {
-        m_entities.create(entities, areaOf<Components...>(), fill);
+        try {
+          m_entities.create(entities, areaOf<Components...>(), fill);
+        } catch (...) {
+          (addedAll<Components>(entities), ...);
+          throw;
+        }
+        (addedAll<Components>(entities), ...);
       }
     }
 
@@ -550,15 +562,21 @@ namespace sc::ecs {
                     "the components are moved into place, where nothing may be thrown");
       (column<Components>().expect(entities.size()), ...);
       size_t done = 0;
-      m_entities.create(entities, areaOf<Components...>(), [&](uint32_t first, uint32_t count) {
-        while (count != 0) {
-          const uint32_t here = std::min(count, PAGE_SIZE - (first & (PAGE_SIZE - 1)));
-          makeRun<Components...>(first, here, done, make);
-          first += here;
-          count -= here;
-          done += here;
-        }
-      });
+      try {
+        m_entities.create(entities, areaOf<Components...>(), [&](uint32_t first, uint32_t count) {
+          while (count != 0) {
+            const uint32_t here = std::min(count, PAGE_SIZE - (first & (PAGE_SIZE - 1)));
+            makeRun<Components...>(first, here, done, make);
+            first += here;
+            count -= here;
+            done += here;
+          }
+        });
+      } catch (...) {
+        (addedAll<Components>(entities), ...);
+        throw;
+      }
+      (addedAll<Components>(entities), ...);
     }
 
     // An entity that is unlike most others, see Rare. It is an entity like any
@@ -706,7 +724,7 @@ namespace sc::ecs {
     template<typename Component, typename... Args>
     Emplaced emplace(Entity entity, Args &&...args) {
       assert(valid(entity));
-      return column<Component>().emplace(indexOf(entity), std::forward<Args>(args)...);
+      return column<Component>().emplace(entity, std::forward<Args>(args)...);
     }
 
     // Gives the entity the component, or a new one made from the arguments
@@ -717,7 +735,7 @@ namespace sc::ecs {
     template<typename Component, typename... Args>
     Emplaced emplaceOrReplace(Entity entity, Args &&...args) {
       assert(valid(entity));
-      return column<Component>().emplaceOrReplace(indexOf(entity), std::forward<Args>(args)...);
+      return column<Component>().emplaceOrReplace(entity, std::forward<Args>(args)...);
     }
 
     // Calls the function with the component of the entity, as modify does,
@@ -734,8 +752,7 @@ namespace sc::ecs {
       static_assert(!std::is_const_v<Component>, "emplaceOrModify is for writing");
       assert(valid(entity));
       [[maybe_unused]] const internal::Modifying modifying;
-      return column<Component>().emplaceOrModify(indexOf(entity), std::forward<Function>(function),
-                                                 std::forward<Args>(args)...);
+      return column<Component>().emplaceOrModify(entity, std::forward<Function>(function), std::forward<Args>(args)...);
     }
 
     // Gives the entity the component unless it has it: Emplaced::Made, or
@@ -746,7 +763,7 @@ namespace sc::ecs {
     template<typename Component, typename... Args>
     Emplaced tryEmplace(Entity entity, Args &&...args) {
       assert(valid(entity));
-      return column<Component>().tryEmplace(indexOf(entity), std::forward<Args>(args)...);
+      return column<Component>().tryEmplace(entity, std::forward<Args>(args)...);
     }
 
     // Calls the function with the component of the entity, locked against
@@ -896,6 +913,31 @@ namespace sc::ecs {
     [[nodiscard]] const T *tryGlobal() const noexcept {
       return const_cast<World *>(this)->tryGlobal<T>();
     }
+
+    // Calls the hook with every entity that gets the component, and the
+    // component, right after it got it, on the thread that gave it, and so
+    // on several at once:
+    //
+    //   world.onAdd<Body>([](Entity entity, Body &body, Edit<Cell> cells) { ... });
+    //
+    // After these two, the hook takes the parameters of a system, which the
+    // scheduler counts as used by every system that adds the component with
+    // Edit or LocalEdit: Edit, LocalEdit, Spawn, Commands, queries, Resources,
+    // Emit and Global<const T>. The value is the one the entity has, held
+    // with its making bit where the way it came takes one, so the hook must
+    // not go for that component of that entity with Edit or World, which
+    // debug builds assert; it changes it through the reference. Components
+    // added through Commands get their hooks once the changes of the stage
+    // are done, those added outside a system right away, where Commands and
+    // Emit are not to be had. Defined in scheduler.hpp. Not while systems
+    // run.
+    template<typename Component, typename F>
+    World &onAdd(F &&hook);
+
+    // What the scheduler counts the hooks of the world as using, and a
+    // number that changes with every hook.
+    [[nodiscard]] std::span<const internal::HookAccess> hookAccess() const noexcept { return m_hookAccess; }
+    [[nodiscard]] uint64_t hookVersion() const noexcept { return m_hookVersion; }
 
     // Calls the function with the components of every entity that has all of
     // them. A const component is only read; the entity comes first if the
@@ -1269,6 +1311,23 @@ namespace sc::ecs {
     // The global values, at internal::globalIndex; null for a type the world
     // has none of.
     std::vector<std::shared_ptr<void>> m_globals;
+    std::vector<internal::HookAccess> m_hookAccess;
+    uint64_t m_hookVersion = 0;
+
+    // The onAdd hooks of the component for every entity of the span that has
+    // it, made by create.
+    template<typename Component>
+    void addedAll(std::span<const Entity> entities) {
+      ColumnOf<Component> &column = this->column<Component>();
+      if (!column.hasAddHooks()) [[likely]] {
+        return;
+      }
+      for (const Entity entity: entities) {
+        if (column.contains(indexOf(entity))) {
+          column.added(entity);
+        }
+      }
+    }
   };
 
 } // namespace sc::ecs
