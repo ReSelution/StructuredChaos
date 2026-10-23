@@ -220,8 +220,16 @@ namespace {
 
 int main(int argc, char **argv) {
   const std::optional<uint32_t> frames = argc == 3 ? number(argv[2]) : std::nullopt;
-  const auto *const which = argc == 3 ? std::ranges::find(CASES, std::string_view{argv[1]}, &Case::name) : CASES.end();
-  if (!frames || which == CASES.end()) {
+  // A pointer, not the iterator of find: that is one only in libstdc++.
+  const Case *which = nullptr;
+  if (frames) {
+    for (const Case &known: CASES) {
+      if (known.name == argv[1]) {
+        which = &known;
+      }
+    }
+  }
+  if (!frames || which == nullptr) {
     std::fputs("usage: perf_ecs_world create|addremove|addremove5|get|iterate|modify <frames>\n", stderr);
     return 1;
   }
