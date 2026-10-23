@@ -6,9 +6,16 @@
 //
 // Cases: create (100K entities made with 2 components and destroyed one by
 // one), addremove (a component added to 100K entities and removed again),
-// get (one component of 100K entities, in random order), iterate (10 loops
-// over 100K entities with 3 components) and modify (1M entities each modify
-// a random other one). Prints the median frame.
+// addremove5 (5 components added to each of them in one loop and removed in
+// another), get (one component of 100K entities, in random order), iterate
+// (10 loops over 100K entities with 3 components) and modify (1M entities
+// each modify a random other one). Prints the median frame.
+//
+// addremove5: past 3 components in one loop, GCC and Clang stopped inlining
+// Column::emplace and erase. Forced inline, with World::emplace and erase
+// around them, Clang took 52 instead of 73M instructions here but only 4 %
+// less time, and GCC 6 % more instructions with 3 components; forced in
+// column.hpp alone, the cases with 1 and 3 got worse. So they are not forced.
 //
 // Instructions per frame, from two frame counts so that setting up drops out:
 //
@@ -52,6 +59,18 @@ namespace {
   };
   struct Target {
     Entity entity;
+  };
+  struct Energy {
+    float value;
+  };
+  struct Score {
+    float value;
+  };
+  struct Armor {
+    float value;
+  };
+  struct Mana {
+    float value;
   };
 
   // The whole text as a number, or none.
@@ -114,6 +133,21 @@ namespace {
         for (const Entity entity: entities) {
           world.erase<Health>(entity);
         }
+      } else if (which == "addremove5") {
+        for (const Entity entity: entities) {
+          world.emplace<Health>(entity, 50.0f);
+          world.emplace<Energy>(entity, 1.0f);
+          world.emplace<Score>(entity, 0.0f);
+          world.emplace<Armor>(entity, 2.0f);
+          world.emplace<Mana>(entity, 3.0f);
+        }
+        for (const Entity entity: entities) {
+          world.erase<Health>(entity);
+          world.erase<Energy>(entity);
+          world.erase<Score>(entity);
+          world.erase<Armor>(entity);
+          world.erase<Mana>(entity);
+        }
       } else if (which == "get") {
         for (const size_t i: order) {
           sum += world.get<const Position>(entities[i]).x;
@@ -142,10 +176,10 @@ namespace {
 } // namespace
 
 int main(int argc, char **argv) {
-  const std::vector<std::string> cases{"create", "addremove", "get", "iterate", "modify"};
+  const std::vector<std::string> cases{"create", "addremove", "addremove5", "get", "iterate", "modify"};
   const std::optional<uint32_t> frames = argc == 3 ? number(argv[2]) : std::nullopt;
   if (!frames || std::ranges::find(cases, argv[1]) == cases.end()) {
-    std::fputs("usage: perf_ecs_world create|addremove|get|iterate|modify <frames>\n", stderr);
+    std::fputs("usage: perf_ecs_world create|addremove|addremove5|get|iterate|modify <frames>\n", stderr);
     return 1;
   }
   try {
