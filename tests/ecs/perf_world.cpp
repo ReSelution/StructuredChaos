@@ -7,9 +7,10 @@
 // Cases: create (100K entities made with 2 components and destroyed one by
 // one), addremove (a component added to 100K entities and removed again),
 // addremove5 (5 components added to each of them in one loop and removed in
-// another), get (one component of 100K entities, in random order), iterate
-// (10 loops over 100K entities with 3 components) and modify (1M entities
-// each modify a random other one). Prints the median frame.
+// another), get (one component of 100K entities, in random order), constget,
+// tryget and contains (the same through a const World, tryGet and contains),
+// iterate (10 loops over 100K entities with 3 components) and modify (1M
+// entities each modify a random other one). Prints the median frame.
 //
 // addremove5: past 3 components in one loop, GCC and Clang stopped inlining
 // Column::emplace and erase. Forced inline, with World::emplace and erase
@@ -159,6 +160,33 @@ namespace {
     return 0.0f;
   }
 
+  SC_NOINLINE float constGetFrame(sc::ecs::World &world, Entities &entities, const Order &order) {
+    const sc::ecs::World &seen = world;
+    float sum = 0.0f;
+    for (const size_t i: order) {
+      sum += seen.get<Position>(entities[i]).x;
+    }
+    return sum;
+  }
+
+  SC_NOINLINE float tryGetFrame(sc::ecs::World &world, Entities &entities, const Order &order) {
+    float sum = 0.0f;
+    for (const size_t i: order) {
+      if (const auto *const found = world.tryGet<const Position>(entities[i])) {
+        sum += found->x;
+      }
+    }
+    return sum;
+  }
+
+  SC_NOINLINE float containsFrame(sc::ecs::World &world, Entities &entities, const Order &order) {
+    float sum = 0.0f;
+    for (const size_t i: order) {
+      sum += world.contains<Position>(entities[i]) ? 1.0f : 0.0f;
+    }
+    return sum;
+  }
+
   using Frame = float (*)(sc::ecs::World &, Entities &, const Order &);
 
   struct Case {
@@ -169,7 +197,9 @@ namespace {
   constexpr std::array CASES{
       Case{.name = "create", .frame = createFrame},         Case{.name = "addremove", .frame = addRemoveFrame},
       Case{.name = "addremove5", .frame = addRemove5Frame}, Case{.name = "get", .frame = getFrame},
-      Case{.name = "iterate", .frame = iterateFrame},       Case{.name = "modify", .frame = modifyFrame},
+      Case{.name = "constget", .frame = constGetFrame},     Case{.name = "tryget", .frame = tryGetFrame},
+      Case{.name = "contains", .frame = containsFrame},     Case{.name = "iterate", .frame = iterateFrame},
+      Case{.name = "modify", .frame = modifyFrame},
   };
 
   void run(const Case &which, uint32_t frames) {
@@ -177,7 +207,9 @@ namespace {
     sc::threading::init(0);
 
     const bool creating = which.name == "create";
-    const bool targets = which.name == "modify" || which.name == "get";
+    // The lookups with the same world as get.
+    const bool targets = which.name == "modify" || which.name == "get" || which.name == "constget" ||
+                         which.name == "tryget" || which.name == "contains";
     const size_t count = which.name == "modify" ? 1'000'000 : 100'000;
     sc::ecs::World world;
     Entities entities(count);
@@ -230,7 +262,9 @@ int main(int argc, char **argv) {
     }
   }
   if (!frames || which == nullptr) {
-    std::fputs("usage: perf_ecs_world create|addremove|addremove5|get|iterate|modify <frames>\n", stderr);
+    std::fputs(
+        "usage: perf_ecs_world create|addremove|addremove5|get|constget|tryget|contains|iterate|modify <frames>\n",
+        stderr);
     return 1;
   }
   try {
