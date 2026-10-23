@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "sc/threading/threading.hpp"
+#include "sc/util/macros.hpp"
 
 #include "column.hpp"
 #include "entity.hpp"
@@ -657,11 +658,17 @@ namespace sc::ecs {
     //   const Entity player = world.create(Position{}, Velocity{}, Health{100});
     //
     // If making a component throws, the entity stays with those before it.
+    //
+    // Inlined: Clang called it, and Column::emplace and
+    // EntityAllocator::create from it, for every entity; creating 100K
+    // entities with 2 components and destroying them took 40.0 instead of
+    // 32.4M instructions (30.7M with destroy inlined as well), GCC inlined
+    // both: 30.9M either way.
     template<typename First, typename... Rest>
     // Not for a span of entities, see the next one, which a std::vector
     // only turns into when it is not const.
       requires(!std::is_convertible_v<First &, std::span<Entity>> && !std::is_same_v<First, Rare>)
-    [[nodiscard]] Entity create(const First &first, const Rest &...rest) {
+    [[nodiscard]] SC_FORCE_INLINE Entity create(const First &first, const Rest &...rest) {
       const Entity entity = m_entities.create(areaOf<First, Rest...>());
       column<First>().emplace(entity, first);
       (column<Rest>().emplace(entity, rest), ...);
@@ -750,8 +757,9 @@ namespace sc::ecs {
     // components away without locked instructions (Column::eraseAlone), and
     // gives the index back to a list that create takes from without a lock.
     // From a system, Commands::destroy records it for later. The onRemove
-    // hooks of its components run first, while it has all of them.
-    bool destroy(Entity entity) {
+    // hooks of its components run first, while it has all of them. Inlined
+    // as create of components, see there.
+    SC_FORCE_INLINE bool destroy(Entity entity) {
       assertAlone();
       if (!valid(entity)) {
         return false;
