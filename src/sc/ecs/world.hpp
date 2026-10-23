@@ -1535,15 +1535,26 @@ namespace sc::ecs {
     }
 
     // Where the column of a component is kept, null in it until it is made.
-    // TODO: the same choice between the near and the far slots as column had,
-    // which Clang made with a cmov and which made gets 14 % slower there:
-    // findColumn, so const get, tryGet and contains, go through it. Not
-    // measured here.
+    //
+    // The far slots behind a branch of their own, as in column: Clang chose
+    // between the slots with a cmov otherwise, also with the branch but
+    // without [[likely]]. For 100K entities in random order, const get took
+    // Clang 244 instead of 279 µs, contains 394 instead of 431 µs and tryGet
+    // 573 instead of 587 µs. GCC laid out tryGet differently with [[likely]],
+    // 557 instead of 529 µs, the rest the same for it.
     template<typename Component>
     [[nodiscard]] const std::atomic<internal::ColumnBase *> &slotOf() const {
       const size_t index = internal::componentIndex<std::remove_const_t<Component>>();
-      return index < internal::NEAR_COMPONENT_TYPES ? m_columns[index]
-                                                    : m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
+      if (index < internal::NEAR_COMPONENT_TYPES) [[likely]] {
+        return m_columns[index];
+      }
+      return farSlot(index);
+    }
+
+    // slotOf for a type from NEAR_COMPONENT_TYPES on, out of the loops that
+    // look up a column.
+    SC_NOINLINE SC_COLD const std::atomic<internal::ColumnBase *> &farSlot(size_t index) const {
+      return m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
     }
 
     // The columns of the components a loop names, as it uses them: a loop
