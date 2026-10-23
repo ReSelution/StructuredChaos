@@ -533,9 +533,13 @@ namespace sc::ecs::internal {
   // A number for every set of components the program creates entities with,
   // the same in all worlds and whatever the order of the types: where a
   // world keeps the area of the set, found without a search.
-  // TODO: the same guard of a static on every call as componentIndex had,
-  // which made gets 20 % slower: create of components and areaOf look at it
-  // for every entity. Not measured here.
+  //
+  // A static with its guard, unlike componentIndex: create of components
+  // looks at the guard for every entity, but kept as componentIndexOf,
+  // creating 100K entities with 2 components and destroying them took 6
+  // (GCC) and 2 (Clang) fewer instructions per entity and no less time:
+  // 1837 µs with GCC and 1847 µs with Clang, against 1836 and 1843 µs with
+  // the guard (perf_ecs_world create).
   template<typename... Components>
   size_t setIndex() {
     static const size_t index = makeSetIndex({componentIndex<Components>()...});
