@@ -37,6 +37,13 @@ test_ecs = executable(
 
 test('ECS Tests', test_ecs, env: test_env, timeout: test_timeout)
 
+# Not a test: run under perf stat by hand, see the file.
+executable(
+  'perf_ecs_commands',
+  sources: ['ecs/perf_commands.cpp'],
+  dependencies: [sc_dep],
+)
+
 test_threading = executable(
   'test_threading',
   sources: [
