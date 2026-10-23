@@ -180,31 +180,17 @@ namespace sc::ecs::internal {
         m_counts.resize(m_segments.size());
         m_numbered.resize(m_segments.size());
       }
-      if (m_itemNumbers.size() < m_total) {
+      m_noted = m_total <= NOTED_ITEMS;
+      if (m_noted && m_itemNumbers.size() < m_total) {
         m_itemNumbers.resize(m_total);
       }
       m_used.store(0, std::memory_order_relaxed);
       threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
         for (size_t segment = first; segment < last; ++segment) {
-          std::vector<uint32_t> &counts = m_counts[segment];
-          counts.clear();
-          m_numbered[segment].clear();
-          uint32_t *const numbers = m_itemNumbers.data() + m_starts[segment];
-          Last last;
-          size_t k = 0;
-          for (Item &item: m_segments[segment]) {
-            const uint32_t index = indexOf(item);
-            if (index >= INDEX_LIMIT) {
-              none(item);
-              numbers[k++] = NO_PAGE;
-              continue;
-            }
-            const uint32_t taken = numberOf(index >> PAGE_BITS, last, &m_numbered[segment]);
-            numbers[k++] = taken;
-            if (taken >= counts.size()) [[unlikely]] {
-              counts.resize(taken + 1, 0);
-            }
-            ++counts[taken];
+          if (m_noted) {
+            countSegment<true>(segment, indexOf, none);
+          } else {
+            countSegment<false>(segment, indexOf, none);
           }
         }
       });
@@ -245,15 +231,9 @@ namespace sc::ecs::internal {
     }
 
     // After count, for the items of the pages; leaves the numbers of the
-    // pages unused. Without it, uncount does that. Takes the number of every
-    // item from count instead of reading the items again: for 1M items of
-    // 32 bytes on all threads, place took 138 instead of 420 µs and count
-    // 360 instead of 210 µs (it writes the numbers, 4 MB); destroying 100K
-    // entities through Commands took 280 instead of 296 µs, adding and
-    // removing a component on 100K entities 352 instead of 362 µs. 1M
-    // recorded changes were no faster to apply (3.58 against 3.45 ms,
-    // within the spread of what does not sort at all).
-    void place(size_t helpers) {
+    // pages unused. Without it, uncount does that. indexOf as for count.
+    template<typename IndexOf>
+    void place(size_t helpers, const IndexOf &indexOf) {
       // Where every page and the items of every segment in it start, going
       // through the counts a segment at a time: through the pages, and the
       // counts of every segment for each, this took 216 instead of 16 µs for
@@ -292,11 +272,21 @@ namespace sc::ecs::internal {
       threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
         for (size_t segment = first; segment < last; ++segment) {
           uint32_t *const places = m_counts[segment].data();
-          const uint32_t *const numbers = m_itemNumbers.data() + m_starts[segment];
-          Item *const items = m_segments[segment].data();
-          for (size_t k = 0; k < m_segments[segment].size(); ++k) {
-            if (numbers[k] != NO_PAGE) {
-              m_order[places[numbers[k]]++] = items + k;
+          if (m_noted) {
+            const uint32_t *const numbers = m_itemNumbers.data() + m_starts[segment];
+            Item *const items = m_segments[segment].data();
+            for (size_t k = 0; k < m_segments[segment].size(); ++k) {
+              if (numbers[k] != NO_PAGE) {
+                m_order[places[numbers[k]]++] = items + k;
+              }
+            }
+          } else {
+            Last last;
+            for (Item &item: m_segments[segment]) {
+              const uint32_t index = indexOf(item);
+              if (index < INDEX_LIMIT) {
+                m_order[places[numberOf(index >> PAGE_BITS, last, nullptr)]++] = &item;
+              }
             }
           }
         }
@@ -331,6 +321,15 @@ namespace sc::ecs::internal {
     // page found, 32 bytes. Chosen, not measured at the border: 200 pages
     // spread over all 2^20 are sorted, as fast as before.
     static constexpr size_t SCAN_SPREAD = 8;
+    // count notes the number of every item up to this many items, for place
+    // to take instead of reading the items again: destroying 100K entities
+    // through Commands on all threads took 292 instead of 316 µs. For 1M
+    // items the 4 MB of numbers cost more than they saved, presumably as
+    // they pushed the items out of the 32 MiB L3: 1M recorded changes on
+    // all threads took 3.79 instead of 3.47 ms. Limits of 128K, 256K and
+    // 512K measured the same for both; nothing between 100K and 1M items
+    // was measured, so the lowest.
+    static constexpr size_t NOTED_ITEMS = size_t{1} << 17;
 
     struct Found {
       uint32_t page;
@@ -344,6 +343,36 @@ namespace sc::ecs::internal {
       uint32_t page = NO_PAGE;
       uint32_t number = 0;
     };
+
+    // Counts the items of the segment per number, and notes the number of
+    // every item with NOTE.
+    template<bool NOTE, typename IndexOf, typename None>
+    void countSegment(size_t segment, const IndexOf &indexOf, const None &none) {
+      std::vector<uint32_t> &counts = m_counts[segment];
+      counts.clear();
+      m_numbered[segment].clear();
+      uint32_t *const numbers = NOTE ? m_itemNumbers.data() + m_starts[segment] : nullptr;
+      Last last;
+      size_t k = 0;
+      for (Item &item: m_segments[segment]) {
+        const uint32_t index = indexOf(item);
+        if (index >= INDEX_LIMIT) {
+          none(item);
+          if constexpr (NOTE) {
+            numbers[k++] = NO_PAGE;
+          }
+          continue;
+        }
+        const uint32_t taken = numberOf(index >> PAGE_BITS, last, &m_numbered[segment]);
+        if constexpr (NOTE) {
+          numbers[k++] = taken;
+        }
+        if (taken >= counts.size()) [[unlikely]] {
+          counts.resize(taken + 1, 0);
+        }
+        ++counts[taken];
+      }
+    }
 
     // The number of the page, given to it if it has none; a page that gets
     // one here goes to numbered. Of threads that race for a page, the ones
@@ -369,8 +398,9 @@ namespace sc::ecs::internal {
     // Where the items of every segment start among all, and their number.
     std::vector<size_t> m_starts;
     size_t m_total = 0;
-    // The number of every item, NO_PAGE for one without a page.
+    // The number of every item, NO_PAGE for one without a page, if noted.
     std::vector<uint32_t> m_itemNumbers;
+    bool m_noted = false;
     // The number of every page plus one while sorting, zero in between.
     std::atomic<uint32_t> *m_numbers = nullptr;
     std::atomic<uint32_t> m_used{0};
@@ -884,7 +914,7 @@ namespace sc::ecs {
         m_destroySort.uncount();
         return destroyQuietly(entities);
       }
-      m_destroySort.place(helpers);
+      m_destroySort.place(helpers, index);
       const std::span<const uint32_t> pages = m_destroySort.pages();
       m_freed.resize(entities.size());
       m_freedCounts.resize(pages.size());
