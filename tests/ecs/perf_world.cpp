@@ -27,6 +27,7 @@
 // changing it or updating a compiler, see the comments there.
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -36,10 +37,12 @@
 #include <print>
 #include <random>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
 #include "sc/ecs/world.hpp"
+#include "sc/util/macros.hpp"
 
 namespace {
 
@@ -84,16 +87,101 @@ namespace {
     return value;
   }
 
-  void run(const std::string &which, uint32_t frames) {
+  using Entities = std::vector<Entity>;
+  using Order = std::vector<size_t>;
+
+  // One frame of each case, each in a function of its own, as the loops of a
+  // system are in its lambda: with all cases in run, Clang was short of
+  // registers there and loaded the data and the end of the vectors from the
+  // stack in every get. Returns what get read, so that it is not optimized
+  // away.
+  SC_NOINLINE float createFrame(sc::ecs::World &world, Entities &entities, const Order & /*order*/) {
+    for (Entity &entity: entities) {
+      entity = world.create(Position{.x = 1.0f, .y = 2.0f}, Velocity{.x = 3.0f, .y = 4.0f});
+    }
+    for (const Entity entity: entities) {
+      world.destroy(entity);
+    }
+    return 0.0f;
+  }
+
+  SC_NOINLINE float addRemoveFrame(sc::ecs::World &world, Entities &entities, const Order & /*order*/) {
+    for (const Entity entity: entities) {
+      world.emplace<Health>(entity, 50.0f);
+    }
+    for (const Entity entity: entities) {
+      world.erase<Health>(entity);
+    }
+    return 0.0f;
+  }
+
+  SC_NOINLINE float addRemove5Frame(sc::ecs::World &world, Entities &entities, const Order & /*order*/) {
+    for (const Entity entity: entities) {
+      world.emplace<Health>(entity, 50.0f);
+      world.emplace<Energy>(entity, 1.0f);
+      world.emplace<Score>(entity, 0.0f);
+      world.emplace<Armor>(entity, 2.0f);
+      world.emplace<Mana>(entity, 3.0f);
+    }
+    for (const Entity entity: entities) {
+      world.erase<Health>(entity);
+      world.erase<Energy>(entity);
+      world.erase<Score>(entity);
+      world.erase<Armor>(entity);
+      world.erase<Mana>(entity);
+    }
+    return 0.0f;
+  }
+
+  SC_NOINLINE float getFrame(sc::ecs::World &world, Entities &entities, const Order &order) {
+    float sum = 0.0f;
+    for (const size_t i: order) {
+      sum += world.get<const Position>(entities[i]).x;
+    }
+    return sum;
+  }
+
+  SC_NOINLINE float iterateFrame(sc::ecs::World &world, Entities & /*entities*/, const Order & /*order*/) {
+    for (int loop = 0; loop < 10; ++loop) {
+      world.each<Position, const Velocity, const Timer>(
+          [](Position &position, const Velocity &velocity, const Timer &) {
+            position.x += velocity.x;
+            position.y += velocity.y;
+          });
+    }
+    return 0.0f;
+  }
+
+  SC_NOINLINE float modifyFrame(sc::ecs::World &world, Entities & /*entities*/, const Order & /*order*/) {
+    world.each<const Target>([&](const Target &target) {
+      world.modify<Health>(target.entity, [](Health &health) { health.value -= 1.0f; });
+    });
+    return 0.0f;
+  }
+
+  using Frame = float (*)(sc::ecs::World &, Entities &, const Order &);
+
+  struct Case {
+    std::string_view name;
+    Frame frame;
+  };
+
+  constexpr std::array CASES{
+      Case{.name = "create", .frame = createFrame},         Case{.name = "addremove", .frame = addRemoveFrame},
+      Case{.name = "addremove5", .frame = addRemove5Frame}, Case{.name = "get", .frame = getFrame},
+      Case{.name = "iterate", .frame = iterateFrame},       Case{.name = "modify", .frame = modifyFrame},
+  };
+
+  void run(const Case &which, uint32_t frames) {
     // The calling thread alone, with thread id 0.
     sc::threading::init(0);
 
-    const bool creating = which == "create";
-    const bool targets = which == "modify" || which == "get";
-    const size_t count = which == "modify" ? 1'000'000 : 100'000;
+    const bool creating = which.name == "create";
+    const bool targets = which.name == "modify" || which.name == "get";
+    const size_t count = which.name == "modify" ? 1'000'000 : 100'000;
     sc::ecs::World world;
-    std::vector<Entity> entities(count);
-    std::vector<size_t> order(count);
+    Entities entities(count);
+    Order order(count);
     for (size_t i = 0; i < count; ++i) {
       order[i] = i;
     }
@@ -114,76 +202,31 @@ namespace {
       }
     }
 
-    // Read once the frames are over, so that get is not optimized away.
+    // Printed once the frames are over, so that get is not optimized away.
     float sum = 0.0f;
     std::vector<double> times;
     for (uint32_t frame = 0; frame < frames; ++frame) {
       const auto start = std::chrono::steady_clock::now();
-      if (creating) {
-        for (Entity &entity: entities) {
-          entity = world.create(Position{.x = 1.0f, .y = 2.0f}, Velocity{.x = 3.0f, .y = 4.0f});
-        }
-        for (const Entity entity: entities) {
-          world.destroy(entity);
-        }
-      } else if (which == "addremove") {
-        for (const Entity entity: entities) {
-          world.emplace<Health>(entity, 50.0f);
-        }
-        for (const Entity entity: entities) {
-          world.erase<Health>(entity);
-        }
-      } else if (which == "addremove5") {
-        for (const Entity entity: entities) {
-          world.emplace<Health>(entity, 50.0f);
-          world.emplace<Energy>(entity, 1.0f);
-          world.emplace<Score>(entity, 0.0f);
-          world.emplace<Armor>(entity, 2.0f);
-          world.emplace<Mana>(entity, 3.0f);
-        }
-        for (const Entity entity: entities) {
-          world.erase<Health>(entity);
-          world.erase<Energy>(entity);
-          world.erase<Score>(entity);
-          world.erase<Armor>(entity);
-          world.erase<Mana>(entity);
-        }
-      } else if (which == "get") {
-        for (const size_t i: order) {
-          sum += world.get<const Position>(entities[i]).x;
-        }
-      } else if (which == "iterate") {
-        for (int loop = 0; loop < 10; ++loop) {
-          world.each<Position, const Velocity, const Timer>(
-              [](Position &position, const Velocity &velocity, const Timer &) {
-                position.x += velocity.x;
-                position.y += velocity.y;
-              });
-        }
-      } else {
-        world.each<const Target>([&](const Target &target) {
-          world.modify<Health>(target.entity, [](Health &health) { health.value -= 1.0f; });
-        });
-      }
+      sum += which.frame(world, entities, order);
       times.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count());
     }
     if (!times.empty()) {
       std::ranges::sort(times);
-      std::println("{}: median frame {:.1f} us (sum {})", which, times[times.size() / 2], sum);
+      std::println("{}: median frame {:.1f} us (sum {})", which.name, times[times.size() / 2], sum);
     }
   }
 
 } // namespace
 
 int main(int argc, char **argv) {
-  const std::vector<std::string> cases{"create", "addremove", "addremove5", "get", "iterate", "modify"};
   const std::optional<uint32_t> frames = argc == 3 ? number(argv[2]) : std::nullopt;
-  if (!frames || std::ranges::find(cases, argv[1]) == cases.end()) {
+  const auto *const which = argc == 3 ? std::ranges::find(CASES, std::string_view{argv[1]}, &Case::name) : CASES.end();
+  if (!frames || which == CASES.end()) {
     std::fputs("usage: perf_ecs_world create|addremove|addremove5|get|iterate|modify <frames>\n", stderr);
     return 1;
   }
   try {
-    run(argv[1], *frames);
+    run(*which, *frames);
   } catch (const std::exception &error) {
     std::fputs(error.what(), stderr);
     std::fputs("\n", stderr);
