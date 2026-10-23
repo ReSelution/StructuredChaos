@@ -1396,6 +1396,9 @@ namespace sc::ecs {
           // stay in registers. IterateTwoComponents of ecs_benchmark, GCC 16,
           // 1M entities: 744 instead of 232 µs; with a body that writes the
           // components unchanged (0.158 ns per entity either way).
+          // TODO: -Wunused-lambda-capture for generations in every loop whose
+          // function takes no entity (e.g. test_world.cpp:401); capture it
+          // only WITH_ENTITY, without giving up the copies above.
           const auto call = [&function, &watcher, values, base, generations](uint32_t slot) {
             watcher.at(base + slot);
             if constexpr (WITH_ENTITY) {
