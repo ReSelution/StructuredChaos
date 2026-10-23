@@ -10,6 +10,18 @@
 #endif
 #endif
 
+// SC_FORCE_INLINE for a lambda, after its parameters, which takes no inline:
+//   [&](uint32_t slot) SC_FORCE_INLINE_LAMBDA { ... }
+// clang-cl takes the GNU form too. Nothing for MSVC itself: its
+// [[msvc::forceinline]] for lambdas is not tried here.
+#ifndef SC_FORCE_INLINE_LAMBDA
+#if defined(__GNUC__) || defined(__clang__)
+#define SC_FORCE_INLINE_LAMBDA __attribute__((always_inline))
+#else
+#define SC_FORCE_INLINE_LAMBDA
+#endif
+#endif
+
 // Never inlined: the rare path out of a hot function, so that the hot one
 // stays small enough to be inlined itself. clang-cl takes the GNU form too.
 #ifndef SC_NOINLINE

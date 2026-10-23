@@ -1724,10 +1724,19 @@ namespace sc::ecs {
           // stay in registers. IterateTwoComponents of ecs_benchmark, GCC 16,
           // 1M entities: 744 instead of 232 µs; with a body that writes the
           // components unchanged (0.158 ns per entity either way).
+          //
+          // Inlined: where the function takes Commands and records only for
+          // some entities, Clang kept the function's state on the stack and
+          // loaded it again for every entity. 1M entities on all threads of
+          // which none records anything (the churn of ecs_compare): 148
+          // instead of 165 µs (GCC 86 µs either way); the systems of that
+          // churn on one thread 4 % faster as well. Commands as one pointer
+          // to the context on top took it to 128 µs, but made recording
+          // 5-10 % slower with both compilers.
           // TODO: -Wunused-lambda-capture for generations in every loop whose
           // function takes no entity (e.g. test_world.cpp:401); capture it
           // only WITH_ENTITY, without giving up the copies above.
-          const auto call = [&function, &watcher, values, base, generations](uint32_t slot) {
+          const auto call = [&function, &watcher, values, base, generations](uint32_t slot) SC_FORCE_INLINE_LAMBDA {
             watcher.at(base + slot);
             if constexpr (WITH_ENTITY) {
               std::apply(function, std::tuple_cat(std::tuple{makeEntity(base + slot, generations[slot])},
