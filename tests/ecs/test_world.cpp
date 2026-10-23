@@ -1710,6 +1710,68 @@ TEST_CASE("World Loops", "[ecs][world][threading]") {
   }
 }
 
+// The function of a loop may take the looped component from its own entity.
+// Once the last one of a page goes, the page is parked as the spare and
+// pushes out the one before, which gives its memory back (MEM_DECOMMIT on
+// Windows, where reading it faults). With one spare every emptied page does
+// that, also pages of other threads in parallelEach; the loop must not read
+// the values of a page after that.
+TEST_CASE("World Loops Take The Looped Component From Their Own Entity", "[ecs][world][threading]") {
+  struct Big {
+    uint32_t index;
+    std::array<std::byte, 1020> rest;
+  };
+  STATIC_REQUIRE(sc::ecs::internal::Column<Big>::SPARE_PAGES == 1);
+
+  sc::threading::init();
+  const bool parallel = GENERATE(false, true);
+  const bool tracked = GENERATE(false, true);
+  // Every entity: full pages; every other one: word by word.
+  const size_t step = GENERATE(1, 2);
+  World world;
+  if (tracked) {
+    world.trackChanges<Big>();
+  }
+  constexpr size_t pages = 8;
+  std::vector<Entity> entities;
+  for (size_t i = 0; i < pages * PAGE_SIZE; ++i) {
+    entities.push_back(world.create());
+    const uint32_t index = sc::ecs::indexOf(entities.back());
+    world.emplace<Position>(entities.back(), static_cast<float>(index), 0.0f);
+    if (i % step == 0) {
+      world.emplace<Big>(entities.back(), Big{.index = index, .rest = {}});
+    }
+  }
+
+  std::atomic<size_t> calls = 0;
+  std::atomic<size_t> wrong = 0;
+  const auto take = [&](Entity entity, Big &big, const Position &pos) {
+    calls.fetch_add(1, std::memory_order_relaxed);
+    if (big.index != sc::ecs::indexOf(entity)) {
+      wrong.fetch_add(1, std::memory_order_relaxed);
+    }
+    // Counted, not REQUIRE: Catch2 asserts only on the main thread.
+    if (!world.erase<Big>(entity)) {
+      wrong.fetch_add(1, std::memory_order_relaxed);
+    }
+    // The other column the loop goes through is not touched.
+    if (static_cast<uint32_t>(pos.x) != sc::ecs::indexOf(entity)) {
+      wrong.fetch_add(1, std::memory_order_relaxed);
+    }
+  };
+  if (parallel) {
+    world.parallelEach<Big, const Position>(take);
+  } else {
+    world.each<Big, const Position>(take);
+  }
+
+  REQUIRE(calls.load() == (entities.size() + step - 1) / step);
+  REQUIRE(wrong.load() == 0);
+  // All but the spare gave their memory back during the loop.
+  REQUIRE(world.column<Big>().pages() == 1);
+  REQUIRE(world.column<Big>().spares() == 1);
+}
+
 TEST_CASE("World Loops Go Through The Entities Of A Model, Whatever Happened Before", "[ecs][world][threading]") {
   sc::threading::init();
 
