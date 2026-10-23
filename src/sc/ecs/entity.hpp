@@ -156,8 +156,8 @@ namespace sc::ecs::internal {
         return {indices.data() + (static_cast<size_t>(before) - taken), taken};
       }
 
-      // Must have nothing running next to it.
-      void give(uint32_t index) {
+      // Must have nothing running next to it. Inlined, see destroy.
+      SC_FORCE_INLINE void give(uint32_t index) {
         open();
         add(index);
         close();
@@ -258,7 +258,14 @@ namespace sc::ecs::internal {
     // An index of the area that was given back by destroy, or else the next
     // one of the calling thread there. Throws std::length_error if all pages
     // are taken, std::out_of_range for an area not below AREA_LIMIT.
-    [[nodiscard]] Entity create(uint32_t area) { return create(this->area(area), area); }
+    //
+    // Inlined: in a loop of World::create of its own, Clang called this for
+    // every entity (cost 345, threshold 250), and creating 100K entities with
+    // 2 components and destroying them one by one took 32.9 instead of 29.7M
+    // instructions, 2.03 instead of 1.83 ms, together with give and destroy
+    // (perf_ecs_world create). Forced alone, 2.02 ms. GCC inlined all three:
+    // 1.83 ms either way.
+    [[nodiscard]] SC_FORCE_INLINE Entity create(uint32_t area) { return create(this->area(area), area); }
 
     // The same in COMMON_AREA, which the allocator holds itself: through the
     // table of areas, 1M creates took 8.4 instead of 7.7 ms.
@@ -373,7 +380,11 @@ namespace sc::ecs::internal {
 
     // The entity must exist. Its index is handed out again with another
     // generation, so that the entity stays invalid.
-    void destroy(Entity entity) {
+    //
+    // Inlined with give: Clang called give for every entity, and this instead
+    // once give alone was forced. The times are at create(area); give and
+    // this forced without it took 1.87 ms.
+    SC_FORCE_INLINE void destroy(Entity entity) {
       const uint32_t index = indexOf(entity);
       ++*generation(index);
       // Back to where it came from.
