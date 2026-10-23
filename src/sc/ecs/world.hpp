@@ -1028,8 +1028,15 @@ namespace sc::ecs {
     // was destroyed has its index no longer: the component would be that of
     // whichever entity gets the index next. Always Emplaced::Made, see
     // Emplaced for why there is no reference to the component.
+    //
+    // Inlined, as erase: Clang inlines a type's emplace on its own only
+    // where it is called from one place in the translation unit (cost about
+    // -14 000 then, 560 against a threshold of 250 from three), so the
+    // components used most stayed calls. Adding a component to 100K entities
+    // and removing it took 13.1 instead of 11.0M instructions, 822 instead
+    // of 777 µs; GCC inlined it: 779 µs either way.
     template<typename Component, typename... Args>
-    Emplaced emplace(Entity entity, Args &&...args) {
+    SC_FORCE_INLINE Emplaced emplace(Entity entity, Args &&...args) {
       assert(valid(entity));
       return column<Component>().emplace(entity, std::forward<Args>(args)...);
     }
@@ -1094,9 +1101,9 @@ namespace sc::ecs {
     }
 
     // The entity must exist. False if it did not have the component, or if
-    // another thread removed it at the same time.
+    // another thread removed it at the same time. Inlined, see emplace.
     template<typename Component>
-    bool erase(Entity entity) {
+    SC_FORCE_INLINE bool erase(Entity entity) {
       assert(valid(entity));
       return column<Component>().erase(entity);
     }
@@ -1159,9 +1166,14 @@ namespace sc::ecs {
       return foundIn(findColumn<Component>(), entity);
     }
 
-    // The column of a component, which is made on first use.
+    // The column of a component, which is made on first use. Inlined: GCC
+    // called it from emplace and get, and getting a component of 100K
+    // entities in random order took 381 instead of 362 µs (Clang inlined it:
+    // 433 µs either way). Forcing get, tryGet, contains, modify and the other
+    // ways to add inline as well gained nothing, also called from several
+    // places, and made get with GCC and modify with Clang slower again.
     template<typename Component>
-    [[nodiscard]] ColumnOf<Component> &column() {
+    [[nodiscard]] SC_FORCE_INLINE ColumnOf<Component> &column() {
       using Type = std::remove_const_t<Component>;
       const size_t index = internal::componentIndex<Type>();
       std::atomic<internal::ColumnBase *> &slot = index < internal::NEAR_COMPONENT_TYPES
