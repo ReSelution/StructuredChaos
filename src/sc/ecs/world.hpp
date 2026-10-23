@@ -1725,14 +1725,14 @@ namespace sc::ecs {
           // 1M entities: 744 instead of 232 µs; with a body that writes the
           // components unchanged (0.158 ns per entity either way).
           //
-          // Inlined: where the function takes Commands and records only for
-          // some entities, Clang kept the function's state on the stack and
-          // loaded it again for every entity. 1M entities on all threads of
-          // which none records anything (the churn of ecs_compare): 148
-          // instead of 165 µs (GCC 86 µs either way); the systems of that
-          // churn on one thread 4 % faster as well. Commands as one pointer
-          // to the context on top took it to 128 µs, but made recording
-          // 5-10 % slower with both compilers.
+          // Inlined: Clang called this for every entity otherwise where the
+          // function takes Commands, and the churn of ecs_compare with 1M
+          // entities on all threads took 139 instead of 134 µs a frame. Its
+          // systems (Position and Velocity, Health) took 4 % longer on one
+          // thread and 4-10 % on all threads, though Clang inlined this into
+          // them either way; why was not found. Iterating 2 components on
+          // every 2nd entity of 100K, on one thread, took 3.5 % less. GCC the
+          // same either way.
           // TODO: -Wunused-lambda-capture for generations in every loop whose
           // function takes no entity (e.g. test_world.cpp:401); capture it
           // only WITH_ENTITY, without giving up the copies above.
