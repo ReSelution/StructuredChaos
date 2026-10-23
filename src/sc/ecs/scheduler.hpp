@@ -1936,6 +1936,8 @@ namespace sc::ecs {
 
       for (const std::vector<size_t> &stage: stages) {
         try {
+          // runAll puts more than one system on the pool.
+          [[maybe_unused]] const internal::ParallelRun run = world.parallelRun(stage.size() > 1);
           internal::runAll(stage, [this, &world](size_t index) {
             System &system = m_systems[index];
             world.advanceTick();

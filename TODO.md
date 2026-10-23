@@ -155,10 +155,8 @@ unless noted, rank among 7–8 frameworks.
   848 µs, all at once 781 → 821, add + remove recorded 541 → 564 (7 runs each), though their code did not change.
   The probe that calls `destroy(span)` directly shows no difference. Presumably code placement in that binary; not
   looked into.
-- [ ] **`World::destroy` must not run next to other threads, assert it:** `FreeList::give` (`resize`, `push_back`)
-  runs against `take` from `create` without a lock, so a `create` next to it can read freed memory, and the
-  components go without locked instructions. The comment says so since `86d3592`; left: a debug assert if ecs can
-  tell that a loop or stage is running.
+- [ ] **`World::destroy` next to threads of the user's own:** a thread that the user starts and that creates next to
+  `destroy` is not caught (`FreeList::give` against `take` without a lock); only the comment says so.
 - [ ] **Knee in create between 16K and 32K entities:** create with two components 10.1 → 12.3 ns per entity (14.9 at
   262K), bulk 1.6 → 3.9; pico_ecs flat at 11. It is the end of the L2 (512 KB per core): the benchmark makes and
   destroys the whole world every iteration, L2 misses per entity 0.07 at 16K, 0.31 at 32K. Not page faults, not the
@@ -167,7 +165,9 @@ unless noted, rank among 7–8 frameworks.
   problem: small hot variables (`FreeList::left`, the `componentIndex` statics) come from L2 instead of L1 in IBS.
   Mostly a property of the benchmark; only the bytes per entity could shrink, and the generation is what buys safety.
 
-Done: destroy without `lock` (`86d3592`, -10 %); bulk destroy with kill masks (`fa865dc`); `World::parallelDestroy`
+Done: debug builds assert that `destroy`, `destroy(span)` and `parallelDestroy` run while no parallel loop and no
+stage of more than one system runs on the world (`World::assertAlone`, counted with `internal::ParallelRun`); a
+system that takes `World &` runs alone and may still destroy. Destroy without `lock` (`86d3592`, -10 %); bulk destroy with kill masks (`fa865dc`); `World::parallelDestroy`
 with `PageSort` and `giveMany` over threads (1M entities, 6 components: 10 538 → 2 422 µs on 16 threads); bulk
 create with reused indices in rows (`bfd4be4`, 2.1 instead of 10.3 ns at 1024).
 

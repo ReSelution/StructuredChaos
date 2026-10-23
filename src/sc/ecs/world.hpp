@@ -64,6 +64,34 @@ namespace sc::ecs::internal {
     Modifying &operator=(const Modifying &) = delete;
   };
 
+  // Counts a parallel loop or stage on a world for as long as it exists,
+  // unless told not to, so that destroy can assert that nothing runs next to
+  // it. Nothing in release builds.
+  class ParallelRun {
+  public:
+#ifndef NDEBUG
+    ParallelRun(std::atomic<uint32_t> &runs, bool counted) noexcept : m_runs(counted ? &runs : nullptr) {
+      if (m_runs != nullptr) {
+        m_runs->fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    ~ParallelRun() {
+      if (m_runs != nullptr) {
+        m_runs->fetch_sub(1, std::memory_order_relaxed);
+      }
+    }
+#else
+    ParallelRun() noexcept = default;
+#endif
+    ParallelRun(const ParallelRun &) = delete;
+    ParallelRun &operator=(const ParallelRun &) = delete;
+
+#ifndef NDEBUG
+  private:
+    std::atomic<uint32_t> *m_runs;
+#endif
+  };
+
   // Has the columns of a loop in loopWatch for as long as it exists, see
   // assertNotLooped. Nothing in release builds.
   template<size_t Count>
@@ -622,6 +650,7 @@ namespace sc::ecs {
     // From a system, Commands::destroy records it for later. The onRemove
     // hooks of its components run first, while it has all of them.
     bool destroy(Entity entity) {
+      assertAlone();
       if (!valid(entity)) {
         return false;
       }
@@ -644,6 +673,7 @@ namespace sc::ecs {
     // count once per page, instead of everything per entity and column. The
     // onRemove hooks of all of them run first.
     size_t destroy(std::span<const Entity> entities) {
+      assertAlone();
       if (!m_removeHooked.empty()) [[unlikely]] {
         // Once per entity, also for one given twice.
         std::vector<Entity> each(entities.begin(), entities.end());
@@ -693,8 +723,31 @@ namespace sc::ecs {
     [[nodiscard]] uint32_t tick() const noexcept { return m_clock.load(std::memory_order_relaxed); }
     uint32_t advanceTick() noexcept { return m_clock.fetch_add(1, std::memory_order_relaxed) + 1; }
 
+    // For the scheduler: counts a stage that runs its systems on the pool for
+    // as long as the result exists, if parallel, see assertAlone. Nothing in
+    // release builds.
+    // NOLINTNEXTLINE(readability-convert-member-functions-to-static): uses members in debug builds
+    [[nodiscard]] internal::ParallelRun parallelRun([[maybe_unused]] bool parallel) const noexcept {
+#ifndef NDEBUG
+      return {m_parallelRuns, parallel};
+#else
+      return {};
+#endif
+    }
+
   private:
+    // destroy gives indices back to lists that create takes from without a
+    // lock, and takes components away without locked instructions. A loop or
+    // stage on other threads is all the world can tell about; a thread of
+    // the user's own that creates next to it is not caught.
+    // NOLINTNEXTLINE(readability-convert-member-functions-to-static): uses members in debug builds
+    void assertAlone() const noexcept {
+      assert(m_parallelRuns.load(std::memory_order_relaxed) == 0 &&
+             "sc::ecs: destroy next to a parallel loop or stage; record it with Commands::destroy");
+    }
+
     size_t destroyQuietly(std::span<const Entity> entities) {
+      assertAlone();
       if (m_killPlace == nullptr) {
         m_killPlace = static_cast<uint32_t *>(memory::reserve(KILL_PLACE_BYTES));
         memory::commit(m_killPlace, KILL_PLACE_BYTES);
@@ -735,6 +788,7 @@ namespace sc::ecs {
     // Without the onRemove hooks, which CommandApplier runs before on all
     // threads (runRemoveHooks).
     size_t parallelDestroy(std::span<const Entity> entities) {
+      assertAlone();
       const size_t helpers = entities.size() / ENTITIES_PER_THREAD;
       if (helpers == 0) {
         return destroyQuietly(entities);
@@ -1296,6 +1350,8 @@ namespace sc::ecs {
       // is not worth waking one up.
       const size_t helpers =
           countUpTo(columns, pages, threading::threadSlots() * ENTITIES_PER_THREAD) / ENTITIES_PER_THREAD;
+      // Also with no helper: whether one joins is not up to the caller.
+      [[maybe_unused]] const internal::ParallelRun run = parallelRun(true);
       threading::parallelFor(pages, grain, helpers, [&](size_t first, size_t last) {
         eachInPages(get, without, changes, columns, excluded, changed, since, static_cast<uint32_t>(first),
                     static_cast<uint32_t>(last), function);
@@ -1536,6 +1592,10 @@ namespace sc::ecs {
     // The columns with onRemove hooks.
     std::vector<internal::ColumnBase *> m_removeHooked;
     std::atomic<uint32_t> m_clock{1};
+#ifndef NDEBUG
+    // Parallel loops and stages running now, see assertAlone.
+    mutable std::atomic<uint32_t> m_parallelRuns{0};
+#endif
 
     // The onAdd hooks of the component for every entity of the span that has
     // it, made by create.
