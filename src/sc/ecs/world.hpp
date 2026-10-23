@@ -212,6 +212,9 @@ namespace sc::ecs::internal {
       for (size_t segment = 0; segment < m_segments.size(); ++segment) {
         m_found.insert(m_found.end(), m_numbered[segment].begin(), m_numbered[segment].end());
       }
+      // TODO: this sort runs on one thread while the others wait: with 1M
+      // items spread over 3 907 pages (16M entities) gathering and sorting
+      // m_found took 128 µs of 880, over 61 000 pages 2.6 of 6 ms.
       std::ranges::sort(m_found, {}, &Found::page);
       m_pages.resize(m_found.size());
       for (size_t i = 0; i < m_found.size(); ++i) {
