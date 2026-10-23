@@ -208,14 +208,36 @@ namespace sc::ecs::internal {
           }
         }
       });
-      m_found.clear();
+      // The pages by number straight from m_numbers, from the lowest to the
+      // highest, where they lie close enough together; otherwise sorted. On
+      // one thread while the others wait: sorting them took 126 instead of
+      // 6 µs for 1M items in 3 907 pages (of 16M entities), 2.6 ms instead
+      // of 64 µs in 61 000 pages (of 256M), where all of count and place
+      // took 6.0 instead of 3.5 ms.
+      size_t found = 0;
+      uint32_t lowest = NO_PAGE;
+      uint32_t highest = 0;
       for (size_t segment = 0; segment < m_segments.size(); ++segment) {
-        m_found.insert(m_found.end(), m_numbered[segment].begin(), m_numbered[segment].end());
+        found += m_numbered[segment].size();
+        for (const Found &each: m_numbered[segment]) {
+          lowest = std::min(lowest, each.page);
+          highest = std::max(highest, each.page);
+        }
       }
-      // TODO: this sort runs on one thread while the others wait: with 1M
-      // items spread over 3 907 pages (16M entities) gathering and sorting
-      // m_found took 128 µs of 880, over 61 000 pages 2.6 of 6 ms.
-      std::ranges::sort(m_found, {}, &Found::page);
+      m_found.clear();
+      if (found != 0 && size_t{highest - lowest} < SCAN_SPREAD * found) {
+        for (uint32_t page = lowest; page <= highest; ++page) {
+          const uint32_t number = m_numbers[page].load(std::memory_order_relaxed);
+          if (number != 0) {
+            m_found.push_back({.page = page, .number = number - 1});
+          }
+        }
+      } else {
+        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+          m_found.insert(m_found.end(), m_numbered[segment].begin(), m_numbered[segment].end());
+        }
+        std::ranges::sort(m_found, {}, &Found::page);
+      }
       m_pages.resize(m_found.size());
       for (size_t i = 0; i < m_found.size(); ++i) {
         m_pages[i] = m_found[i].page;
@@ -305,6 +327,10 @@ namespace sc::ecs::internal {
     static constexpr size_t NUMBERS_BYTES = (size_t{1} << (INDEX_BITS - PAGE_BITS)) * sizeof(std::atomic<uint32_t>);
     // No page, for Last before the first item and for an item in none.
     static constexpr uint32_t NO_PAGE = ~uint32_t{0};
+    // count goes through m_numbers for the pages up to this many slots per
+    // page found, 32 bytes. Chosen, not measured at the border: 200 pages
+    // spread over all 2^20 are sorted, as fast as before.
+    static constexpr size_t SCAN_SPREAD = 8;
 
     struct Found {
       uint32_t page;
