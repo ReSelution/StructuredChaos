@@ -147,7 +147,10 @@ unless noted, rank among 7–8 frameworks.
   all others slower (EntityX 22, EnTT 28, flecs 31). `World::destroy` looks at every column of the world: from 20
   columns on it asks each one without a virtual call whether it has the entity (`internal::ColumnPages`), below
   that the virtual calls are predicted and asking only cost. One by one, 100 types 900 → 225 ns, 24 types 82 → 56;
-  a span of one entity, as one destroy through `Commands`, 100 types 1 510 → 210 ns. Still about 2.2 ns per column;
+  a span of one entity, as one destroy through `Commands`, 100 types 1 510 → 210 ns. Through `Commands`, the whole
+  `scheduler.run` per destroyed entity (all threads, 2 / 20 / 100 types): 1 000 per frame 9.8 / 9.9 / 10.0 ns, 10 per
+  frame 27 / 31 / 46, 1 per frame 185 / 217 / 371, of which 143 ns is a frame whose system records nothing; 100K at
+  once 6 to 13 ns, with a spread between runs not looked into. Still about 2.2 ns per column;
   a per-entity record of its columns would visit only those, at a cost in every emplace and erase. pico_ecs is
   flattered: its
   entity benchmarks never call `PicoEcsApplication::init()`, so its destroy skips `ecs_sync_destroy`. Bulk destroy
