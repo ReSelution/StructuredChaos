@@ -17,6 +17,7 @@
 
 #include "sc/memory/virtual_memory.hpp"
 #include "sc/threading/threading.hpp"
+#include "sc/util/macros.hpp"
 
 namespace sc::ecs {
 
@@ -383,8 +384,15 @@ namespace sc::ecs::internal {
     // there is left out. Calls the function with the index of each one it
     // destroys and returns how many those were. The indices go back to their
     // lists in one step each.
+    //
+    // Inlined into the caller, so that the function is one of its locals:
+    // called with it from World::destroyQuietly, Clang kept the pointer to it
+    // on the stack and loaded the world through it again for every entity.
+    // Creating 100K entities with 2 components at once and destroying them
+    // at once took 2.23 instead of 2.77M cycles (535 instead of 658 µs); GCC
+    // inlined it: 2.06M either way.
     template<typename Function>
-    size_t destroyMany(std::span<const Entity> entities, Function &&function) {
+    SC_FORCE_INLINE size_t destroyMany(std::span<const Entity> entities, Function &&function) {
       openAll();
       size_t destroyed = 0;
       LastList last;
