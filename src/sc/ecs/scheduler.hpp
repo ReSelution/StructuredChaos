@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "sc/threading/threading.hpp"
+#include "sc/util/macros.hpp"
 
 #include "entity.hpp"
 #include "resource.hpp"
@@ -147,16 +148,11 @@ namespace sc::ecs::internal {
     }
 
     // Before an add to the column. The number of adds done there, to raise
-    // for one that is.
-    uint32_t &reserve(ColumnBase &column) {
-      auto found = std::ranges::find(m_counted, &column, &Counted::column);
-      if (found == m_counted.end()) {
-        m_counted.push_back({.column = &column, .counted = 0, .added = 0});
-        found = m_counted.end() - 1;
-      }
-      if (found->added == found->counted) {
-        column.occupyPage(m_number, m_step);
-        found->counted += m_step;
+    // for one that is. Inline up to occupy, see CommandApplier::applyChange.
+    SC_FORCE_INLINE uint32_t &reserve(ColumnBase &column) {
+      const auto found = std::ranges::find(m_counted, &column, &Counted::column);
+      if (found == m_counted.end() || found->added == found->counted) [[unlikely]] {
+        return occupy(column, found);
       }
       return found->added;
     }
@@ -171,6 +167,18 @@ namespace sc::ecs::internal {
       uint32_t counted;
       uint32_t added;
     };
+
+    // reserve at the first add to the column, or once all that was counted
+    // is used up.
+    SC_NOINLINE uint32_t &occupy(ColumnBase &column, std::vector<Counted>::iterator found) {
+      if (found == m_counted.end()) {
+        m_counted.push_back({.column = &column, .counted = 0, .added = 0});
+        found = m_counted.end() - 1;
+      }
+      column.occupyPage(m_number, m_step);
+      found->counted += m_step;
+      return found->added;
+    }
 
     // The columns added to, mostly a few.
     std::vector<Counted> m_counted;
@@ -561,8 +569,8 @@ namespace sc::ecs::internal {
     // the lists GCC kept two of its registers on the stack around every
     // change, which made 1M recorded changes of one page 7 % slower to apply
     // (3.37 instead of 3.15 ms).
-    [[gnu::noinline]] static void applyList(World &world, std::span<Change> changes, std::vector<Kill> &kills,
-                                            PageAdds &adds) {
+    SC_NOINLINE static void applyList(World &world, std::span<Change> changes, std::vector<Kill> &kills,
+                                      PageAdds &adds) {
       for (Change &change: changes) {
         applyChange(world, change, kills, adds);
       }
@@ -645,7 +653,12 @@ namespace sc::ecs::internal {
       flush(kills);
     }
 
-    static void applyChange(World &world, Change &change, std::vector<Kill> &kills, PageAdds &adds) {
+    // Inlined into applyList and applyPage, with kill and PageAdds::reserve:
+    // Clang called all three for every change, and 1M recorded changes of one
+    // entity took 155 instead of 140M instructions, adding and removing a
+    // component on 100K entities through Commands 45 instead of 37M (GCC
+    // inlined them: 128 and 37M either way).
+    static SC_FORCE_INLINE void applyChange(World &world, Change &change, std::vector<Kill> &kills, PageAdds &adds) {
       const uint32_t index = indexOf(change.entity);
       // Not that of an entity that got the index since.
       const bool valid = world.valid(change.entity);
@@ -663,9 +676,12 @@ namespace sc::ecs::internal {
     }
 
     // An erase for flush; a component with onRemove hooks is moved into the
-    // stash first, once, if the entity has it.
-    static void kill(std::vector<Kill> &kills, ColumnBase &column, uint32_t index, Entity entity,
-                     RemovedStash &removed) {
+    // stash first, once, if the entity has it. Both compilers called it
+    // where not forced: adding and removing a component on 100K entities
+    // through Commands took 39.7 instead of 37.2M instructions with GCC,
+    // 39.2 instead of 37.5M with Clang.
+    static SC_FORCE_INLINE void kill(std::vector<Kill> &kills, ColumnBase &column, uint32_t index, Entity entity,
+                                     RemovedStash &removed) {
       auto found = std::ranges::find(kills, &column, &Kill::column);
       if (found == kills.end()) {
         kills.push_back({.column = &column, .hooked = column.removeHooked, .page = {}});
@@ -683,17 +699,23 @@ namespace sc::ecs::internal {
     }
 
     // Does the gathered erases and makes the pages empty again for the next.
-    static void flush(std::vector<Kill> &kills) noexcept {
+    // Before every change that is no erase, so the look stays inline: with
+    // applyChange inlined, GCC called all of flush instead, and 1M recorded
+    // changes of one entity took 137 instead of 128M instructions.
+    static SC_FORCE_INLINE void flush(std::vector<Kill> &kills) noexcept {
       for (Kill &kill: kills) {
-        if (kill.page.touched == 0) {
-          continue;
+        if (kill.page.touched != 0) [[unlikely]] {
+          flushPage(kill);
         }
-        kill.column->eraseAlone(std::span<const KillPage>{&kill.page, 1});
-        for (uint64_t touched = kill.page.touched; touched != 0; touched &= touched - 1) {
-          kill.page.words[static_cast<size_t>(std::countr_zero(touched))] = 0;
-        }
-        kill.page.touched = 0;
       }
+    }
+
+    SC_NOINLINE static void flushPage(Kill &kill) noexcept {
+      kill.column->eraseAlone(std::span<const KillPage>{&kill.page, 1});
+      for (uint64_t touched = kill.page.touched; touched != 0; touched &= touched - 1) {
+        kill.page.words[static_cast<size_t>(std::countr_zero(touched))] = 0;
+      }
+      kill.page.touched = 0;
     }
 
     PageSort<Change> m_sort;
