@@ -15,7 +15,7 @@
 #ifndef SC_NOINLINE
 #if defined(__GNUC__) || defined(__clang__)
 #define SC_NOINLINE __attribute__((noinline))
-#elif defined(_MSC_VER)
+#elifdef _MSC_VER
 #define SC_NOINLINE __declspec(noinline)
 #else
 #define SC_NOINLINE
