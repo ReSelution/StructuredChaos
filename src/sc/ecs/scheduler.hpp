@@ -594,7 +594,7 @@ namespace sc::ecs::internal {
         applyInOrder(world, lists, number, changes);
         return;
       }
-      m_sort.place(helpers, index);
+      m_sort.place(helpers);
       std::atomic_flag failed;
       std::exception_ptr error;
       threading::parallelFor(m_sort.pages().size(), 1, helpers, [&](size_t first, size_t last) {
