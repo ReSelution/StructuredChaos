@@ -37,10 +37,15 @@ test_ecs = executable(
 
 test('ECS Tests', test_ecs, env: test_env, timeout: test_timeout)
 
-# Not a test: run under perf stat by hand, see the file.
+# Not tests: run under perf stat by hand, see the files.
 executable(
   'perf_ecs_commands',
   sources: ['ecs/perf_commands.cpp'],
+  dependencies: [sc_dep],
+)
+executable(
+  'perf_ecs_world',
+  sources: ['ecs/perf_world.cpp'],
   dependencies: [sc_dep],
 )
 
