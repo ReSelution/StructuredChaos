@@ -1206,17 +1206,23 @@ namespace sc::ecs {
     // 433 µs either way). Forcing get, tryGet, contains, modify and the other
     // ways to add inline as well gained nothing, also called from several
     // places, and made get with GCC and modify with Clang slower again.
+    //
+    // The far columns behind a branch of their own: with one expression for
+    // both slots, Clang chose between them with a cmov, so the load of the
+    // slot waited for the compare and for m_farColumns, in every get. A loop
+    // of get in a function of its own took Clang 293 instead of 252 µs (GCC
+    // 239 µs either way).
     template<typename Component>
     [[nodiscard]] SC_FORCE_INLINE ColumnOf<Component> &column() {
       using Type = std::remove_const_t<Component>;
       const size_t index = internal::componentIndex<Type>();
-      std::atomic<internal::ColumnBase *> &slot = index < internal::NEAR_COMPONENT_TYPES
-                                                      ? m_columns[index]
-                                                      : m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
-      if (internal::ColumnBase *found = slot.load(std::memory_order_acquire)) [[likely]] {
-        return static_cast<internal::Column<Type> &>(*found);
+      if (index < internal::NEAR_COMPONENT_TYPES) [[likely]] {
+        if (internal::ColumnBase *found = m_columns[index].load(std::memory_order_acquire)) [[likely]] {
+          return static_cast<internal::Column<Type> &>(*found);
+        }
+        return makeColumn<Type>(m_columns[index]);
       }
-      return makeColumn<Type>(slot);
+      return farColumn<Type>(index);
     }
 
     // The column of a component, null as long as nothing made it: no entity
@@ -1525,6 +1531,10 @@ namespace sc::ecs {
     }
 
     // Where the column of a component is kept, null in it until it is made.
+    // TODO: the same choice between the near and the far slots as column had,
+    // which Clang made with a cmov and which made gets 14 % slower there:
+    // findColumn, so const get, tryGet and contains, go through it. Not
+    // measured here.
     template<typename Component>
     [[nodiscard]] const std::atomic<internal::ColumnBase *> &slotOf() const {
       const size_t index = internal::componentIndex<std::remove_const_t<Component>>();
@@ -1605,6 +1615,17 @@ namespace sc::ecs {
             columns);
       }
       return count;
+    }
+
+    // column for a type from NEAR_COMPONENT_TYPES on, out of the loops that
+    // look up a column.
+    template<typename Type>
+    SC_NOINLINE SC_COLD internal::Column<Type> &farColumn(size_t index) {
+      std::atomic<internal::ColumnBase *> &slot = m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
+      if (internal::ColumnBase *found = slot.load(std::memory_order_acquire)) [[likely]] {
+        return static_cast<internal::Column<Type> &>(*found);
+      }
+      return makeColumn<Type>(slot);
     }
 
     // Out of line: column is called wherever a component is looked up, and
