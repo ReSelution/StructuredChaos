@@ -144,9 +144,12 @@ unless noted, rank among 7–8 frameworks.
   pointers moved on by the gap, a 64-bit slot, runs of set bits (-30 % at 99 % but +15 % at 50 %, unexplained),
   pairs of bits with a `switch`, all 64 slots with a test each. What is left is the layout, see "Entity locality".
 - [ ] **Destroy, second:** 10.2 / 10.3 at 1024 / 262K, 8.2 / 9.4 without `lock` (`86d3592`); pico_ecs 6.0 / 5.5,
-  all others slower (EntityX 22, EnTT 28, flecs 31). `World::destroy` calls `erase` through a virtual call on every
-  column of the world, not only on those the entity has; a game with 100 component types makes 100 virtual calls
-  per destroy. A per-entity record of its columns would let `eraseAll` visit only those. pico_ecs is flattered: its
+  all others slower (EntityX 22, EnTT 28, flecs 31). `World::destroy` looks at every column of the world: from 20
+  columns on it asks each one without a virtual call whether it has the entity (`internal::ColumnPages`), below
+  that the virtual calls are predicted and asking only cost. One by one, 100 types 900 → 225 ns, 24 types 82 → 56;
+  a span of one entity, as one destroy through `Commands`, 100 types 1 510 → 210 ns. Still about 2.2 ns per column;
+  a per-entity record of its columns would visit only those, at a cost in every emplace and erase. pico_ecs is
+  flattered: its
   entity benchmarks never call `PicoEcsApplication::init()`, so its destroy skips `ecs_sync_destroy`. Bulk destroy
   (`fa865dc`) is below it: 4.2 / 5.3.
 - [ ] **Small costs of destroy:** `valid` and `EntityAllocator::destroy` both look up `generation` and `pages()`;

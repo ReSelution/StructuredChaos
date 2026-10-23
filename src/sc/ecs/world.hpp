@@ -657,9 +657,16 @@ namespace sc::ecs {
       if (!m_removeHooked.empty()) [[unlikely]] {
         runRemoveHooks(entity);
       }
+      // From ASK_COLUMNS_FROM on, only the columns that have it get the
+      // virtual call, see ColumnPages.
+      const uint32_t index = indexOf(entity);
       const size_t count = m_columnCount.load(std::memory_order_relaxed);
-      for (size_t i = 0; i < count; ++i) {
-        m_columnList[i]->eraseAlone(indexOf(entity));
+      if (count < ASK_COLUMNS_FROM) {
+        for (size_t i = 0; i < count; ++i) {
+          m_columnList[i]->eraseAlone(index);
+        }
+      } else {
+        eraseAsking(index, count);
       }
       m_entities.destroy(entity);
       return true;
@@ -766,8 +773,12 @@ namespace sc::ecs {
         kill.touched |= uint64_t{1} << (slot / 64);
       });
       const size_t count = m_columnCount.load(std::memory_order_relaxed);
+      const std::span<const internal::KillPage> pages{m_killPages};
+      const bool ask = count >= ASK_COLUMNS_FROM;
       for (size_t i = 0; i < count; ++i) {
-        m_columnList[i]->eraseAlone(std::span<const internal::KillPage>{m_killPages});
+        if (!ask || m_columnPages[i].mayHave(pages)) {
+          m_columnList[i]->eraseAlone(pages);
+        }
       }
       for (const internal::KillPage &kill: m_killPages) {
         m_killPlace[kill.number] = 0;
@@ -823,8 +834,11 @@ namespace sc::ecs {
           }
           m_freedCounts[i] = count;
           if (count != 0) {
+            const std::span<const internal::KillPage> page{&kill, 1};
             for (size_t c = 0; c < columns; ++c) {
-              m_columnList[c]->eraseAlone(std::span<const internal::KillPage>{&kill, 1});
+              if (columns < ASK_COLUMNS_FROM || m_columnPages[c].mayHave(page)) {
+                m_columnList[c]->eraseAlone(page);
+              }
             }
           }
         }
@@ -1221,6 +1235,24 @@ namespace sc::ecs {
     [[nodiscard]] uint32_t pageCount() const noexcept { return m_entities.pageCount(); }
 
   private:
+    // From how many columns on destroy asks a column whether it has an
+    // entity before the virtual call that takes it away. Up to about 16 the
+    // CPU predicts the calls, and asking only costs. One by one, ns per
+    // destroy without / with asking (Ryzen 7 5800X): 16 columns 36 / 38-41,
+    // 20 columns 47.6 / 46, 24 columns 82 / 56, 100 columns 900 / 225.
+    static constexpr size_t ASK_COLUMNS_FROM = 20;
+
+    // The part of destroy for many columns, out of line: inlined, it made the
+    // loop for few columns slower as well (2 columns 8.4 instead of 8.0 ns,
+    // out of line 8.2).
+    [[gnu::noinline]] void eraseAsking(uint32_t index, size_t count) noexcept {
+      for (size_t i = 0; i < count; ++i) {
+        if (m_columnPages[i].hasAt(index)) {
+          m_columnList[i]->eraseAlone(index);
+        }
+      }
+    }
+
     // How many entities a loop needs before another thread helps with it.
     static constexpr size_t ENTITIES_PER_THREAD = 1024;
 
@@ -1383,7 +1415,10 @@ namespace sc::ecs {
       if (internal::ColumnBase *found = slot.load(std::memory_order_relaxed)) {
         return static_cast<internal::Column<Type> &>(*found);
       }
-      auto *made = new internal::Column<Type>{m_pages};
+      // Owned until the push, which may throw.
+      std::unique_ptr<internal::Column<Type>> owned{new internal::Column<Type>{m_pages}};
+      m_columnPages.push_back(owned->headerPages());
+      auto *const made = owned.release();
       const size_t count = m_columnCount.load(std::memory_order_relaxed);
       m_columnList[count] = made;
       m_columnCount.store(count + 1, std::memory_order_release);
@@ -1592,6 +1627,10 @@ namespace sc::ecs {
     // The columns with onRemove hooks.
     std::vector<internal::ColumnBase *> m_removeHooked;
     std::atomic<uint32_t> m_clock{1};
+    // Where the columns of m_columnList keep their headers, in the same
+    // order, see ColumnPages. Grown under m_columnMutex; destroy reads it,
+    // next to which nothing makes a column.
+    std::vector<internal::ColumnPages> m_columnPages;
 #ifndef NDEBUG
     // Parallel loops and stages running now, see assertAlone.
     mutable std::atomic<uint32_t> m_parallelRuns{0};

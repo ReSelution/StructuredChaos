@@ -211,6 +211,37 @@ namespace sc::ecs::internal {
     size_t m_blockSize = 0;
   };
 
+  // What a column knows about a page, apart from its values; the same for
+  // every component, so that ColumnBase can read it. On cache lines of its
+  // own: threads that keep to different pages do not slow each
+  // other down.
+  struct alignas(64) PageHeader {
+    // Which entities of the page have the component.
+    std::array<std::atomic<uint64_t>, PAGE_WORDS> mask;
+    // Which of them a thread is making the component for with tryEmplace:
+    // it is that thread's to make, and not in the mask before it is made.
+    // Also set while erase destroys a component, so that the next one is
+    // not made in its place before it is gone, while emplaceOrReplace
+    // makes or assigns one, and while modify changes one.
+    std::array<std::atomic<uint64_t>, PAGE_WORDS> making;
+    // Which words of the mask may have a bit set: a loop only looks at
+    // these. Set with the first bit of a word, but only cleared when the
+    // page is empty, so a word may be empty all the same; clearing it with
+    // every word that becomes empty made destroy up to 11 % slower.
+    std::atomic<uint64_t> summary;
+    std::atomic<uint32_t> count;
+    // Whether the values have memory. Only changed by the thread that has
+    // busy set.
+    std::atomic<bool> started;
+    // Set while a thread gives the values their memory or takes it back.
+    std::atomic_flag busy;
+    // Whether the page is one of the spares, see park.
+    std::atomic<bool> parked;
+    // Whether the values gave their memory back since the column has
+    // them. Only used by the thread that has busy set.
+    bool vacated;
+  };
+
   // What the world needs of a column without knowing its component.
   struct ColumnBase {
     virtual ~ColumnBase() = default;
@@ -243,6 +274,44 @@ namespace sc::ecs::internal {
 
     // Whether the column has onRemove hooks. Set before the column is used.
     bool removeHooked = false;
+  };
+
+  // Where a column keeps its headers, so that World::destroy can ask whether
+  // a column has an entity without a virtual call: with 100 component types,
+  // 82 of the 100 virtual calls of eraseAlone per destroy went past the
+  // prediction of the CPU (Ryzen 7 5800X), 900 ns per destroy against 45 ns
+  // with 20 types. Kept by the world next to its list of columns, not in
+  // ColumnBase: two pointers there moved m_headerBlocks of every column onto
+  // a cache line of its own, away from m_hooks, which adding reads as well.
+  struct ColumnPages {
+    // The headers come in blocks of this many pages, as Column::HEADER_BLOCK_PAGES.
+    static constexpr uint32_t BLOCK_PAGES = 64;
+
+    const std::atomic<uint64_t> *blocks;
+    const PageHeader *headers;
+
+    // Whether the entity at the index has the component.
+    [[nodiscard]] bool hasAt(uint32_t index) const noexcept {
+      const PageHeader *const header = find(index >> PAGE_BITS);
+      const uint32_t slot = index & (PAGE_SIZE - 1);
+      return header != nullptr && ((header->mask[slot / 64].load(std::memory_order_relaxed) >> (slot % 64)) & 1u) != 0;
+    }
+
+    // Whether any of the kill pages has a component in the column. Only the
+    // count of a page: a look per page, not per word, also for a span of many.
+    [[nodiscard]] bool mayHave(std::span<const KillPage> pages) const noexcept {
+      return std::ranges::any_of(pages, [this](const KillPage &kill) {
+        const PageHeader *const header = find(kill.number);
+        return header != nullptr && header->count.load(std::memory_order_relaxed) != 0;
+      });
+    }
+
+  private:
+    [[nodiscard]] const PageHeader *find(uint32_t number) const noexcept {
+      const uint32_t block = number / BLOCK_PAGES;
+      const uint64_t bits = blocks[block / 64].load(std::memory_order_acquire);
+      return ((bits >> (block % 64)) & 1u) != 0 ? headers + number : nullptr;
+    }
   };
 
 #ifndef NDEBUG
@@ -304,35 +373,7 @@ namespace sc::ecs::internal {
     static_assert(!std::is_const_v<T> && !std::is_reference_v<T>);
     static_assert(alignof(T) <= memory::OS_PAGE_SIZE);
 
-    // What the column knows about a page, apart from its values. On cache
-    // lines of its own: threads that keep to different pages do not slow each
-    // other down.
-    struct alignas(64) Header {
-      // Which entities of the page have the component.
-      std::array<std::atomic<uint64_t>, PAGE_WORDS> mask;
-      // Which of them a thread is making the component for with tryEmplace:
-      // it is that thread's to make, and not in the mask before it is made.
-      // Also set while erase destroys a component, so that the next one is
-      // not made in its place before it is gone, while emplaceOrReplace
-      // makes or assigns one, and while modify changes one.
-      std::array<std::atomic<uint64_t>, PAGE_WORDS> making;
-      // Which words of the mask may have a bit set: a loop only looks at
-      // these. Set with the first bit of a word, but only cleared when the
-      // page is empty, so a word may be empty all the same; clearing it with
-      // every word that becomes empty made destroy up to 11 % slower.
-      std::atomic<uint64_t> summary;
-      std::atomic<uint32_t> count;
-      // Whether the values have memory. Only changed by the thread that has
-      // busy set.
-      std::atomic<bool> started;
-      // Set while a thread gives the values their memory or takes it back.
-      std::atomic_flag busy;
-      // Whether the page is one of the spares, see park.
-      std::atomic<bool> parked;
-      // Whether the values gave their memory back since the column has
-      // them. Only used by the thread that has busy set.
-      bool vacated;
-    };
+    using Header = PageHeader;
 
     // Has busy of a header set for as long as it exists.
     class Busy {
@@ -1254,12 +1295,18 @@ namespace sc::ecs::internal {
       return count;
     }
 
+    // Where the headers are, see ColumnPages. They stay where they are for as
+    // long as the column exists.
+    [[nodiscard]] ColumnPages headerPages() const noexcept {
+      return {.blocks = m_headerBlocks.data(), .headers = headers()};
+    }
+
     // How many chunks of the values have their addresses reserved, see
     // CHUNK_SIZE. They stay until the column goes.
     [[nodiscard]] size_t chunks() const noexcept { return m_chunkCount.load(std::memory_order_relaxed); }
 
     // The headers come in blocks of this many pages.
-    static constexpr uint32_t HEADER_BLOCK_PAGES = 64;
+    static constexpr uint32_t HEADER_BLOCK_PAGES = ColumnPages::BLOCK_PAGES;
     // The values are reserved in chunks of this many indices.
     static constexpr uint32_t CHUNK_SIZE = uint32_t{1} << chunkBits<sizeof(T)>();
     // How many emptied pages keep their memory at most: 4, fewer where that
