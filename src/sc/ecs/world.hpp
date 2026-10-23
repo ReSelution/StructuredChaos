@@ -229,24 +229,40 @@ namespace sc::ecs::internal {
     // recorded changes were no faster to apply (3.58 against 3.45 ms,
     // within the spread of what does not sort at all).
     void place(size_t helpers) {
+      // Where every page and the items of every segment in it start, going
+      // through the counts a segment at a time: through the pages, and the
+      // counts of every segment for each, this took 216 instead of 16 µs for
+      // 1M items in 3 907 pages (of 16M entities), 3.4 ms instead of 0.26 ms
+      // in 61 000 pages, on one thread while the others wait.
+      // The items of every number first; a number taken by a thread that
+      // lost the race for its page has none.
+      m_numberItems.assign(m_used.load(std::memory_order_relaxed), 0);
+      for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+        const std::vector<uint32_t> &counts = m_counts[segment];
+        for (size_t number = 0; number < counts.size(); ++number) {
+          m_numberItems[number] += counts[number];
+        }
+      }
+      // From here on where the next item of the number goes.
       m_offsets.resize(m_found.size() + 1);
       uint32_t at = 0;
       for (size_t i = 0; i < m_found.size(); ++i) {
         m_offsets[i] = at;
-        for (size_t segment = 0; segment < m_segments.size(); ++segment) {
-          std::vector<uint32_t> &counts = m_counts[segment];
-          if (m_found[i].number >= counts.size()) {
-            // The segment has no item in the page.
-            continue;
-          }
-          uint32_t &count = counts[m_found[i].number];
-          const uint32_t here = count;
-          // From here on where the next item of the segment in the page goes.
-          count = at;
-          at += here;
-        }
+        uint32_t &items = m_numberItems[m_found[i].number];
+        const uint32_t here = items;
+        items = at;
+        at += here;
       }
       m_offsets.back() = at;
+      // From here on where the next item of the segment in the page goes.
+      for (size_t segment = 0; segment < m_segments.size(); ++segment) {
+        std::vector<uint32_t> &counts = m_counts[segment];
+        for (size_t number = 0; number < counts.size(); ++number) {
+          const uint32_t here = counts[number];
+          counts[number] = m_numberItems[number];
+          m_numberItems[number] += here;
+        }
+      }
       m_order.resize(at);
       threading::parallelFor(m_segments.size(), 1, helpers, [&](size_t first, size_t last) {
         for (size_t segment = first; segment < last; ++segment) {
@@ -341,6 +357,8 @@ namespace sc::ecs::internal {
     std::vector<uint32_t> m_pages;
     std::vector<uint32_t> m_offsets;
     std::vector<Item *> m_order;
+    // Per number, while place works out where the items go.
+    std::vector<uint32_t> m_numberItems;
   };
 
   // Far more than a program has: a world only reserves the addresses for
