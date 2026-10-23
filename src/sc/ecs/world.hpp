@@ -872,10 +872,9 @@ namespace sc::ecs {
       const size_t destroyed = m_entities.destroyMany(entities, [&](uint32_t index) {
         const uint32_t number = index >> PAGE_BITS;
         // The place of the page in m_killPages, plus one; zero for none yet.
-        uint32_t &place = m_killPlace[number];
-        if (place == 0) {
-          m_killPages.push_back({.number = number});
-          place = static_cast<uint32_t>(m_killPages.size());
+        uint32_t place = m_killPlace[number];
+        if (place == 0) [[unlikely]] {
+          place = addKillPage(number);
         }
         internal::KillPage &kill = m_killPages[place - 1];
         const uint32_t slot = index & (PAGE_SIZE - 1);
@@ -895,6 +894,21 @@ namespace sc::ecs {
       }
       m_killPages.clear();
       return destroyed;
+    }
+
+    // A page for destroyQuietly to gather entities in, at the end of
+    // m_killPages: its place there, plus one. Not inlined: in the function
+    // for every entity, the KillPage made for push_back took GCC a stack
+    // frame of 632 bytes, and the function saved 4 (GCC) or 6 (Clang)
+    // registers on every call, also where the page was there; neither
+    // compiler inlined it. Creating 100K entities with 2 components at once and
+    // destroying them at once took 2.06 instead of 2.48M cycles with GCC,
+    // 2.77 instead of 3.51M with Clang.
+    SC_NOINLINE uint32_t addKillPage(uint32_t number) {
+      m_killPages.push_back({.number = number});
+      const auto place = static_cast<uint32_t>(m_killPages.size());
+      m_killPlace[number] = place;
+      return place;
     }
 
   public:
