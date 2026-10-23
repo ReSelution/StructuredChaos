@@ -9,6 +9,9 @@ Found while integrating `sc::ecs` into [ecs_benchmark](https://github.com/abeiml
   is made. Without it the benchmark thread has no slot of its own in `EntityAllocator::withShare`, and every
   `create()` goes through `m_sharedMutex`. With `0` no workers run, so it stays single-threaded like the other
   frameworks.
+  - [ ] At `b3e1fef` the difference no longer shows: create + 2 `emplace` of 65 536 entities, one thread, 10.34 ns
+    per entity without `init(0)`, 10.29 with it. Either the mutex is gone from this path or uncontended it costs
+    nothing; check before the comment in the benchmark's `World.h` is relied on (a TODO there says the same).
 - **No malloc override:** mimalloc is built with `MI_OVERRIDE OFF`. ecs only uses mimalloc through its own `mi_*`
   calls; the rest of the benchmark runs on the system malloc, like every other framework there. `tests/ecs_compare`
   instead uses mimalloc for all libraries.
@@ -314,6 +317,18 @@ hero/monster data differed per framework). Small counts with the page summary (`
   clang 3k fewer, same time. Tried without gain: a linear loop with a bit test for words at least half full (+6 to
   +17 %), pointers moved on by the gap instead of `values + slot` (+6 % instructions, same cycles). What is left is
   the layout; see "Entity locality" below.
+  - Measured again with the churn benchmark of `ecs_compare` (`bab495e`, Velocity on a random half of 100K
+    entities): `integrate` 37.6 µs against flecs 11.1, `heal` over all 11.2 against 13.2. Both run at ~4
+    instructions per cycle, not memory bound; sc needs 14.8 instructions per entity, flecs 5.3 (SSE, two entities
+    per instruction). Per set bit 7 instructions of bookkeeping (`tzcnt`, slot, zero extension, clearing the bit)
+    and about one branch miss per word at its end.
+  - Raw arrays, same mask, ns per set entity at 10 / 50 / 90 / 99 / 99.9 % density: the word loop of ecs 1.23 /
+    0.71 / 0.63 / 0.39 / 0.19, packed 0.15 / 0.17 / 0.16 / 0.17 / 0.16. A word with one bit missing drops to bit by
+    bit, so at 99 % only 0.99^64 = 53 % of the words are full.
+  - Tried and dropped: a 64-bit slot (-2 to -7 %); a run of set bits at a time (`countr_zero`, `countr_one`, a
+    dense loop): -30 % at 99 %, neutral at 90 % from 60 bits on, but +15 % at 50 % even where the path is not
+    taken (unexplained, code placement?); pairs of bits with a `switch`: 4x slower at 50 % (branch misses); all 64
+    slots with a test per slot: 6x slower, not vectorized even with `-march=native` (the 5800X has no AVX-512).
 
 Entity benchmarks, ns per entity, rank among 7–8 frameworks (mustache has no destroy/remove-add results). Create and
 destroy from the reworked benchmarks of ecs_benchmark (`c00a2d1`: one registry for all iterations, so indices are
@@ -517,11 +532,99 @@ level or faster (random `get` -4 %, damage without lock -34 %, add + remove thro
 ecs_benchmark is single-threaded on purpose, so none of its results shows the main argument for ecs (structural
 changes inside parallel loops without deferring).
 
-- [ ] **Structural changes in a parallel loop:** per frame 1 %, 10 %, 50 % of the entities gain or lose a component
-  inside a system that runs over all entities in parallel. sc: directly in `parallelEach`; flecs/gaia: deferred mode
-  or command buffer plus flush; EnTT: collect and apply afterwards (no parallel `each`). Time per frame including the
-  flush, at 1, 2, 4, 8 threads.
+- [x] **Structural changes in a parallel loop:** done as the churn benchmark (`bab495e`): Position and Health on
+  every entity, Velocity on a random half, 0 to 50 % gain or lose it per frame, then `integrate` and `heal`; one
+  thread (changes right away) and all threads (sc `Commands`, flecs deferred in a `multi_threaded` system with a
+  pipeline of its own; EnTT on one thread only, view and owning group). 100K and 1M. Frame at 1 / 10 / 50 %, 1M,
+  all threads: sc 0.39 / 1.53 / 6.16 ms, flecs 3.47 / 24.2 / 74.4 ms. Per change at 50 %: sc 27 ns on one thread,
+  11 ns on all; flecs 257 / 148; EnTT 76 (view), 281 (group). flecs is ahead only below 0.1 to 0.3 % changes per
+  frame (its loops over the random half are 2.2x faster).
+  - [ ] Still open: the same at 1, 2, 4, 8 threads; gaia.
+  - [ ] **At 1M the systems get slower with the share of changes,** for sc and flecs alike (all threads: sc 59 →
+    557 µs, flecs 44 → 424 µs from 0 to 50 %; one thread less). Not the wake-up of the workers (unchanged with
+    spinning, see "Thread pool"). Presumably the changes right before leave the data in other caches or out of
+    them; not measured.
+  - The changes of the parallel run include a system over all entities that picks the changed ones (12 µs at 100K,
+    85 µs at 1M for sc; 23 / 79 for flecs), so they compare with each other, not with the one-thread run.
+  - 1M makes a full `ecs_compare` run longer (flecs ~94 s, entt ~88 s, sc ~10 s); a hidden tag is an option.
 - [ ] **Lost updates:** many threads deal damage to few targets, the total must add up. flecs 4.0.1 in multi-threaded
   systems: `ensure`/`get_mut` hand out the existing component without a lock (data race), `set` is deferred
   (`flecs_defer_set`) and the last command wins at the merge, so two `hp -= 10` from `hp = 100` give 90, not 80. With
   `modify` it must be 80.
+
+## Thread pool
+
+- **Workers join late, and it does not matter much:** a probe of `addParallel` (Position + Velocity, median of 200
+  runs) has all 15 helpers join at 100K and 14 at 1M, the last one 6.2 / 8.0 µs after the start of a 13 / 94 µs
+  loop. Workers sleep in `poolSemaphore.try_acquire_for` right away when they find nothing; the caller starts at
+  once and the pages are taken from a shared counter, so a late helper only takes less.
+  - Tried and dropped: spinning 20 / 100 / 1000 µs before the semaphore (`SC_SPIN_US` in a copy). Churn benchmark,
+    all threads: systems at 100K 12–13 → 9–10 µs, the frame at most -10 % (0.1 %), at 50 % +3 to 5 % (spinning
+    threads take SMT siblings from working ones?), at 1M nothing. CPU time of the run 1.2 → 5.1 s (100K).
+- **Scaling, measured:** systems at 1M, no changes, 482 → 59 µs on all 16 threads of the 5800X (8.2x; flecs 5.2x).
+  100K: 47 → 10 µs, about 10 µs being the fixed cost of two parallel loops.
+- [ ] Not measured: uneven work per entity (what taking pages from a shared counter should handle well), more than
+  16 threads, against a pool of its own such as TBB or OpenMP.
+
+## Random access
+
+`ecs_compare`, 50 samples, the 5800X, `b3e1fef` + `bab495e`:
+
+- `get 1 component, random order`, 100K, one thread: sc 3.9 ns per entity, EnTT 10.6, flecs 22.3.
+- `1 system, looks up another entity`, 1M: one thread sc 1.2 ns, EnTT 18.2, flecs 62.8; all threads sc 0.19, flecs
+  4.6. Index → page → slot is one load per column that depends on nothing before it, so many are in flight at once.
+- `World::get` and `Query::get` do not check in release builds whether the entity has the component; EnTT's
+  `registry.get` neither, flecs goes through its entity index and checks more. Part of the gap to flecs is that.
+
+## ecs_benchmark: what its numbers say
+
+- **Iterate\* compare code generation, not iteration:** under GCC `benchmark::DoNotOptimize(T&)` is `asm "+m,r"` for
+  types up to 8 bytes, and GCC picks the alternative per loop. With `m` the loop only computes addresses (flecs
+  IterateTwoComponents: 4 instructions per entity, no load), with `r` it loads and stores every component. Before
+  `b3e1fef` the full-page path of ecs got `r` (0.73 ns per entity against 0.22); taking the page pointers by copy
+  gave `m` as well. With a body that writes the components, sc 0.16–0.18 ns per entity at full pages, flecs
+  0.25–0.27 (flecs stores a spilled register per iteration). A TODO at `dummy_each` of the benchmark says so; until
+  the harness has a real body, do not quote its Iterate numbers.
+- **Create hints and `LocalEdit` in the factory measured neutral** (ecs_benchmark `d7e329c`): systems unchanged
+  within noise, `CreateEntities` 6 % slower from 64K on with `create(components...)`; `LocalEdit` against `World`
+  ±1 % (for components without destructor or hooks `eraseAt` and `eraseWithoutBit` do the same). mustache's factory
+  uses `create<...>()` the same way, so the hint is no unfair advantage.
+- [ ] Give EnTT the scheduler of sc for the parallel benchmarks; name it "entt + sc::threading" in the report.
+  Structural changes stay one-threaded there (its pools are not thread safe).
+- [ ] Tags against flags: a state on 1 / 10 / 50 % of the entities as a tag (sc, flecs) and as a bool in a
+  component every entity has (flecs). Expected: the loop over a rare tag is far shorter in sc, flecs pays a move per
+  change with a tag and a test per entity with a flag; derived from the density measurements, not measured.
+
+## Before going public
+
+- [ ] **README:** the example still uses `Change<Frozen>` and the text explains `Modify`, both replaced by `Edit` and
+  `LocalEdit` in `2db7fd7`; copied as it is, it does not compile.
+- [ ] **When to use what:** `Edit`, `LocalEdit`, `Commands` in a few sentences, with the numbers of the comments
+  (`Edit::modify` 6.4 ns, `LocalEdit::modify` 2.2, `Query::get` 1.1; `Commands` where many threads hit few
+  entities).
+- [ ] **Benchmarks reproducible:** hardware, compiler, flags, the command for `scripts/ecs_compare.py`; say where flecs
+  is ahead (nearly static worlds, loops over randomly mixed components); show EnTT with view and with group.
+- [ ] **Without meson:** list the sources of `src/meson.build`, include paths and dependencies; point to
+  `src/structured-chaos/CMakeLists.txt` of ecs_benchmark as a CMake example (not maintained here); a wrap file and
+  `pkg.generate()` for meson and pkg-config users.
+
+## Tools and demos
+
+- [ ] **Stats in the scheduler, an ImGui overview:** the stages as a graph with the reason for every edge ("A writes
+  Health, B reads it"), time per system as median and 99th percentile over ~120 frames, the time of the `Commands`
+  of each stage with their number; later a timeline per thread (who took which pages, where threads wait). Measured
+  per system and stage, never per entity, a ring buffer per thread; behind `CHAOS_STATS_ENABLED`. Tracy zones at the
+  same places give the timeline for free.
+- [ ] **Ant colony as demo and torture test:** many agents that change state all the time (tags), are born and die,
+  look up others (food, enemies, their colony as relation), a pheromone grid as global or resource, all through
+  parallel systems and `Commands`. The same simulation with flecs and EnTT doubles as a benchmark. Start with a thin
+  renderer (instancing: 1M ants are an 8 MB buffer per frame) behind a small interface; the own graphics engine can
+  replace it later.
+- [ ] **Saving by dumping pages:** possible because nothing moves, entity handles in components stay valid. Needs: only
+  trivially copyable components (or a serializer per type), a stable id per component type (`componentIndex` depends
+  on the order of first use), a version per type with migration, the state of the allocator (generations, free
+  lists, areas, order of pages), resources by key, checks when loading (save files are input). Within one running
+  session (rollback, replay, rewind in an editor) most of it falls away; likely much faster than for an ECS that
+  reorders entities, not measured.
+- [ ] **A game to try it in:** EnTT games to port: tddod (MIT, tower defense, data oriented), EnTT-Pacman (MIT),
+  MonsterWar (CC0), openblack (GPL-3.0, Black & White, large and active); flecs: tower_defense of its author (MIT).
