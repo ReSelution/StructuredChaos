@@ -442,15 +442,46 @@ namespace sc::ecs::internal {
     return next;
   }
 
+  inline constexpr size_t NO_COMPONENT_INDEX = ~size_t{0};
+
+  // The index of the type once it has one. Initialized as a constant, so
+  // that componentIndex looks at no guard: as a static of componentIndex,
+  // every get, emplace and erase checked the guard of its initialization,
+  // and the call that initializes it was in every loop of them. Getting a
+  // component of 100K entities in random order took 364 instead of 284 µs
+  // with GCC, 431 instead of 378 µs with Clang; adding and removing a
+  // component on 100K entities through Commands took Clang 45.7 instead of
+  // 37.4M instructions, 2.33 instead of 1.74 ms (GCC 1.66 to 1.70 ms either
+  // way).
+  template<typename Component>
+  inline std::atomic<size_t> componentIndexOf{NO_COMPONENT_INDEX};
+
+  // componentIndex the first time for the type, out of the way of the
+  // loops it is in. Of threads that race for it, those that lose leave the
+  // index they took unused.
+  template<typename Component>
+  SC_NOINLINE SC_COLD size_t assignComponentIndex() {
+    const size_t taken = makeComponentIndex();
+    size_t expected = NO_COMPONENT_INDEX;
+    if (componentIndexOf<Component>.compare_exchange_strong(expected, taken, std::memory_order_relaxed)) {
+      return taken;
+    }
+    return expected;
+  }
+
   // A number for every component type of the program, the same in all worlds:
   // where a world keeps the column of the type, found without a search, and
   // what the scheduler tells the components of two systems apart by. Throws
   // std::length_error for a type beyond MAX_COMPONENT_TYPES, the first time
-  // it is used and every time after.
+  // it is used and every time after. Inlined: GCC kept part of it a call
+  // otherwise, and the gets above took 299 instead of 288 µs.
   template<typename Component>
-  size_t componentIndex() {
-    static const size_t index = makeComponentIndex();
-    return index;
+  SC_FORCE_INLINE size_t componentIndex() {
+    const size_t index = componentIndexOf<Component>.load(std::memory_order_relaxed);
+    if (index != NO_COMPONENT_INDEX) [[likely]] {
+      return index;
+    }
+    return assignComponentIndex<Component>();
   }
 
   inline std::atomic<size_t> nextGlobalIndex{0};
@@ -502,6 +533,9 @@ namespace sc::ecs::internal {
   // A number for every set of components the program creates entities with,
   // the same in all worlds and whatever the order of the types: where a
   // world keeps the area of the set, found without a search.
+  // TODO: the same guard of a static on every call as componentIndex had,
+  // which made gets 20 % slower: create of components and areaOf look at it
+  // for every entity. Not measured here.
   template<typename... Components>
   size_t setIndex() {
     static const size_t index = makeSetIndex({componentIndex<Components>()...});
