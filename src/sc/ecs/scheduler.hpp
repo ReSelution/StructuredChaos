@@ -1168,7 +1168,7 @@ namespace sc::ecs {
 
     // Does nothing if the entity does not exist any more by then.
     void destroy(Entity entity) const {
-      withList([&](internal::CommandList &list) { list.destroy(entity); });
+      withList(m_lists, [&](internal::CommandList &list) { list.destroy(entity); });
     }
 
     // Makes the component now, from the arguments, and gives it to the entity
@@ -1178,7 +1178,8 @@ namespace sc::ecs {
     template<typename Component, typename... Args>
     void emplace(Entity entity, Args &&...args) const {
       auto &column = m_world->template column<Component>();
-      withList([&](internal::CommandList &list) { list.emplace(entity, column, std::forward<Args>(args)...); });
+      withList(m_lists,
+               [&](internal::CommandList &list) { list.emplace(entity, column, std::forward<Args>(args)...); });
     }
 
     // The same, but an entity that has the component by then gets the made
@@ -1193,8 +1194,9 @@ namespace sc::ecs {
     template<typename Component, typename... Args>
     void emplaceOrReplace(Entity entity, Args &&...args) const {
       auto &column = m_world->template column<Component>();
-      withList(
-          [&](internal::CommandList &list) { list.emplaceOrReplace(entity, column, std::forward<Args>(args)...); });
+      withList(m_lists, [&](internal::CommandList &list) {
+        list.emplaceOrReplace(entity, column, std::forward<Args>(args)...);
+      });
     }
 
     // Does nothing if the entity does not exist any more by then or does not
@@ -1204,7 +1206,7 @@ namespace sc::ecs {
     template<typename Component>
     void erase(Entity entity) const {
       auto &column = m_world->template column<Component>();
-      withList([&](internal::CommandList &list) { list.erase(entity, column); });
+      withList(m_lists, [&](internal::CommandList &list) { list.erase(entity, column); });
     }
 
     // Calls the function with the component of the entity later, as
@@ -1235,20 +1237,28 @@ namespace sc::ecs {
                     "the function takes the component by reference");
       static_assert(internal::Column<Component>::HAS_VALUE, "a component without members has no value to modify");
       auto &column = m_world->template column<Component>();
-      withList([&](internal::CommandList &list) { list.modify(entity, column, std::forward<Function>(function)); });
+      withList(m_lists,
+               [&](internal::CommandList &list) { list.modify(entity, column, std::forward<Function>(function)); });
     }
 
   private:
     // Calls the function with the list of the calling thread. The last list
     // is shared by the threads outside the pool, which lock it for the call.
+    //
+    // Static, with the lists given: as a member, the address of the Commands
+    // went to the instances that stayed calls, so a loop that takes Commands
+    // by value copied them to the stack for every entity, and Clang did so
+    // before the function looked at the entity. 1M entities on all threads
+    // of which none records anything (the churn of ecs_compare): Clang 84
+    // instead of 148 µs, GCC 86 µs either way; recording the same.
     template<typename Function>
-    void withList(Function &&function) const {
+    static void withList(std::span<internal::CommandList> lists, Function &&function) {
       const uint32_t thread = threading::threadId();
-      if (thread < m_lists.size() - 1) [[likely]] {
-        function(m_lists[thread]);
+      if (thread < lists.size() - 1) [[likely]] {
+        function(lists[thread]);
         return;
       }
-      internal::CommandList &shared = m_lists.back();
+      internal::CommandList &shared = lists.back();
       const std::scoped_lock lock{shared.mutex()};
       function(shared);
     }
