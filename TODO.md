@@ -30,8 +30,6 @@ out from the pages instead of counted (its own cost not measured).
 the pool with the cache's loader or the one given; afterwards a system only asks `ready()`. `find` and `get` read
 without a lock, `forceLoad`, `apply` and `collect` change the map and must not run next to them.
 
-- [ ] **A limit on the loads in flight:** every new key starts a task right away; 500 new textures after a spawn are
-  500 tasks next to the `parallelFor` of the frame. The rest could wait in the cache instead of the queue of the pool.
 - [ ] **A debug check for pointers of `get`:** they are good until the next `forceLoad` or `collect` (in a system, the
   end of its stage); nothing catches one that is kept longer.
 - [ ] **`forceLoad` while a loader on the pool uses the old resource:** the scheduler keeps systems apart, not tasks.
@@ -50,6 +48,12 @@ Done: `Resources<T, Key, Hash>` as a system parameter after `scheduler.provide(c
 measured); GPU resources go through `memory::DeletionQueue` in their destructor, the cache knows no frames; whoever
 waits for a task that has not started runs the loader itself.
 
+- **At most maxLoads loads of bind on the pool at once** (constructor, default a quarter of the workers when a load
+  starts, at least one); the others wait in the cache, and whoever waits for one loads it itself. A loader that
+  blocks keeps its worker from the frame's `parallelFor`. Measured with 500 loads that sleep 2 ms (as a blocking read
+  would) bound at once, then 40 frames of a `parallelFor` of 1600 x 10 us (clang, 15 workers): no loads 1.09-1.11 ms
+  median per frame; maxLoads 15 (as before) 2.94; default (3) 1.22-1.25; 1 1.09-1.15. The loads take as much longer:
+  all loads + 40 frames 106 / 353 / 1 034 ms. Not measured with loaders that decode on the CPU.
 - **`bind` of a key apply has taken in** looks into the map under a lock of the calling thread (64, for threadIds
   below 64; other threads take the lock of the shard), which apply, collect and forceLoad take as well. Before, the
   lock of the key's shard. ns per bind + drop of the handle, median thread, 1024 keys / one key (clang, 16 hardware

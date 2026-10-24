@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -537,8 +538,8 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     CHECK(loads.load() <= 1);
   }
 
-  SECTION("a task that shutdown drops fails its resource") {
-    ResourceCache<Texture> cache;
+  SECTION("a task that shutdown drops fails its resource, also one that waits in the cache") {
+    ResourceCache<Texture> cache(1, 1);
     const size_t workers = sc::threading::threadSlots() - 1;
     if (workers == 0) {
       SKIP("No pool threads to keep busy");
@@ -560,21 +561,96 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     }
 
     std::atomic<int> loads{0};
-    ResourceHandle<Texture> texture = cache.bind(1, [&] {
+    const auto loader = [&] {
       loads.fetch_add(1);
       return Texture(1);
-    });
+    };
+    ResourceHandle<Texture> texture = cache.bind(1, loader);
+    // With one load at a time, this one waits in the cache.
+    ResourceHandle<Texture> waiting = cache.bind(2, loader);
     sc::threading::shutdown();
 
     CHECK(texture.failed());
     CHECK(!texture.ready());
     CHECK_THROWS_AS(texture.wait(), std::runtime_error);
+    CHECK(waiting.failed());
     CHECK(loads.load() == 0);
-    CHECK(cache.size() == 1);
+    CHECK(cache.size() == 2);
     texture.reset();
-    CHECK(cache.collect() == 1);
+    waiting.reset();
+    CHECK(cache.collect() == 2);
     // The tests after this one expect a pool.
     sc::threading::init();
+  }
+  CHECK(Texture::alive.load() == 0);
+}
+
+TEST_CASE("ECS Resource Loads In Flight", "[ecs][resource][threading]") {
+  sc::threading::init();
+  Texture::alive = 0;
+  const size_t workers = sc::threading::threadSlots() - 1;
+  if (workers < 2) {
+    SKIP("Needs two workers for loads to run at once");
+  }
+
+  // Binds 40 keys whose loaders take a while and returns how many of them
+  // ran at once at most.
+  const auto mostAtOnce = [](ResourceCache<Texture> &cache) {
+    std::atomic<size_t> running{0};
+    std::atomic<size_t> most{0};
+    std::vector<ResourceHandle<Texture>> handles;
+    for (int key = 0; key < 40; ++key) {
+      handles.push_back(cache.bind(static_cast<uint64_t>(key), [&, key] {
+        const size_t now = running.fetch_add(1) + 1;
+        size_t seen = most.load();
+        while (seen < now && !most.compare_exchange_weak(seen, now)) {
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        running.fetch_sub(1);
+        return Texture(key);
+      }));
+    }
+    sc::threading::waitUntilFinished();
+    for (int key = 0; key < 40; ++key) {
+      CHECK(handles[static_cast<size_t>(key)]->id == key);
+    }
+    return most.load();
+  };
+
+  SECTION("at most maxLoads at once") {
+    ResourceCache<Texture> cache(1, 2);
+    const size_t most = mostAtOnce(cache);
+    CHECK(most >= 1);
+    CHECK(most <= 2);
+  }
+
+  SECTION("a quarter of the workers by default") {
+    ResourceCache<Texture> cache;
+    const size_t most = mostAtOnce(cache);
+    CHECK(most >= 1);
+    CHECK(most <= std::max<size_t>(1, workers / 4));
+  }
+
+  SECTION("one who waits loads it while it waits in the cache") {
+    ResourceCache<Texture> cache(1, 1);
+    std::atomic<bool> release{false};
+    const ResourceHandle<Texture> first = cache.bind(1, [&] {
+      release.wait(false);
+      return Texture(1);
+    });
+    std::thread::id loadedOn;
+    const ResourceHandle<Texture> second = cache.bind(2, [&] {
+      loadedOn = std::this_thread::get_id();
+      return Texture(2);
+    });
+    second.wait();
+    CHECK(loadedOn == std::this_thread::get_id());
+    CHECK(!first.ready());
+
+    release.store(true);
+    release.notify_all();
+    first.wait();
+    sc::threading::waitUntilFinished();
   }
   CHECK(Texture::alive.load() == 0);
 }
