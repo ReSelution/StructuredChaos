@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <concepts>
 #include <condition_variable>
 #include <cstddef>
@@ -13,13 +14,19 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <system_error>
+#include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <ankerl/unordered_dense.h>
 
 #include "sc/hash/hash.hpp"
+#include "sc/io/file_reader.hpp"
 #include "sc/threading/threading.hpp"
 
 namespace sc::ecs {
@@ -34,6 +41,13 @@ namespace sc::ecs {
   template<typename Loader, typename T>
   concept ResourceLoader = std::invocable<Loader &> && (std::same_as<std::invoke_result_t<Loader &>, T> ||
                                                         std::constructible_from<T, std::invoke_result_t<Loader &>>);
+
+  // What a ResourceCache of T makes one of from the bytes of a file, the
+  // same way.
+  template<typename Build, typename T>
+  concept ResourceBuilder = std::invocable<Build &, std::span<const std::byte>> &&
+                            (std::same_as<std::invoke_result_t<Build &, std::span<const std::byte>>, T> ||
+                             std::constructible_from<T, std::invoke_result_t<Build &, std::span<const std::byte>>>);
 
 } // namespace sc::ecs
 
@@ -78,6 +92,9 @@ namespace sc::ecs::internal {
     // pending.
     void (*runPending)(void *pending, PendingRun run) noexcept = nullptr;
     void *pending = nullptr;
+    // The reader that reads the file of the entry, while it does; claimed
+    // is true meanwhile, and pending is set only once the bytes are there.
+    std::atomic<io::FileReader *> reading{nullptr};
     std::exception_ptr error;
     alignas(T) std::byte storage[sizeof(T)];
 
@@ -174,9 +191,23 @@ namespace sc::ecs::internal {
     // for a task none of them is free to run. Otherwise a thread that waits
     // joins a parallelFor of another thread meanwhile, the loader's among
     // them, and only sleeps if there is none. Throws what the loader threw.
+    //
+    // While its file is read, it waits in the reader's wait instead: the
+    // bytes come only to whoever polls it. Throws what a done of another
+    // read of that reader throws, too.
     void wait() {
-      claim(PendingRun::Load);
-      while (state.load(std::memory_order_acquire) == ResourceState::Loading) {
+      while (true) {
+        claim(PendingRun::Load);
+        if (state.load(std::memory_order_acquire) != ResourceState::Loading) {
+          break;
+        }
+        if (io::FileReader *const files = reading.load(std::memory_order_acquire)) {
+          // 0 while another thread is in the done of this one.
+          if (files->wait() == 0) {
+            std::this_thread::yield();
+          }
+          continue;
+        }
         const auto loaded = [this] { return state.load(std::memory_order_acquire) != ResourceState::Loading; };
         if (!threading::helpThread(loaded)) {
           state.wait(ResourceState::Loading, std::memory_order_acquire);
@@ -386,9 +417,24 @@ namespace sc::ecs {
     // Everything there is goes. Waits for the loads on the pool first. No
     // handle may be left, and no member running.
     ~ResourceCache() {
-      {
-        std::unique_lock lock(m_taskMutex);
-        m_tasksDone.wait(lock, [this] { return m_tasks == 0; });
+      // Reads of files come only with a poll of their reader, which nobody
+      // else may do any more.
+      while (true) {
+        std::vector<io::FileReader *> files;
+        {
+          std::unique_lock lock(m_taskMutex);
+          if (m_tasksDone.wait_for(lock, std::chrono::milliseconds(1), [this] { return m_tasks == 0; })) {
+            break;
+          }
+          files = m_files;
+        }
+        for (io::FileReader *const reader: files) {
+          try {
+            (void) reader->poll();
+            // NOLINTNEXTLINE(bugprone-empty-catch): what a done of somebody else throws is not ours to handle
+          } catch (...) {
+          }
+        }
       }
       const auto destroyAll = [](const Map &map) {
         for (const auto &[key, entry]: map) {
@@ -452,12 +498,12 @@ namespace sc::ecs {
       requires ResourceLoader<std::decay_t<Loader>, T> && std::constructible_from<std::decay_t<Loader>, Loader>
     [[nodiscard]] ResourceHandle<T> bind(const Key &key, uint8_t owner, Loader &&loader) const {
       assert(owner < m_owners);
-      using Job = PendingLoad<std::decay_t<Loader>>;
       const KeyHash hash = m_published.hash_for(key);
       if (ResourceHandle<T> published = bindPublished(key, hash)) {
         assert(published.m_entry->owner == owner);
         return published;
       }
+      using Job = PendingLoad<std::decay_t<Loader>>;
       Shard &shard = shardOf(hash);
       Entry *entry;
       bool made = false;
@@ -491,6 +537,38 @@ namespace sc::ecs {
         startParked(entry);
       }
       return handle;
+    }
+
+    // The resource of the key, made by build from the bytes of the file at
+    // path if it is new, for owner 0.
+    template<typename Build>
+      requires ResourceBuilder<std::decay_t<Build>, T> && std::constructible_from<std::decay_t<Build>, Build>
+    [[nodiscard]] ResourceHandle<T> bind(const Key &key, io::FileReader &files, std::string path, Build &&build) const {
+      return bind(key, 0, files, std::move(path), std::forward<Build>(build));
+    }
+
+    // As bind with a loader, but in two steps if the key is new: files reads
+    // the file at path, without a worker that waits for it, and once a poll
+    // of files has the bytes, a task of the pool calls a copy of build with
+    // them, under maxLoads as any load; without workers, in that poll. The
+    // handle is failed() with a std::system_error if the file cannot be
+    // read.
+    //
+    // Somebody has to poll files: the scheduler, the game, or the wait of a
+    // handle, which does while the file is read. The destructor of the cache
+    // polls the readers of reads still under way, so files must live until
+    // the cache is gone or its reads are done.
+    template<typename Build>
+      requires ResourceBuilder<std::decay_t<Build>, T> && std::constructible_from<std::decay_t<Build>, Build>
+    [[nodiscard]] ResourceHandle<T> bind(const Key &key, uint8_t owner, io::FileReader &files, std::string path,
+                                         Build &&build) const {
+      assert(owner < m_owners);
+      const KeyHash hash = m_published.hash_for(key);
+      if (ResourceHandle<T> published = bindPublished(key, hash)) {
+        assert(published.m_entry->owner == owner);
+        return published;
+      }
+      return bindFresh(key, hash, owner, files, std::move(path), std::forward<Build>(build));
     }
 
     // The resource of the key, loaded by loader() on the calling thread if
@@ -872,6 +950,138 @@ namespace sc::ecs {
       return nullptr;
     }
 
+    // What bind with a file does after bindPublished.
+    template<typename Build>
+    [[nodiscard]] ResourceHandle<T> bindFresh(const Key &key, KeyHash hash, uint8_t owner, io::FileReader &files,
+                                              std::string path, Build &&build) const {
+      Entry *made = nullptr;
+      ResourceHandle<T> handle = findOrMake(key, hash, owner, made, [&](Entry &entry) {
+        // Nobody may claim the load before the bytes are there.
+        entry.claimed.store(true, std::memory_order_relaxed);
+        entry.reading.store(&files, std::memory_order_relaxed);
+        // One count for the caller, one for the read.
+        entry.acquire();
+      });
+      if (made != nullptr) {
+        startRead(made, files, std::move(path), std::forward<Build>(build));
+      }
+      return handle;
+    }
+
+    // The rest of bind once bindPublished has found nothing, under the lock
+    // of the key's shard: the handle of the key from either map, or of a new
+    // entry, which prepare gives its load; made is that entry then, and the
+    // caller starts its load outside the lock. Starts a parked load it finds
+    // again.
+    template<typename Prepare>
+    [[nodiscard]] ResourceHandle<T> findOrMake(const Key &key, KeyHash hash, uint8_t owner, Entry *&made,
+                                               Prepare &&prepare) const {
+      Shard &shard = shardOf(hash);
+      Entry *entry;
+      bool restart = false;
+      {
+        const std::scoped_lock lock(shard.mutex);
+        entry = findLocked(shard, key, hash);
+        if (entry != nullptr) {
+          assert(entry->owner == owner);
+          restart = entry->acquireFound();
+        } else {
+          auto fresh = std::make_unique<Entry>(key, owner, &m_unused[owner].head);
+          prepare(*fresh);
+          try {
+            shard.fresh.emplace(key, fresh.get());
+          } catch (...) {
+            if (fresh->pending != nullptr) {
+              fresh->runPending(fresh->pending, internal::PendingRun::Free);
+            }
+            throw;
+          }
+          m_freshCount.fetch_add(1, std::memory_order_relaxed);
+          entry = made = fresh.release();
+        }
+      }
+      ResourceHandle<T> handle(entry);
+      // Not under the lock, as the load of a new entry.
+      if (restart) {
+        startParked(entry);
+      }
+      return handle;
+    }
+
+    // What the task of a file read calls: build with the bytes.
+    template<typename Build>
+    struct BuildFromFile {
+      io::FileBytes file;
+      Build build;
+
+      decltype(auto) operator()() { return build(file.bytes()); }
+    };
+
+    // Hands the file of a new entry to the reader, with a count of the entry
+    // and counted in m_tasks until its done has run.
+    template<typename Build>
+    void startRead(Entry *entry, io::FileReader &files, std::string path, Build &&build) const {
+      {
+        const std::scoped_lock lock(m_taskMutex);
+        if (std::ranges::find(m_files, &files) == m_files.end()) {
+          m_files.push_back(&files);
+        }
+        ++m_tasks;
+      }
+      try {
+        files.read(path,
+                   [this, entry, path, build = std::decay_t<Build>(std::forward<Build>(build))](
+                       io::FileResult file) mutable { bytesRead(entry, std::move(file), path, std::move(build)); });
+      } catch (...) {
+        readOver(entry, std::current_exception());
+      }
+    }
+
+    // The done of a read, on the thread that polls the reader. Once the
+    // bytes are there, the load is left in the entry as for bind with a
+    // loader, and its task takes over the count of the read.
+    template<typename Build>
+    void bytesRead(Base *entry, io::FileResult file, const std::string &path, Build build) const noexcept {
+      if (!file) {
+        readOver(entry, std::make_exception_ptr(std::system_error(file.error(), "ResourceCache: reading " + path)));
+        return;
+      }
+      using Job = PendingLoad<BuildFromFile<Build>>;
+      try {
+        auto job = std::make_unique<Job>(BuildFromFile<Build>{.file = std::move(*file), .build = std::move(build)});
+        job->entry = static_cast<Entry *>(entry);
+        entry->runPending = &Job::run;
+        entry->pending = job.release();
+      } catch (...) {
+        readOver(entry, std::current_exception());
+        return;
+      }
+      // In this order for wait: once reading is null, the load can be
+      // claimed.
+      entry->unpark();
+      entry->reading.store(nullptr, std::memory_order_release);
+      // noexcept on purpose, as PendingLoad::run: a task that cannot be
+      // detached for want of memory would leave the entry loading for ever.
+      startTask(entry);
+      readDone();
+    }
+
+    // A read that ends without bytes: the entry fails and lets go of the
+    // count of the read.
+    void readOver(Base *entry, std::exception_ptr error) const noexcept {
+      fail(entry, std::move(error));
+      entry->reading.store(nullptr, std::memory_order_release);
+      entry->release();
+      readDone();
+    }
+
+    void readDone() const noexcept {
+      const std::scoped_lock lock(m_taskMutex);
+      if (--m_tasks == 0) {
+        m_tasksDone.notify_all();
+      }
+    }
+
     // The handle of a key apply has taken in, under the reader lock of the
     // calling thread; none for any other key, and for every key on a thread
     // without a reader lock.
@@ -1020,6 +1230,9 @@ namespace sc::ecs {
     // the count of their task, under m_taskMutex.
     mutable size_t m_running = 0;
     mutable std::deque<Base *> m_waiting;
+    // The readers files of bind have been given to, for the destructor,
+    // under m_taskMutex.
+    mutable std::vector<io::FileReader *> m_files;
     mutable std::condition_variable m_tasksDone;
   };
 

@@ -5,12 +5,18 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
 #include "sc/ecs/resource.hpp"
 #include "sc/ecs/world.hpp"
+#include "sc/io/file_reader.hpp"
 #include "sc/threading/threading.hpp"
 
 namespace {
@@ -34,6 +40,42 @@ namespace {
   struct Material {
     ResourceHandle<Texture> albedo;
   };
+
+  // Files under a directory of their own in the temp directory, removed at
+  // the end. A file's first byte is the id of its texture.
+  struct TextureFiles {
+    std::filesystem::path dir;
+
+    TextureFiles() :
+        dir(std::filesystem::temp_directory_path() /
+            ("sc_resource_" + std::to_string(reinterpret_cast<uintptr_t>(this)))) {
+      std::filesystem::create_directories(dir);
+    }
+
+    ~TextureFiles() {
+      std::error_code ignored;
+      std::filesystem::remove_all(dir, ignored);
+    }
+
+    TextureFiles(const TextureFiles &) = delete;
+    TextureFiles &operator=(const TextureFiles &) = delete;
+
+    [[nodiscard]] std::string write(int id) const {
+      const std::filesystem::path file = dir / (std::to_string(id) + ".tex");
+      std::ofstream stream(file, std::ios::binary);
+      stream.put(static_cast<char>(id));
+      stream << std::string(1000, 'x');
+      return file.string();
+    }
+
+    [[nodiscard]] std::string missing() const { return (dir / "missing.tex").string(); }
+  };
+
+  // Called on workers, where Catch's macros must not be used: a file of
+  // the wrong size gives -1, which the CHECKs of the id see.
+  Texture fromBytes(std::span<const std::byte> bytes) {
+    return Texture(bytes.size() == 1001 ? static_cast<int>(bytes[0]) : -1);
+  }
 
 } // namespace
 
@@ -651,6 +693,139 @@ TEST_CASE("ECS Resource Loads In Flight", "[ecs][resource][threading]") {
     release.notify_all();
     first.wait();
     sc::threading::waitUntilFinished();
+  }
+  CHECK(Texture::alive.load() == 0);
+}
+
+TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
+  sc::threading::init();
+  Texture::alive = 0;
+  const TextureFiles textures;
+  sc::io::FileReader files;
+  std::atomic<int> builds{0};
+  const auto build = [&](std::span<const std::byte> bytes) {
+    builds.fetch_add(1);
+    return fromBytes(bytes);
+  };
+
+  SECTION("the handle comes first, the bytes with a poll, the texture from a task") {
+    ResourceCache<Texture> cache;
+    const ResourceHandle<Texture> texture = cache.bind(1, files, textures.write(1), build);
+    REQUIRE(static_cast<bool>(texture));
+    CHECK(!texture.ready());
+    while (!texture.ready()) {
+      (void) files.poll();
+      std::this_thread::yield();
+    }
+    CHECK(texture->id == 1);
+    CHECK(builds.load() == 1);
+  }
+
+  SECTION("wait polls the reader itself") {
+    ResourceCache<Texture> cache;
+    const ResourceHandle<Texture> texture = cache.bind(2, files, textures.write(2), build);
+    texture.wait();
+    CHECK(texture->id == 2);
+  }
+
+  SECTION("a key bound again is read once") {
+    ResourceCache<Texture> cache;
+    const std::string path = textures.write(3);
+    const ResourceHandle<Texture> first = cache.bind(3, files, path, build);
+    const ResourceHandle<Texture> second = cache.bind(3, files, path, build);
+    CHECK(first == second);
+    second.wait();
+    sc::threading::waitUntilFinished();
+    CHECK(builds.load() == 1);
+    CHECK(files.pending() == 0);
+  }
+
+  SECTION("a file that cannot be read fails the resource") {
+    ResourceCache<Texture> cache;
+    ResourceHandle<Texture> texture = cache.bind(4, files, textures.missing(), build);
+    try {
+      texture.wait();
+      FAIL("no exception");
+    } catch (const std::system_error &error) {
+      CHECK(error.code() == std::errc::no_such_file_or_directory);
+    }
+    CHECK(texture.failed());
+    CHECK(builds.load() == 0);
+    texture.reset();
+    CHECK(cache.collect() == 1);
+  }
+
+  SECTION("a build that throws fails the resource") {
+    ResourceCache<Texture> cache;
+    const ResourceHandle<Texture> texture =
+        cache.bind(5, files, textures.write(5),
+                   [](std::span<const std::byte>) -> Texture { throw std::runtime_error("bad texture"); });
+    CHECK_THROWS_AS(texture.wait(), std::runtime_error);
+    CHECK(texture.failed());
+  }
+
+  SECTION("a read whose handles went is parked once its bytes are there") {
+    ResourceCache<Texture> cache;
+    const std::string path = textures.write(6);
+    cache.bind(6, files, path, build).reset();
+    while (files.pending() != 0) {
+      (void) files.wait();
+    }
+    sc::threading::waitUntilFinished();
+    CHECK(builds.load() == 0);
+
+    // Bound again, it is built from the bytes it has, without a read.
+    const ResourceHandle<Texture> texture = cache.bind(6, files, path, build);
+    CHECK(files.pending() == 0);
+    texture.wait();
+    CHECK(texture->id == 6);
+    CHECK(builds.load() == 1);
+  }
+
+  SECTION("the destructor of the cache polls for reads under way") {
+    {
+      ResourceCache<Texture> cache;
+      cache.bind(7, files, textures.write(7), build).reset();
+    }
+    CHECK(files.pending() == 0);
+  }
+
+  SECTION("many threads bind files, one polls") {
+    ResourceCache<Texture> cache;
+    constexpr int KEYS = 100;
+    std::vector<std::string> paths;
+    for (int key = 0; key < KEYS; ++key) {
+      paths.push_back(textures.write(key));
+    }
+    std::vector<ResourceHandle<Texture>> handles(1000);
+    sc::threading::parallelFor(handles.size(), 8, 4, [&](size_t first, size_t last) {
+      for (size_t i = first; i < last; ++i) {
+        const auto key = static_cast<int>(i % KEYS);
+        handles[i] = cache.bind(static_cast<uint64_t>(key), files, paths[static_cast<size_t>(key)], build);
+      }
+    });
+    for (size_t i = 0; i < handles.size(); ++i) {
+      handles[i].wait();
+      CHECK(handles[i]->id == static_cast<int>(i % KEYS));
+    }
+    sc::threading::waitUntilFinished();
+    CHECK(builds.load() == KEYS);
+  }
+
+  SECTION("without workers the texture is built in the poll") {
+    sc::threading::shutdown();
+    sc::threading::init(0);
+    {
+      ResourceCache<Texture> cache;
+      const ResourceHandle<Texture> texture = cache.bind(8, files, textures.write(8), build);
+      while (files.pending() != 0) {
+        (void) files.wait();
+      }
+      CHECK(texture.ready());
+      CHECK(texture->id == 8);
+    }
+    sc::threading::shutdown();
+    sc::threading::init();
   }
   CHECK(Texture::alive.load() == 0);
 }
