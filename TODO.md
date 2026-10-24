@@ -30,9 +30,6 @@ out from the pages instead of counted (its own cost not measured).
 the pool with the cache's loader or the one given; afterwards a system only asks `ready()`. `find` and `get` read
 without a lock, `forceLoad`, `apply` and `collect` change the map and must not run next to them.
 
-- [ ] **`bind` of one key on all threads** takes the lock of one shard: 1 375 ns per bind on 16 threads, 382 on 8,
-  9.2 on one (clang). Once per handle, so a spawn of 100 000 entities with one material on 16 threads would take about
-  9 ms once (estimated from these, not measured as a spawn). If that shows, a lock-free table for the fresh keys.
 - [ ] **A limit on the loads in flight:** every new key starts a task right away; 500 new textures after a spawn are
   500 tasks next to the `parallelFor` of the frame. The rest could wait in the cache instead of the queue of the pool.
 - [ ] **A debug check for pointers of `get`:** they are good until the next `forceLoad` or `collect` (in a system, the
@@ -56,6 +53,15 @@ Done: `Resources<T, Key, Hash>` as a system parameter after `scheduler.provide(c
 measured); GPU resources go through `memory::DeletionQueue` in their destructor, the cache knows no frames; whoever
 waits for a task that has not started runs the loader itself.
 
+- **`bind` of a key apply has taken in** looks into the map under a lock of the calling thread (64, for threadIds
+  below 64; other threads take the lock of the shard), which apply, collect and forceLoad take as well. Before, the
+  lock of the key's shard. ns per bind + drop of the handle, median thread, 1024 keys / one key (clang, 16 hardware
+  threads, keys mixed as sc::hash gives them): 16 threads 123-128 / 1 381-1 386 before, 56-58 / 776-790 now; 8
+  threads 62-69 / 391-407 before, 31-46 / 320-328 now; one thread 13.3-15.6 / 10.6-11.0 before, 13.7-14.5 /
+  11.3-12.3 now. One key is now where a copy of its handle is (16 threads 833-842, 8 threads 341-347): what is left
+  is the count of the entry. The writers pay: every lock of the cache without contention, measured through `size()`,
+  403 ns before, 740 now; apply and collect take them at most once per stage, and only with new keys or unused
+  entries.
 - **The scheduler keeps readers and writers apart:** `Resources<const T>` reads the cache, `Resources<T>` writes it
   and runs in a stage of its own against every system that takes the cache; only `Resources<const T>` in a loop, a
   hook and a listener of an event a loop emits, as for `Global`. `run` calls `apply` of every provided cache after

@@ -265,8 +265,9 @@ namespace sc::ecs {
   // Which members may run at the same time:
   //
   //   - bind, load, size and everything of a ResourceHandle next to
-  //     everything, on any thread, also in a loader. bind takes a lock, so
-  //     it is for getting a handle once, not for every frame.
+  //     everything, on any thread, also in a loader. bind takes a lock,
+  //     of the calling thread for a key apply has taken in, so it is for
+  //     getting a handle once, not for every frame.
   //   - find and get next to each other and to the above, without a lock
   //     for keys apply has taken in. get writes nothing at all.
   //   - forceLoad, apply and collect next to none of find and get. The
@@ -320,7 +321,8 @@ namespace sc::ecs {
     explicit ResourceCache(uint8_t owners = 1) : ResourceCache(nullptr, owners) {}
 
     explicit ResourceCache(DefaultLoader loader, uint8_t owners = 1) :
-        m_owners(owners), m_unused(std::make_unique<UnusedList[]>(owners)), m_shards(std::make_unique<Shard[]>(SHARDS)),
+        m_owners(owners), m_unused(std::make_unique<UnusedList[]>(owners)),
+        m_readers(std::make_unique<ReaderLock[]>(READERS)), m_shards(std::make_unique<Shard[]>(SHARDS)),
         m_loader(std::move(loader)) {
       assert(owners != 0);
     }
@@ -379,8 +381,10 @@ namespace sc::ecs {
     // there already, it keeps the one it was loaded with, and debug builds
     // assert that it is the same.
     //
-    // Takes the lock of the key's shard, also when the key is there; other
-    // keys mostly have other locks.
+    // A key apply has taken in costs a lock of the calling thread only, which
+    // apply, collect and forceLoad take too, so threads that bind one key
+    // meet only on its count. A key bound since takes the lock of its shard;
+    // other keys mostly have other locks.
     //
     // threading::shutdown drops tasks that have not started: their
     // resources fail.
@@ -390,6 +394,10 @@ namespace sc::ecs {
       assert(owner < m_owners);
       using Job = PendingLoad<std::decay_t<Loader>>;
       const KeyHash hash = m_published.hash_for(key);
+      if (ResourceHandle<T> published = bindPublished(key, hash)) {
+        assert(published.m_entry->owner == owner);
+        return published;
+      }
       Shard &shard = shardOf(hash);
       Entry *entry;
       {
@@ -645,10 +653,23 @@ namespace sc::ecs {
       Map fresh;
     };
 
+    // A lock for each thread of the pool with a threadId below READERS, under
+    // which bind looks into m_published: threads that bind the same key do
+    // not meet on a lock. The other threads take the lock of the shard, under
+    // which m_published may be read as well.
+    static constexpr size_t READERS = 64;
+
+    struct alignas(64) ReaderLock {
+      std::mutex mutex;
+    };
+
     // Every lock, in order: what changes m_published.
     class AllLocks {
     public:
-      explicit AllLocks(const ResourceCache &cache) : m_shards(cache.m_shards.get()) {
+      explicit AllLocks(const ResourceCache &cache) : m_readers(cache.m_readers.get()), m_shards(cache.m_shards.get()) {
+        for (size_t reader = 0; reader < READERS; ++reader) {
+          m_readers[reader].mutex.lock();
+        }
         for (size_t shard = 0; shard < SHARDS; ++shard) {
           m_shards[shard].mutex.lock();
         }
@@ -658,12 +679,16 @@ namespace sc::ecs {
         for (size_t shard = SHARDS; shard-- > 0;) {
           m_shards[shard].mutex.unlock();
         }
+        for (size_t reader = READERS; reader-- > 0;) {
+          m_readers[reader].mutex.unlock();
+        }
       }
 
       AllLocks(const AllLocks &) = delete;
       AllLocks &operator=(const AllLocks &) = delete;
 
     private:
+      ReaderLock *m_readers;
       Shard *m_shards;
     };
 
@@ -738,6 +763,23 @@ namespace sc::ecs {
       return nullptr;
     }
 
+    // The handle of a key apply has taken in, under the reader lock of the
+    // calling thread; none for any other key, and for every key on a thread
+    // without a reader lock.
+    [[nodiscard]] ResourceHandle<T> bindPublished(const Key &key, KeyHash hash) const {
+      const uint32_t thread = threading::threadId();
+      if (thread >= READERS) {
+        return {};
+      }
+      const std::scoped_lock lock(m_readers[thread].mutex);
+      const auto found = m_published.find(key, hash);
+      if (found == m_published.end()) {
+        return {};
+      }
+      found->second->acquire();
+      return ResourceHandle<T>(found->second);
+    }
+
     // Runs the pending load of the entry as a task, which takes over one
     // count of it.
     void startTask(Base *entry) const {
@@ -797,6 +839,7 @@ namespace sc::ecs {
     // members that do not run next to find and get, so those read it without
     // one.
     Map m_published;
+    std::unique_ptr<ReaderLock[]> m_readers;
     std::unique_ptr<Shard[]> m_shards;
     DefaultLoader m_loader;
     // Keys put into a shard since the last apply. Changed under the lock of
