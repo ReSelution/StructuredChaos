@@ -341,6 +341,37 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     CHECK(cache.size() == KEYS);
   }
 
+  SECTION("many threads bind and drop while tasks park and start again") {
+    // Measured with counters in the entry: about 3 000 loads parked, 2 600
+    // started again by a bind and 950 done by a thread that waits. Four
+    // helpers leave the other workers free to run the tasks meanwhile; a key
+    // is waited for by every third key only, and collect is rare enough for
+    // a parked one to be bound again first.
+    ResourceCache<Texture> cache;
+    constexpr size_t BINDS = 20000;
+    constexpr size_t KEYS = 2000;
+    std::atomic<size_t> wrong{0};
+    sc::threading::parallelFor(BINDS, 8, 4, [&](size_t first, size_t last) {
+      for (size_t i = first; i < last; ++i) {
+        const auto key = static_cast<int>(i % KEYS);
+        const ResourceHandle<Texture> texture = cache.bind(static_cast<uint64_t>(key), [key] { return Texture(key); });
+        if (key % 3 == 0) {
+          texture.wait();
+          if (texture->id != key) {
+            wrong.fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+        if (i % 7919 == 0) {
+          (void) cache.collect();
+        }
+      }
+    });
+    CHECK(wrong.load() == 0);
+    sc::threading::waitUntilFinished();
+    (void) cache.collect();
+    CHECK(cache.size() == 0);
+  }
+
   SECTION("a loader binds what it needs") {
     ResourceCache<Texture> cache;
     ResourceHandle<Texture> inner;
@@ -424,16 +455,86 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     std::atomic<int> loads{0};
     {
       ResourceCache<Texture> cache;
-      cache
-          .bind(1,
-                [&] {
-                  std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                  loads.fetch_add(1);
-                  return Texture(1);
-                })
-          .reset();
+      std::atomic<bool> started{false};
+      ResourceHandle<Texture> texture = cache.bind(1, [&] {
+        started.store(true);
+        started.notify_all();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        loads.fetch_add(1);
+        return Texture(1);
+      });
+      // Dropped before the task starts, the load would be parked.
+      started.wait(false);
+      texture.reset();
     }
     CHECK(loads.load() == 1);
+  }
+
+  SECTION("a load whose handles went before its task started waits for the next bind") {
+    ResourceCache<Texture> cache;
+    const size_t workers = sc::threading::threadSlots() - 1;
+    if (workers == 0) {
+      SKIP("No pool threads to keep busy");
+    }
+    std::atomic<size_t> busy{0};
+    std::atomic<bool> release{false};
+    for (size_t i = 0; i < workers; ++i) {
+      sc::threading::detach([&] {
+        busy.fetch_add(1);
+        release.wait(false);
+      });
+    }
+    while (busy.load() != workers) {
+      std::this_thread::yield();
+    }
+    std::atomic<int> loads{0};
+    const auto loader = [&] {
+      loads.fetch_add(1);
+      return Texture(1);
+    };
+    cache.bind(1, loader).reset();
+    cache.bind(2, loader).reset();
+    release.store(true);
+    release.notify_all();
+    sc::threading::waitUntilFinished();
+    CHECK(loads.load() == 0);
+    CHECK(cache.size() == 2);
+    CHECK(cache.apply() == 2);
+
+    SECTION("bind starts it again") {
+      const ResourceHandle<Texture> texture = cache.bind(1, loader);
+      texture.wait();
+      CHECK(texture->id == 1);
+      CHECK(loads.load() == 1);
+    }
+
+    SECTION("find starts it again") {
+      const ResourceHandle<Texture> texture = cache.find(1);
+      REQUIRE(static_cast<bool>(texture));
+      texture.wait();
+      CHECK(texture->id == 1);
+      CHECK(loads.load() == 1);
+    }
+
+    SECTION("load loads it here") {
+      const ResourceHandle<Texture> texture = cache.load(1, loader);
+      CHECK(texture->id == 1);
+      CHECK(loads.load() == 1);
+    }
+
+    SECTION("forceLoad loads only its own") {
+      const ResourceHandle<Texture> texture = cache.forceLoad(1, [] { return Texture(3); });
+      CHECK(texture->id == 3);
+      CHECK(loads.load() == 0);
+    }
+
+    SECTION("collect gives it back without loading it") {
+      CHECK(cache.collect() == 2);
+      CHECK(cache.size() == 0);
+    }
+
+    sc::threading::waitUntilFinished();
+    CHECK(loads.load() <= 1);
   }
 
   SECTION("a task that shutdown drops fails its resource") {

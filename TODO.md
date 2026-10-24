@@ -40,9 +40,6 @@ without a lock, `forceLoad`, `apply` and `collect` change the map and must not r
   comes back by binding the key again. For entities that stay while their textures go (texture streaming, LOD), an
   entry that keeps its handles in an unloaded state, `ready()` false, and loads again when asked, without a bind.
   Only once the world streams that way; chunks that are destroyed and spawned again need nothing more.
-- [ ] **Cancel a load whose handles are all gone:** the task holds a count, so the load runs to its end and the next
-  collect gives it back. A chunk spawned and destroyed before its textures are loaded loads them for nothing. A task
-  that has not started could see the count of the caller's handles at 0 and fail without calling the loader.
 - [ ] **One allocation per push in `DeletionQueue`:** the function with its captures, plus one per `bind` of a new key
   (the copy of the loader). Not measured; typed lists (`VkImage` + `VmaAllocation`) if thousands per frame show.
 - [ ] **Frames overlapping without a render thread:** `Scheduler::run` must not be called from a pool thread, so a
@@ -62,6 +59,10 @@ waits for a task that has not started runs the loader itself.
   is the count of the entry. The writers pay: every lock of the cache without contention, measured through `size()`,
   403 ns before, 740 now; apply and collect take them at most once per stage, and only with new keys or unused
   entries.
+- **A load whose handles all went before its task started is parked:** the task sees its own count as the only one
+  and sets PARKED in the same word, instead of calling the loader; the next bind, find, load or forceLoad of the key
+  takes the bit and starts it again (forceLoad frees it instead), collect frees it with the entry. A stress test
+  (20 000 binds of 2 000 keys, four helpers) parks about 3 000 loads and starts 2 600 of them again.
 - **The scheduler keeps readers and writers apart:** `Resources<const T>` reads the cache, `Resources<T>` writes it
   and runs in a stage of its own against every system that takes the cache; only `Resources<const T>` in a loop, a
   hook and a listener of an event a loop emits, as for `Global`. `run` calls `apply` of every provided cache after

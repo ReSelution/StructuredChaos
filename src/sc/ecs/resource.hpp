@@ -39,6 +39,9 @@ namespace sc::ecs::internal {
 
   enum class ResourceState : uint8_t { Loading, Ready, Failed };
 
+  // What runPending of an entry does with the load left for later.
+  enum class PendingRun : uint8_t { Load, Fail, Free };
+
   // What a ResourceHandle points at: the resource and its count. The cache
   // makes it with new and keeps it at the same address until collect.
   template<typename T>
@@ -49,20 +52,29 @@ namespace sc::ecs::internal {
     // when the entry is in use again. One word for both, so that a handle
     // never touches the entry after its last change of it; collect may free
     // it right after.
+    //
+    // PARKED says its task found nobody but itself holding the entry and left
+    // the load in it instead of calling the loader: whoever finds the entry
+    // by key next takes the bit and starts the load again. In the same word
+    // as the count, so that no find can count itself in between the task
+    // seeing 1 and setting it.
     static constexpr uint32_t QUEUED = uint32_t{1} << 31;
-    static constexpr uint32_t COUNT = QUEUED - 1;
+    static constexpr uint32_t PARKED = uint32_t{1} << 30;
+    static constexpr uint32_t COUNT = PARKED - 1;
 
     std::atomic<uint32_t> refs{1};
     std::atomic<ResourceState> state{ResourceState::Loading};
     // False while its load waits in the queue of the pool: the first thread
     // to set it calls pending, the task or one that waits for the resource.
+    // Also true while it is parked; the thread that takes PARKED clears it.
     std::atomic<bool> claimed{false};
     uint8_t owner;
     ResourceEntry *nextUnused = nullptr;
     std::atomic<ResourceEntry *> *unused;
-    // The load left for later: run(pending, true) loads, run(pending, false)
-    // lets it fail without calling the loader. Either frees pending.
-    void (*runPending)(void *pending, bool load) noexcept = nullptr;
+    // The load left for later: Load loads, Fail lets it fail without calling
+    // the loader, Free only frees it, for a parked entry that goes. Each frees
+    // pending.
+    void (*runPending)(void *pending, PendingRun run) noexcept = nullptr;
     void *pending = nullptr;
     std::exception_ptr error;
     alignas(T) std::byte storage[sizeof(T)];
@@ -76,6 +88,15 @@ namespace sc::ecs::internal {
       assert((before & COUNT) != COUNT);
     }
 
+    // A count for a handle of an entry found by key. True if its load was
+    // parked and this thread took it: it has to start the load again.
+    [[nodiscard]] bool acquireFound() noexcept {
+      const uint32_t before = refs.fetch_add(1, std::memory_order_relaxed);
+      assert((before & COUNT) != COUNT);
+      // Acquire: the parking task's claim of the entry is over.
+      return (before & PARKED) != 0 && (refs.fetch_and(~PARKED, std::memory_order_acquire) & PARKED) != 0;
+    }
+
     // The last handle puts the entry on the unused list of its owner, once.
     void release() noexcept {
       uint32_t before = refs.load(std::memory_order_relaxed);
@@ -83,11 +104,11 @@ namespace sc::ecs::internal {
       do {
         assert((before & COUNT) != 0);
         after = before - 1;
-        if (after == 0) {
-          after = QUEUED;
+        if ((after & COUNT) == 0) {
+          after |= QUEUED;
         }
       } while (!refs.compare_exchange_weak(before, after, std::memory_order_acq_rel, std::memory_order_relaxed));
-      if ((before & QUEUED) == 0 && after == QUEUED) {
+      if ((before & QUEUED) == 0 && (after & QUEUED) != 0) {
         // A push only and collect takes the whole list, so no ABA.
         ResourceEntry *head = unused->load(std::memory_order_relaxed);
         do {
@@ -108,21 +129,43 @@ namespace sc::ecs::internal {
         }
         // Release: collect has read nextUnused, which the handle that queues
         // the entry anew writes.
-        if (refs.compare_exchange_weak(now, now & COUNT, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        if (refs.compare_exchange_weak(now, now & ~QUEUED, std::memory_order_acq_rel, std::memory_order_acquire)) {
           return false;
         }
       }
     }
 
     // Takes the load left in the queue of the pool, if nobody has yet, and
-    // runs it (load) or lets it fail. True if this thread took it.
-    bool claim(bool load) noexcept {
+    // runs it (Load) or lets it fail (Fail). True if this thread took it.
+    bool claim(PendingRun run) noexcept {
       if (claimed.load(std::memory_order_relaxed) || claimed.exchange(true, std::memory_order_acq_rel)) {
         return false;
       }
-      runPending(pending, load);
+      runPending(pending, run);
       return true;
     }
+
+    // For the task, which holds a count: takes the load like claim(Load),
+    // but leaves it in the entry and parks it if the count of the task is
+    // the only one, so that a load nobody waits for any more costs nothing.
+    void claimOrPark() noexcept {
+      if (claimed.load(std::memory_order_relaxed) || claimed.exchange(true, std::memory_order_acq_rel)) {
+        return;
+      }
+      // QUEUED may be set still: collect clears it lazily.
+      uint32_t now = refs.load(std::memory_order_relaxed);
+      while ((now & COUNT) == 1) {
+        if (refs.compare_exchange_weak(now, now | PARKED, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+          return;
+        }
+      }
+      runPending(pending, PendingRun::Load);
+    }
+
+    // For the thread that took PARKED: lets the next claim have the load.
+    void unpark() noexcept { claimed.store(false, std::memory_order_release); }
+
+    [[nodiscard]] bool parked() const noexcept { return (refs.load(std::memory_order_relaxed) & PARKED) != 0; }
 
     // Until the load of the entry is over. A load that has not started yet is
     // done here, so that threads of the pool that all wait for it do not wait
@@ -130,7 +173,7 @@ namespace sc::ecs::internal {
     // joins a parallelFor of another thread meanwhile, the loader's among
     // them, and only sleeps if there is none. Throws what the loader threw.
     void wait() {
-      claim(true);
+      claim(PendingRun::Load);
       while (state.load(std::memory_order_acquire) == ResourceState::Loading) {
         const auto loaded = [this] { return state.load(std::memory_order_acquire) != ResourceState::Loading; };
         if (!threading::helpThread(loaded)) {
@@ -277,6 +320,9 @@ namespace sc::ecs {
   // A resource whose last handle went is given back only by collect, on the
   // thread that calls it, and not where the last component that had it was
   // destroyed. Until then bind gives it out again without loading it anew.
+  // A load whose handles all went before its task started is not done: the
+  // task leaves it in the resource, and the next bind or find of the key
+  // starts it again.
   // Every resource has an owner, a number below the one given to the
   // constructor, which bind gives it, and collect(owner) leaves the
   // resources of other owners alone: for resources that go at points of
@@ -337,7 +383,7 @@ namespace sc::ecs {
       const auto destroyAll = [](const Map &map) {
         for (const auto &[key, entry]: map) {
           assert((entry->refs.load(std::memory_order_relaxed) & Base::COUNT) == 0);
-          assert(entry->state.load(std::memory_order_relaxed) != internal::ResourceState::Loading);
+          assert(entry->state.load(std::memory_order_relaxed) != internal::ResourceState::Loading || entry->parked());
           destroy(entry);
         }
       };
@@ -386,6 +432,9 @@ namespace sc::ecs {
     // meet only on its count. A key bound since takes the lock of its shard;
     // other keys mostly have other locks.
     //
+    // A load whose task finds every handle gone before it starts is not done:
+    // the next bind or find of the key starts it again.
+    //
     // threading::shutdown drops tasks that have not started: their
     // resources fail.
     template<typename Loader>
@@ -400,28 +449,36 @@ namespace sc::ecs {
       }
       Shard &shard = shardOf(hash);
       Entry *entry;
+      bool made = false;
+      bool restart = false;
       {
         const std::scoped_lock lock(shard.mutex);
-        if (Entry *const found = findLocked(shard, key, hash)) {
-          assert(found->owner == owner);
-          found->acquire();
-          return ResourceHandle<T>(found);
+        entry = findLocked(shard, key, hash);
+        if (entry != nullptr) {
+          assert(entry->owner == owner);
+          restart = entry->acquireFound();
+        } else {
+          made = true;
+          auto job = std::make_unique<Job>(std::forward<Loader>(loader));
+          auto fresh = std::make_unique<Entry>(key, owner, &m_unused[owner].head);
+          shard.fresh.emplace(key, fresh.get());
+          m_freshCount.fetch_add(1, std::memory_order_relaxed);
+          entry = fresh.release();
+          job->entry = entry;
+          entry->runPending = &Job::run;
+          entry->pending = job.release();
+          // One count for the caller, one for the task.
+          entry->acquire();
         }
-        auto job = std::make_unique<Job>(std::forward<Loader>(loader));
-        auto fresh = std::make_unique<Entry>(key, owner, &m_unused[owner].head);
-        shard.fresh.emplace(key, fresh.get());
-        m_freshCount.fetch_add(1, std::memory_order_relaxed);
-        entry = fresh.release();
-        job->entry = entry;
-        entry->runPending = &Job::run;
-        entry->pending = job.release();
-        // One count for the caller, one for the task.
-        entry->acquire();
       }
       ResourceHandle<T> handle(entry);
       // Not under the lock: without workers the loader runs here, and it may
       // bind keys of the same shard.
-      startTask(entry);
+      if (made) {
+        startTask(entry);
+      } else if (restart) {
+        startParked(entry);
+      }
       return handle;
     }
 
@@ -444,6 +501,7 @@ namespace sc::ecs {
       Shard &shard = shardOf(hash);
       Entry *entry;
       bool made = false;
+      bool restart = false;
       {
         const std::scoped_lock lock(shard.mutex);
         entry = findLocked(shard, key, hash);
@@ -456,7 +514,7 @@ namespace sc::ecs {
           made = true;
         } else {
           assert(entry->owner == owner);
-          entry->acquire();
+          restart = entry->acquireFound();
         }
       }
       // Not under the lock: the loader may bind keys of the same shard.
@@ -464,6 +522,10 @@ namespace sc::ecs {
         return fill(entry, loader);
       }
       ResourceHandle<T> handle(entry);
+      if (restart) {
+        // A parked load is done by the wait below, without a task.
+        entry->unpark();
+      }
       entry->wait();
       return handle;
     }
@@ -488,18 +550,27 @@ namespace sc::ecs {
     // apply has taken in, with the lock of its shard for one bound since.
     [[nodiscard]] ResourceHandle<T> find(const Key &key) const {
       const KeyHash hash = m_published.hash_for(key);
+      Entry *entry;
+      bool restart;
       if (const auto found = m_published.find(key, hash); found != m_published.end()) {
-        found->second->acquire();
-        return ResourceHandle<T>(found->second);
+        entry = found->second;
+        restart = entry->acquireFound();
+      } else {
+        Shard &shard = shardOf(hash);
+        const std::scoped_lock lock(shard.mutex);
+        const auto fresh = shard.fresh.find(key, hash);
+        if (fresh == shard.fresh.end()) {
+          return {};
+        }
+        entry = fresh->second;
+        restart = entry->acquireFound();
       }
-      Shard &shard = shardOf(hash);
-      const std::scoped_lock lock(shard.mutex);
-      const auto found = shard.fresh.find(key, hash);
-      if (found == shard.fresh.end()) {
-        return {};
+      ResourceHandle<T> handle(entry);
+      // Not under the lock, as in bind.
+      if (restart) {
+        startParked(entry);
       }
-      found->second->acquire();
-      return ResourceHandle<T>(found->second);
+      return handle;
     }
 
     // The resource of the key if it is loaded and apply has taken the key
@@ -538,6 +609,7 @@ namespace sc::ecs {
       assert(owner < m_owners);
       Base *entry;
       bool made = false;
+      bool restart = false;
       {
         const AllLocks lock(*this);
         const KeyHash hash = m_published.hash_for(key);
@@ -550,7 +622,7 @@ namespace sc::ecs {
           made = true;
         } else {
           assert(entry->owner == owner);
-          entry->acquire();
+          restart = entry->acquireFound();
         }
       }
       // Not under the locks: the loader may bind other keys.
@@ -558,6 +630,15 @@ namespace sc::ecs {
         return fill(entry, loader);
       }
       ResourceHandle<T> handle(entry);
+      if (restart) {
+        entry->unpark();
+        // The parked load would only be replaced below.
+        if (entry->claim(internal::PendingRun::Free)) {
+          entry->acquire();
+          (void) fill(entry, loader);
+          return handle;
+        }
+      }
       try {
         entry->wait();
         // NOLINTNEXTLINE(bugprone-empty-catch): the failed one is loaded anew below
@@ -707,18 +788,23 @@ namespace sc::ecs {
       // entry would stay loading and whoever waits for it would wait for
       // ever; the program ends instead.
       // NOLINTNEXTLINE(bugprone-exception-escape): see above
-      static void run(void *pending, bool load) noexcept {
+      static void run(void *pending, internal::PendingRun run) noexcept {
         const std::unique_ptr<PendingLoad> job(static_cast<PendingLoad *>(pending));
-        if (load) {
-          job->entry->acquire();
-          try {
-            (void) fill(job->entry, job->loader);
-            // NOLINTNEXTLINE(bugprone-empty-catch): fail kept it in the entry for whoever waits or looks
-          } catch (...) {
-          }
-        } else {
-          fail(job->entry, std::make_exception_ptr(
-                               std::runtime_error("ResourceCache: the task of a load was dropped before it ran")));
+        switch (run) {
+          case internal::PendingRun::Load:
+            job->entry->acquire();
+            try {
+              (void) fill(job->entry, job->loader);
+              // NOLINTNEXTLINE(bugprone-empty-catch): fail kept it in the entry for whoever waits or looks
+            } catch (...) {
+            }
+            break;
+          case internal::PendingRun::Fail:
+            fail(job->entry, std::make_exception_ptr(
+                                 std::runtime_error("ResourceCache: the task of a load was dropped before it ran")));
+            break;
+          case internal::PendingRun::Free:
+            break;
         }
       }
     };
@@ -728,23 +814,31 @@ namespace sc::ecs {
     class Task {
     public:
       Task(const ResourceCache *cache, Base *entry) noexcept : m_cache(cache), m_entry(entry) {}
-      Task(Task &&other) noexcept : m_cache(other.m_cache), m_entry(std::exchange(other.m_entry, nullptr)) {}
+      Task(Task &&other) noexcept :
+          m_cache(other.m_cache), m_entry(std::exchange(other.m_entry, nullptr)), m_ran(other.m_ran) {}
       Task &operator=(Task &&) = delete;
 
       ~Task() {
         if (m_entry != nullptr) {
-          // Nothing if it ran or somebody who waited loaded it.
-          m_entry->claim(false);
+          // Only if it was dropped: once it ran, a load it parked may have
+          // been given to the next claim already.
+          if (!m_ran) {
+            m_entry->claim(internal::PendingRun::Fail);
+          }
           m_entry->release();
           m_cache->taskDone();
         }
       }
 
-      void operator()() noexcept { m_entry->claim(true); }
+      void operator()() noexcept {
+        m_ran = true;
+        m_entry->claimOrPark();
+      }
 
     private:
       const ResourceCache *m_cache;
       Base *m_entry;
+      bool m_ran = false;
     };
 
     [[nodiscard]] Shard &shardOf(KeyHash hash) const noexcept {
@@ -771,13 +865,32 @@ namespace sc::ecs {
       if (thread >= READERS) {
         return {};
       }
-      const std::scoped_lock lock(m_readers[thread].mutex);
-      const auto found = m_published.find(key, hash);
-      if (found == m_published.end()) {
-        return {};
+      Entry *entry;
+      bool restart;
+      {
+        const std::scoped_lock lock(m_readers[thread].mutex);
+        const auto found = m_published.find(key, hash);
+        if (found == m_published.end()) {
+          return {};
+        }
+        entry = found->second;
+        restart = entry->acquireFound();
       }
-      found->second->acquire();
-      return ResourceHandle<T>(found->second);
+      ResourceHandle<T> handle(entry);
+      // Not under the lock: without workers the loader runs here, and it may
+      // bind keys too.
+      if (restart) {
+        startParked(entry);
+      }
+      return handle;
+    }
+
+    // Starts the load of an entry whose PARKED this thread took, as a new
+    // task with a count of its own.
+    void startParked(Base *entry) const {
+      entry->acquire();
+      entry->unpark();
+      startTask(entry);
     }
 
     // Runs the pending load of the entry as a task, which takes over one
@@ -829,6 +942,9 @@ namespace sc::ecs {
     static void destroy(Base *entry) noexcept {
       if (entry->state.load(std::memory_order_relaxed) == internal::ResourceState::Ready) {
         entry->value().~T();
+      }
+      if (entry->parked()) {
+        entry->runPending(entry->pending, internal::PendingRun::Free);
       }
       delete static_cast<Entry *>(entry);
     }
