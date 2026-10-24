@@ -26,25 +26,62 @@ out from the pages instead of counted (its own cost not measured).
 
 ## Resource cache
 
-`ResourceCache<T>` in `src/sc/ecs/resource.hpp`: load once by key, handles with a count, given back only by
-`collect(owner)`, loaded without waiting by `loadAsync`.
+`ResourceCache<T>` in `src/sc/ecs/resource.hpp`: `bind(key)` gives a handle once, at spawn, and loads a new key on
+the pool with the cache's loader or the one given; afterwards a system only asks `ready()`. `find` and `get` read
+without a lock, `forceLoad`, `apply` and `collect` change the map and must not run next to them.
 
-- [ ] **One mutex for every load:** also a load that finds its resource takes it. Not measured how much threads that
-  load many small resources at once wait for it. If they do, a map split by hash with a mutex each.
-- [ ] **The last handle of a resource takes a CAS loop:** the count and the queued bit are one word, so that a handle
-  never touches the entry after its last change (collect may free it right after). Every other drop is one CAS as
-  well, not a `fetch_sub`. Not measured against `shared_ptr`.
-- [ ] **A task of loadAsync that shutdown drops:** its resource fails with an error. Not tested: dropping a task that
-  has not started needs a pool whose workers are all busy at the moment of shutdown.
-- [ ] **One allocation per push in `DeletionQueue`:** the function with its captures, plus one per `loadAsync` (the
-  copy of the loader). Not measured; typed lists (`VkImage` + `VmaAllocation`) if thousands per frame show.
+- [ ] **`bind` of one key on all threads** takes the lock of one shard: 1 375 ns per bind on 16 threads, 382 on 8,
+  9.2 on one (clang). Once per handle, so a spawn of 100 000 entities with one material on 16 threads would take about
+  9 ms once (estimated from these, not measured as a spawn). If that shows, a lock-free table for the fresh keys.
+- [ ] **A limit on the loads in flight:** every new key starts a task right away; 500 new textures after a spawn are
+  500 tasks next to the `parallelFor` of the frame. The rest could wait in the cache instead of the queue of the pool.
+- [ ] **A debug check for pointers of `get`:** they are good until the next `forceLoad` or `collect` (in a system, the
+  end of its stage); nothing catches one that is kept longer.
+- [ ] **`forceLoad` while a loader on the pool uses the old resource:** the scheduler keeps systems apart, not tasks.
+  A reload that keeps the old one until the new one is loaded needs a second place in the entry.
+- [ ] **Unload and reload with the handles kept:** today a resource goes only once all its handles are gone, and
+  comes back by binding the key again. For entities that stay while their textures go (texture streaming, LOD), an
+  entry that keeps its handles in an unloaded state, `ready()` false, and loads again when asked, without a bind.
+  Only once the world streams that way; chunks that are destroyed and spawned again need nothing more.
+- [ ] **Cancel a load whose handles are all gone:** the task holds a count, so the load runs to its end and the next
+  collect gives it back. A chunk spawned and destroyed before its textures are loaded loads them for nothing. A task
+  that has not started could see the count of the caller's handles at 0 and fail without calling the loader.
+- [ ] **One allocation per push in `DeletionQueue`:** the function with its captures, plus one per `bind` of a new key
+  (the copy of the loader). Not measured; typed lists (`VkImage` + `VmaAllocation`) if thousands per frame show.
 - [ ] **Frames overlapping without a render thread:** `Scheduler::run` must not be called from a pool thread, so a
   render world cannot run its systems next to the simulation of the next frame yet (as Bevy's extract or Naughty
   Dog's fiber jobs do). Only matters once a CPU-bound frame shows it.
 
 Done: `Resources<T, Key, Hash>` as a system parameter after `scheduler.provide(cache)` (finding the cache per run not
-measured); GPU resources go through `memory::DeletionQueue` in their destructor, the cache knows no frames;
-`loadAsync` on the pool, and whoever waits for a task that has not started runs the loader itself.
+measured); GPU resources go through `memory::DeletionQueue` in their destructor, the cache knows no frames; whoever
+waits for a task that has not started runs the loader itself.
+
+- **The scheduler keeps readers and writers apart:** `Resources<const T>` reads the cache, `Resources<T>` writes it
+  and runs in a stage of its own against every system that takes the cache; only `Resources<const T>` in a loop, a
+  hook and a listener of an event a loop emits, as for `Global`. `run` calls `apply` of every provided cache after
+  every stage, after the hooks; without a new key it takes no lock (its cost per stage not measured).
+- **Bind once, as entt's `cache[id]`:** a handle has its entry from `bind` on, and the entry stays while its resource
+  loads, fails or is reloaded, so nothing has to be called per frame. Tried on the way and dropped: handles that
+  only knew their key and `resolve` every frame (with `request`, `apply` making the entries, a filter against 10 000
+  requests of one key and a grace of one collect), binding in the handle's constructor through a global cache or a
+  `thread_local` context of the scheduler (invisible, a handle without one stays empty).
+- **No lock for lookups:** `find` and `get` read the map `apply` fills; keys bound since are in 64 shards with a mutex
+  each, which `bind` takes. ns per call on every thread, 1024 keys / one key (clang): before, one mutex, `load` hit
+  16 threads 1 640-1 790 / 1 400, one thread 11.3 / 10.1; now `get` 4-6 / 3-4, one thread 3.6 / 3.0, `find` 29-34 /
+  834 (the count of the entry), one thread 9.0 / 6.2, `bind` 130 / 1 375, one thread 12.3 / 9.2. Tried on the way:
+  64 shards with a `std::shared_mutex` each for every lookup (93-101 / 1 510, one thread 18.5; one key on 8 threads
+  858 against 398 with one mutex: `pthread_rwlock` retries its CAS when readers meet).
+- **`bind` without a loader** uses the cache's (`ResourceCache(loader)`, called with the key on the pool); `load`
+  loads a new key on the calling thread, without a task, so that no task holds a count after it returns.
+- **A failed load stays** in the map, so that binding the key again does not load it again; `forceLoad` loads it anew,
+  in the same entry, so every handle sees a reload.
+- **`TransparentHash` by default:** an h64 key is its own hash, and one hash finds the shard and the key.
+- **The CAS loop of the last handle stays:** a `fetch_sub` with a CAS only for the last one lets a bind hand out the
+  entry at count 0, its handle queue it and collect free it before the first thread's CAS. Copy + drop against
+  `shared_ptr`, ns: one thread 4.4 / 8.6; 1024 entries on 16 threads 24-41 / 23-36; one entry on 16 threads 760 / 380
+  (the CAS retries), on 2-4 threads about the same.
+- **A task that shutdown drops** fails its resource; tested with workers that return once `threadSlots()` is 1,
+  which shutdown sets under the lock that requests the stop.
 
 ## Limits
 

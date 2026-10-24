@@ -1270,30 +1270,36 @@ namespace sc::ecs {
   };
 
   // The ResourceCache given to the scheduler with provide, as a parameter of
-  // a system:
+  // a system: Resources<const T> gives the const members (bind, find, get),
+  // Resources<T> all of them, and the scheduler keeps a system that takes
+  // Resources<T> apart from the others that take the cache. Only
+  // Resources<const T> in the function of addParallel, in a hook and in a
+  // listener of an event a loop emits, as for Global.
   //
-  //   ResourceCache<Texture> textures;
+  //   ResourceCache<Texture> textures([](h64 key) { return Texture(assets.path(key)); });
   //   scheduler.provide(textures);
-  //   scheduler.add([](Query<const Mesh> meshes, Resources<Texture> textures) {
-  //     ResourceHandle<Texture> albedo = textures->loadAsync(id, [] { ... });
+  //   scheduler.addParallel([](Resources<const Texture> textures, Commands commands, Entity entity,
+  //                            const SpawnRock &) {
+  //     commands.emplace<Material>(entity, textures->bind("textures/rock"_h));
   //   });
   //   scheduler.add([](Resources<Texture> textures) { textures->collect(); }, "collect textures");
   //
-  // Everything of the cache is safe from any thread at any time, collect as
-  // well, so it keeps no system waiting. A copy is one pointer, which makes
-  // it a parameter for the function of addParallel too.
-  template<typename T, typename Key = h64, typename Hash = ankerl::unordered_dense::hash<Key>>
+  // After every stage, run takes the keys bound in it into the map that find
+  // and get look into without a lock (ResourceCache::apply). A copy is one
+  // pointer.
+  template<typename T, typename Key = h64, typename Hash = TransparentHash>
   class Resources {
   public:
-    using Cache = ResourceCache<T, Key, Hash>;
+    using Cache = ResourceCache<std::remove_const_t<T>, Key, Hash>;
+    using Pointer = std::conditional_t<std::is_const_v<T>, const Cache *, Cache *>;
 
-    explicit Resources(Cache &cache) noexcept : m_cache(&cache) {}
+    explicit Resources(Pointer cache) noexcept : m_cache(cache) {}
 
-    [[nodiscard]] Cache *operator->() const noexcept { return m_cache; }
-    [[nodiscard]] Cache &operator*() const noexcept { return *m_cache; }
+    [[nodiscard]] Pointer operator->() const noexcept { return m_cache; }
+    [[nodiscard]] auto &operator*() const noexcept { return *m_cache; }
 
   private:
-    Cache *m_cache;
+    Pointer m_cache;
   };
 
   // A global value of the world (World::setGlobal) as a parameter of a
@@ -1334,6 +1340,8 @@ namespace sc::ecs::internal {
   struct ProvidedCache {
     const void *tag;
     void *cache;
+    // ResourceCache::apply of the cache, after every stage.
+    size_t (*apply)(void *cache);
   };
 
   // Stands for the type of an event of Scheduler::on and Emit, as cacheTag.
@@ -1364,6 +1372,12 @@ namespace sc::ecs::internal {
     std::vector<Component> components;
     // The same for global values, by internal::globalIndex.
     std::vector<Component> globals;
+    // The caches given with provide, by cacheTag.
+    struct Cache {
+      const void *tag;
+      bool write;
+    };
+    std::vector<Cache> caches;
     // The system takes the world itself and may do anything with it.
     bool exclusive = false;
     bool commands = false;
@@ -1388,6 +1402,18 @@ namespace sc::ecs::internal {
 
     [[nodiscard]] bool writesGlobal() const noexcept { return std::ranges::any_of(globals, &Component::write); }
 
+    void addCache(const void *tag, bool write) {
+      for (Cache &cache: caches) {
+        if (cache.tag == tag) {
+          cache.write = cache.write || write;
+          return;
+        }
+      }
+      caches.push_back({.tag = tag, .write = write});
+    }
+
+    [[nodiscard]] bool writesCache() const noexcept { return std::ranges::any_of(caches, &Cache::write); }
+
     void addColumn(const ColumnMaker &maker) {
       if (std::ranges::find(columns, maker.index, &ColumnMaker::index) == columns.end()) {
         columns.push_back(maker);
@@ -1407,6 +1433,9 @@ namespace sc::ecs::internal {
       }
       for (const Component &global: other.globals) {
         addGlobal(global.index, global.write);
+      }
+      for (const Cache &cache: other.caches) {
+        addCache(cache.tag, cache.write);
       }
       exclusive = exclusive || other.exclusive;
       commands = commands || other.commands;
@@ -1431,7 +1460,8 @@ namespace sc::ecs::internal {
 
     // Whether the two must not run at the same time.
     [[nodiscard]] bool conflictsWith(const SystemAccess &other) const noexcept {
-      return exclusive || other.exclusive || overlap(components, other.components) || overlap(globals, other.globals);
+      return exclusive || other.exclusive || overlap(components, other.components) || overlap(globals, other.globals) ||
+             overlapCaches(caches, other.caches);
     }
 
   private:
@@ -1443,6 +1473,17 @@ namespace sc::ecs::internal {
         }
       }
       list.push_back({.index = index, .write = write});
+    }
+
+    [[nodiscard]] static bool overlapCaches(const std::vector<Cache> &mine, const std::vector<Cache> &theirs) noexcept {
+      for (const Cache &one: mine) {
+        for (const Cache &other: theirs) {
+          if (one.tag == other.tag && (one.write || other.write)) {
+            return true;
+          }
+        }
+      }
+      return false;
     }
 
     // Whether one of the two writes something the other one uses.
@@ -1606,17 +1647,16 @@ namespace sc::ecs::internal {
 
   template<typename T, typename Key, typename Hash>
   struct SystemParam<Resources<T, Key, Hash>> {
-    using Cache = ResourceCache<T, Key, Hash>;
+    using Cache = Resources<T, Key, Hash>::Cache;
 
-    // The cache is safe next to everything.
-    static void declare(SystemAccess &) {}
+    static void declare(SystemAccess &access) { access.addCache(&cacheTag<Cache>, !std::is_const_v<T>); }
 
     // One look through the provided caches per run of the system, not per
     // entity.
     static Resources<T, Key, Hash> fetch(const SystemContext &context) {
       for (const ProvidedCache &provided: context.caches) {
         if (provided.tag == &cacheTag<Cache>) {
-          return Resources<T, Key, Hash>(*static_cast<Cache *>(provided.cache));
+          return Resources<T, Key, Hash>(static_cast<Cache *>(provided.cache));
         }
       }
       throw std::logic_error("the system \"" + context.name + "\" takes a cache the scheduler was not provided with");
@@ -1644,6 +1684,13 @@ namespace sc::ecs::internal {
   inline constexpr bool writesGlobal = false;
   template<typename T>
   inline constexpr bool writesGlobal<Global<T>> = !std::is_const_v<T>;
+
+  // Whether a parameter of a system takes the members of a cache that run
+  // alone.
+  template<typename Param>
+  inline constexpr bool writesCache = false;
+  template<typename T, typename Key, typename Hash>
+  inline constexpr bool writesCache<Resources<T, Key, Hash>> = !std::is_const_v<T>;
 
   template<typename Event>
   struct SystemParam<Emit<Event>> {
@@ -1903,8 +1950,9 @@ namespace sc::ecs {
                          typename Signature::ExtraList{});
     }
 
-    // Makes the cache the one systems get as Resources<T, Key, Hash>. Only a
-    // pointer is kept: the cache has to outlive every run. One cache per
+    // Makes the cache the one systems get as Resources<T, Key, Hash> and
+    // Resources<const T, Key, Hash>, and the one run applies after every
+    // stage. Only a pointer is kept: the cache has to outlive every run. One cache per
     // type; owners within it are for resources that go at points of their
     // own. std::logic_error for a second cache of the same type. Not during
     // run.
@@ -1916,7 +1964,9 @@ namespace sc::ecs {
           throw std::logic_error("the scheduler has a cache of this type already");
         }
       }
-      m_caches.push_back({.tag = tag, .cache = &cache});
+      m_caches.push_back({.tag = tag,
+                          .cache = &cache,
+                          .apply = [](void *provided) { return static_cast<ResourceCache<T, Key, Hash> *>(provided)->apply(); }});
       return *this;
     }
 
@@ -1998,6 +2048,10 @@ namespace sc::ecs {
           world.advanceTick();
           m_applier.apply(world, m_stageLists, hookContext(world, 0));
           runHookRounds(world);
+          // After the hooks, which may bind keys as well.
+          for (const internal::ProvidedCache &provided: m_caches) {
+            provided.apply(provided.cache);
+          }
         } catch (...) {
           clearCommands(stage);
           for (std::vector<internal::CommandList> &lists: m_hookLists) {
@@ -2064,6 +2118,11 @@ namespace sc::ecs {
             throw std::logic_error("a listener of an event the loop \"" + system.name +
                                    "\" emits writes a global value: all threads of the loop would write the one "
                                    "value; take it as Global<const T>");
+          }
+          if (system.loop && system.effective.writesCache()) {
+            throw std::logic_error("a listener of an event the loop \"" + system.name +
+                                   "\" emits takes Resources<T>: all threads of the loop would change the cache; "
+                                   "take it as Resources<const T>");
           }
         }
 
@@ -2321,6 +2380,9 @@ namespace sc::ecs {
       static_assert(!(internal::writesGlobal<std::remove_cvref_t<Extras>> || ...),
                     "the function of a loop takes a global value as Global<const T>: all threads of the loop would "
                     "write the one value");
+      static_assert(!(internal::writesCache<std::remove_cvref_t<Extras>> || ...),
+                    "the function of a loop takes a cache as Resources<const T>: all threads of the loop would change "
+                    "the cache");
       using Function = std::decay_t<F>;
       using Signature = internal::LoopSignature<typename internal::SystemSignature<Function>::Params>;
       return addSystem<true>(
@@ -2377,6 +2439,8 @@ namespace sc::ecs::internal {
     static_assert((hookParam<Params> && ...), "a hook does not take the world");
     static_assert(!(writesGlobal<std::remove_cvref_t<Params>> || ...),
                   "a hook runs on several threads at once: it takes a global value as Global<const T>");
+    static_assert(!(writesCache<std::remove_cvref_t<Params>> || ...),
+                  "a hook runs on several threads at once: it takes a cache as Resources<const T>");
     static_assert(!usesModifiedOtherwise<Params...>,
                   "a component the hook edits is not also named by its queries, as for a system");
 

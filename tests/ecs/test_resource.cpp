@@ -36,37 +36,6 @@ namespace {
 
 } // namespace
 
-TEST_CASE("ECS Resource Load Once", "[ecs][resource][threading]") {
-  sc::threading::init();
-  Texture::alive = 0;
-  {
-    ResourceCache<Texture> cache;
-    std::atomic<int> loads{0};
-    constexpr size_t CALLS = 1000;
-    std::vector<const Texture *> got(CALLS, nullptr);
-
-    sc::threading::parallelFor(CALLS, 1, [&](size_t first, size_t last) {
-      for (size_t i = first; i < last; ++i) {
-        const ResourceHandle<Texture> texture = cache.load(7, [&] {
-          loads.fetch_add(1, std::memory_order_relaxed);
-          // Long enough for the other threads to come and wait.
-          std::this_thread::sleep_for(std::chrono::milliseconds(20));
-          return Texture(7);
-        });
-        got[i] = &*texture;
-      }
-    });
-
-    CHECK(loads.load() == 1);
-    for (const Texture *texture: got) {
-      REQUIRE(texture == got[0]);
-    }
-    CHECK(got[0]->id == 7);
-    CHECK(cache.size() == 1);
-  }
-  CHECK(Texture::alive.load() == 0);
-}
-
 TEST_CASE("ECS Resource Collect", "[ecs][resource]") {
   Texture::alive = 0;
   ResourceCache<Texture> cache;
@@ -93,7 +62,7 @@ TEST_CASE("ECS Resource Collect", "[ecs][resource]") {
     CHECK(cache.collect() == 0);
   }
 
-  SECTION("a load before collect gets it back without loading") {
+  SECTION("a bind before collect gets it back without loading") {
     cache.load(1, loader).reset();
     ResourceHandle<Texture> again = cache.load(1, loader);
     CHECK(loads == 1);
@@ -106,7 +75,7 @@ TEST_CASE("ECS Resource Collect", "[ecs][resource]") {
     CHECK(Texture::alive.load() == 0);
   }
 
-  SECTION("a load after collect loads it anew") {
+  SECTION("a bind after collect loads it anew") {
     cache.load(1, loader).reset();
     CHECK(cache.collect() == 1);
     const ResourceHandle<Texture> again = cache.load(1, loader);
@@ -114,10 +83,25 @@ TEST_CASE("ECS Resource Collect", "[ecs][resource]") {
     CHECK(again->id == 1);
   }
 
-  SECTION("find gives what is there and nothing else") {
+  SECTION("find gives what is there, before apply and after") {
     CHECK(!cache.find(1));
     const ResourceHandle<Texture> loaded = cache.load(1, loader);
     CHECK(cache.find(1) == loaded);
+    CHECK(cache.apply() == 1);
+    CHECK(cache.find(1) == loaded);
+    CHECK(cache.apply() == 0);
+  }
+
+  SECTION("get lends what apply took in and counts nothing") {
+    ResourceHandle<Texture> loaded = cache.load(1, loader);
+    CHECK(cache.get(1) == nullptr);
+    cache.apply();
+    const Texture *const lent = cache.get(1);
+    REQUIRE(lent == &*loaded);
+    loaded.reset();
+    // The pointer kept nothing: the last handle went, so collect gives it back.
+    CHECK(cache.collect() == 1);
+    CHECK(cache.get(1) == nullptr);
   }
 }
 
@@ -126,61 +110,100 @@ TEST_CASE("ECS Resource Force Load", "[ecs][resource]") {
   ResourceCache<Texture> cache;
 
   ResourceHandle<Texture> old = cache.load(1, [] { return Texture(1); });
-  const ResourceHandle<Texture> fresh = cache.forceLoad(1, [] { return Texture(2); });
-  CHECK(old->id == 1);
-  CHECK(fresh->id == 2);
-  CHECK(cache.find(1) == fresh);
-  CHECK(cache.size() == 1);
 
-  CHECK(cache.collect() == 0);
-  old.reset();
-  CHECK(Texture::alive.load() == 2);
-  CHECK(cache.collect() == 1);
-  CHECK(Texture::alive.load() == 1);
-  // The old one went without taking the key of the new one along.
-  CHECK(cache.find(1) == fresh);
+  SECTION("in place: every handle sees the new one") {
+    const ResourceHandle<Texture> fresh = cache.forceLoad(1, [] { return Texture(2); });
+    CHECK(fresh == old);
+    CHECK(old->id == 2);
+    CHECK(Texture::alive.load() == 1);
+    CHECK(cache.size() == 1);
+  }
+
+  SECTION("a key that is not there") {
+    const ResourceHandle<Texture> other = cache.forceLoad(2, [] { return Texture(2); });
+    CHECK(other->id == 2);
+    CHECK(cache.size() == 2);
+  }
+
+  SECTION("a loader that throws leaves it failed") {
+    CHECK_THROWS_AS(cache.forceLoad(1, []() -> Texture { throw std::runtime_error("no file"); }), std::runtime_error);
+    CHECK(old.failed());
+    CHECK(Texture::alive.load() == 0);
+  }
+
+  SECTION("its loader may bind other keys") {
+    ResourceHandle<Texture> inner;
+    (void) cache.forceLoad(1, [&] {
+      inner = cache.load(2, [] { return Texture(2); });
+      return Texture(3);
+    });
+    CHECK(old->id == 3);
+    CHECK(inner->id == 2);
+  }
 }
 
 TEST_CASE("ECS Resource Loader Throws", "[ecs][resource][threading]") {
   sc::threading::init();
   Texture::alive = 0;
   ResourceCache<Texture> cache;
+  int loads = 0;
+  const auto throwing = [&]() -> Texture {
+    ++loads;
+    throw std::runtime_error("no file");
+  };
 
-  SECTION("on one thread") {
-    CHECK_THROWS_AS(cache.load(1, []() -> Texture { throw std::runtime_error("no file"); }), std::runtime_error);
-    CHECK(cache.size() == 0);
-    CHECK(!cache.find(1));
+  SECTION("the failed one stays until nobody has it") {
+    CHECK_THROWS_AS(cache.load(1, throwing), std::runtime_error);
+    CHECK(cache.size() == 1);
+    ResourceHandle<Texture> failed = cache.find(1);
+    REQUIRE(static_cast<bool>(failed));
+    CHECK(failed.failed());
+
+    // Binding the key again throws without calling a loader.
+    CHECK_THROWS_AS(cache.load(1, [] { return Texture(1); }), std::runtime_error);
+    CHECK(loads == 1);
+
+    failed.reset();
     // The failed entry is given back without a destructor of a texture.
     CHECK(cache.collect() == 1);
-
     const ResourceHandle<Texture> texture = cache.load(1, [] { return Texture(1); });
     CHECK(texture->id == 1);
   }
 
-  SECTION("the waiting threads get it as well") {
-    constexpr size_t CALLS = 200;
+  SECTION("forceLoad loads it anew") {
+    CHECK_THROWS_AS(cache.load(1, throwing), std::runtime_error);
+    const ResourceHandle<Texture> texture = cache.forceLoad(1, [] { return Texture(1); });
+    CHECK(texture->id == 1);
+  }
+
+  SECTION("whoever waits for it gets it") {
+    ResourceHandle<Texture> texture = cache.bind(1, []() -> Texture {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      throw std::runtime_error("no file");
+    });
+    constexpr size_t WAITERS = 200;
     std::atomic<size_t> thrown{0};
-    sc::threading::parallelFor(CALLS, 1, [&](size_t first, size_t last) {
+    sc::threading::parallelFor(WAITERS, 1, [&](size_t first, size_t last) {
       for (size_t i = first; i < last; ++i) {
+        // NOLINTNEXTLINE(performance-unnecessary-copy-initialization): copies on many threads at once
+        const ResourceHandle<Texture> copy = texture;
         try {
-          // Every call either loads and throws or waits for one that does.
-          (void) cache.load(1, []() -> Texture {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            throw std::runtime_error("no file");
-          });
+          copy.wait();
         } catch (const std::runtime_error &) {
           thrown.fetch_add(1, std::memory_order_relaxed);
         }
       }
     });
-    CHECK(thrown.load() == CALLS);
-    CHECK(cache.size() == 0);
-    CHECK(cache.collect() >= 1);
-    CHECK(Texture::alive.load() == 0);
+    CHECK(thrown.load() == WAITERS);
+    CHECK(cache.size() == 1);
+    texture.reset();
+    sc::threading::waitUntilFinished();
+    CHECK(cache.collect() == 1);
   }
 }
 
 TEST_CASE("ECS Resource Owners", "[ecs][resource][threading]") {
+  sc::threading::init();
   Texture::alive = 0;
   ResourceCache<Texture> cache(2);
 
@@ -197,34 +220,21 @@ TEST_CASE("ECS Resource Owners", "[ecs][resource][threading]") {
     CHECK(Texture::alive.load() == 0);
   }
 
-  SECTION("owners collect at the same time") {
+  SECTION("collect next to tasks that let go of their resources") {
     constexpr int KEYS = 2000;
-    std::atomic<bool> loading{true};
-    std::atomic<size_t> collected{0};
-    const auto collector = [&](uint8_t owner) {
-      while (loading.load(std::memory_order_acquire)) {
-        collected.fetch_add(cache.collect(owner), std::memory_order_relaxed);
-      }
-    };
-    std::thread zero(collector, uint8_t{0});
-    std::thread one(collector, uint8_t{1});
     for (int key = 0; key < KEYS; ++key) {
-      // Load, drop, load again: what comes back may be the one waiting for
-      // collect or a new one.
+      // The task holds the only count once the handle is gone: it queues the
+      // entry on its thread, maybe while collect below takes the list.
       const auto owner = static_cast<uint8_t>(key % 2);
-      const auto id = static_cast<uint64_t>(key);
-      cache.load(id, owner, [key] { return Texture(key); }).reset();
-      const ResourceHandle<Texture> again = cache.load(id, owner, [key] { return Texture(key); });
-      CHECK(again->id == key);
+      cache.bind(static_cast<uint64_t>(key), owner, [key] { return Texture(key); }).reset();
+      (void) cache.collect(owner);
     }
-    loading.store(false, std::memory_order_release);
-    zero.join();
-    one.join();
-    collected.fetch_add(cache.collect(0) + cache.collect(1), std::memory_order_relaxed);
+    sc::threading::waitUntilFinished();
+    (void) cache.collect(0);
+    (void) cache.collect(1);
 
     CHECK(cache.size() == 0);
     CHECK(Texture::alive.load() == 0);
-    CHECK(collected.load() >= KEYS);
   }
 }
 
@@ -244,14 +254,33 @@ TEST_CASE("ECS Resource Handle As Component", "[ecs][resource]") {
   }
 }
 
-TEST_CASE("ECS Resource Load Async", "[ecs][resource][threading]") {
+TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
   sc::threading::init();
   Texture::alive = 0;
+
+  SECTION("with the loader of the cache") {
+    std::atomic<int> loads{0};
+    ResourceCache<Texture> cache([&](const sc::h64 &key) {
+      loads.fetch_add(1);
+      return Texture(static_cast<int>(key));
+    });
+    const ResourceHandle<Texture> texture = cache.bind(5);
+    REQUIRE(static_cast<bool>(texture));
+    texture.wait();
+    CHECK(texture->id == 5);
+    CHECK(cache.bind(5) == texture);
+    CHECK(loads.load() == 1);
+  }
+
+  SECTION("without a loader of the cache") {
+    const ResourceCache<Texture> cache;
+    CHECK_THROWS_AS((void) cache.bind(5), std::logic_error);
+  }
 
   SECTION("the handle comes before the resource") {
     ResourceCache<Texture> cache;
     std::atomic<bool> go{false};
-    ResourceHandle<Texture> texture = cache.loadAsync(1, [&] {
+    ResourceHandle<Texture> texture = cache.bind(1, [&] {
       go.wait(false);
       return Texture(1);
     });
@@ -266,24 +295,85 @@ TEST_CASE("ECS Resource Load Async", "[ecs][resource][threading]") {
     CHECK(texture->id == 1);
   }
 
-  SECTION("many calls, one load") {
+  SECTION("many threads, one key, one load") {
     ResourceCache<Texture> cache;
     std::atomic<int> loads{0};
-    constexpr size_t CALLS = 1000;
-    std::vector<ResourceHandle<Texture>> handles(CALLS);
-    sc::threading::parallelFor(CALLS, 1, [&](size_t first, size_t last) {
+    constexpr size_t HANDLES = 10000;
+    std::vector<ResourceHandle<Texture>> handles(HANDLES);
+    sc::threading::parallelFor(HANDLES, 64, [&](size_t first, size_t last) {
       for (size_t i = first; i < last; ++i) {
-        handles[i] = cache.loadAsync(7, [&] {
+        handles[i] = cache.bind(7, [&] {
           loads.fetch_add(1, std::memory_order_relaxed);
           return Texture(7);
         });
       }
     });
     for (const ResourceHandle<Texture> &handle: handles) {
-      handle.wait();
       REQUIRE(handle == handles[0]);
     }
+    handles[0].wait();
     CHECK(loads.load() == 1);
+    CHECK(cache.size() == 1);
+  }
+
+  SECTION("many threads, many keys, one load each") {
+    ResourceCache<Texture> cache;
+    std::atomic<int> loads{0};
+    constexpr size_t HANDLES = 10000;
+    constexpr size_t KEYS = 500;
+    std::vector<ResourceHandle<Texture>> handles(HANDLES);
+    sc::threading::parallelFor(HANDLES, 16, [&](size_t first, size_t last) {
+      for (size_t i = first; i < last; ++i) {
+        const auto key = static_cast<int>(i % KEYS);
+        handles[i] = cache.bind(static_cast<uint64_t>(key), [&, key] {
+          loads.fetch_add(1, std::memory_order_relaxed);
+          return Texture(key);
+        });
+      }
+    });
+    for (size_t i = 0; i < HANDLES; ++i) {
+      REQUIRE(handles[i] == handles[i % KEYS]);
+    }
+    sc::threading::waitUntilFinished();
+    CHECK(loads.load() == static_cast<int>(KEYS));
+    CHECK(cache.size() == KEYS);
+    CHECK(cache.apply() == KEYS);
+    CHECK(cache.size() == KEYS);
+  }
+
+  SECTION("a loader binds what it needs") {
+    ResourceCache<Texture> cache;
+    ResourceHandle<Texture> inner;
+    const ResourceHandle<Texture> outer = cache.bind(1, [&] {
+      inner = cache.bind(2, [] { return Texture(2); });
+      return Texture(1);
+    });
+    outer.wait();
+    inner.wait();
+    CHECK(inner->id == 2);
+  }
+
+  SECTION("a loader binds without workers, where it runs in bind") {
+    // A bind that held its lock while it ran the loader would wait for itself
+    // if both keys fall into one shard; with 64 shards, one of 64 keys does.
+    // init does nothing while the pool runs.
+    sc::threading::shutdown();
+    sc::threading::init(0);
+    REQUIRE(sc::threading::threadSlots() == 1);
+    {
+      ResourceCache<Texture> cache;
+      std::vector<ResourceHandle<Texture>> inner(64);
+      const ResourceHandle<Texture> outer = cache.bind(0, [&] {
+        for (size_t key = 0; key < inner.size(); ++key) {
+          inner[key] = cache.bind(key + 1, [key] { return Texture(static_cast<int>(key)); });
+        }
+        return Texture(-1);
+      });
+      CHECK(outer.ready());
+      CHECK(inner.back().ready());
+    }
+    sc::threading::shutdown();
+    sc::threading::init();
   }
 
   SECTION("one who waits loads it while all workers are busy") {
@@ -302,7 +392,7 @@ TEST_CASE("ECS Resource Load Async", "[ecs][resource][threading]") {
     }
 
     std::thread::id loadedOn;
-    const ResourceHandle<Texture> texture = cache.loadAsync(1, [&] {
+    const ResourceHandle<Texture> texture = cache.bind(1, [&] {
       loadedOn = std::this_thread::get_id();
       return Texture(1);
     });
@@ -318,11 +408,11 @@ TEST_CASE("ECS Resource Load Async", "[ecs][resource][threading]") {
 
   SECTION("a loader that throws") {
     ResourceCache<Texture> cache;
-    ResourceHandle<Texture> texture = cache.loadAsync(1, []() -> Texture { throw std::runtime_error("no file"); });
+    ResourceHandle<Texture> texture = cache.bind(1, []() -> Texture { throw std::runtime_error("no file"); });
     CHECK_THROWS_AS(texture.wait(), std::runtime_error);
     CHECK(texture.failed());
     CHECK(!texture.ready());
-    CHECK(cache.size() == 0);
+    CHECK(cache.size() == 1);
     texture.reset();
     // wait() returns once the state is Failed, but the task may still hold its
     // count then; the entry is queued by whoever lets go last.
@@ -335,15 +425,55 @@ TEST_CASE("ECS Resource Load Async", "[ecs][resource][threading]") {
     {
       ResourceCache<Texture> cache;
       cache
-          .loadAsync(1,
-                     [&] {
-                       std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                       loads.fetch_add(1);
-                       return Texture(1);
-                     })
+          .bind(1,
+                [&] {
+                  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                  loads.fetch_add(1);
+                  return Texture(1);
+                })
           .reset();
     }
     CHECK(loads.load() == 1);
+  }
+
+  SECTION("a task that shutdown drops fails its resource") {
+    ResourceCache<Texture> cache;
+    const size_t workers = sc::threading::threadSlots() - 1;
+    if (workers == 0) {
+      SKIP("No pool threads to keep busy");
+    }
+    std::atomic<size_t> busy{0};
+    // shutdown requests the stop and sets the worker count to 0 under one
+    // lock, before it joins: once threadSlots is 1, a worker that returns
+    // from here stops instead of taking the task of bind.
+    for (size_t i = 0; i < workers; ++i) {
+      sc::threading::detach([&] {
+        busy.fetch_add(1);
+        while (sc::threading::threadSlots() > 1) {
+          std::this_thread::yield();
+        }
+      });
+    }
+    while (busy.load() != workers) {
+      std::this_thread::yield();
+    }
+
+    std::atomic<int> loads{0};
+    ResourceHandle<Texture> texture = cache.bind(1, [&] {
+      loads.fetch_add(1);
+      return Texture(1);
+    });
+    sc::threading::shutdown();
+
+    CHECK(texture.failed());
+    CHECK(!texture.ready());
+    CHECK_THROWS_AS(texture.wait(), std::runtime_error);
+    CHECK(loads.load() == 0);
+    CHECK(cache.size() == 1);
+    texture.reset();
+    CHECK(cache.collect() == 1);
+    // The tests after this one expect a pool.
+    sc::threading::init();
   }
   CHECK(Texture::alive.load() == 0);
 }

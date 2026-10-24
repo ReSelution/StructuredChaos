@@ -207,10 +207,10 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
     REQUIRE(scheduler.stages() == Stages{{0, 1}});
   }
 
-  SECTION("A Cache Keeps Nobody Waiting") {
-    scheduler.add([](Query<Health>, Resources<Texture>) {});
-    scheduler.add([](Resources<Texture>) {});
-    scheduler.addParallel([](Resources<Texture>, Health &) {});
+  SECTION("Readers Of A Cache Keep Nobody Waiting") {
+    scheduler.add([](Query<Health>, Resources<const Texture>) {});
+    scheduler.add([](Resources<const Texture>) {});
+    scheduler.addParallel([](Resources<const Texture>, Health &) {});
     REQUIRE(scheduler.stages() == Stages{{0, 1}, {2}});
   }
 
@@ -294,6 +294,15 @@ TEST_CASE("ECS Scheduler Stages", "[ecs][scheduler]") {
     scheduler.add([](Query<const Position>, Emit<Hit>) {}, "fight");
     scheduler.add([](Global<const GameTime>) {});
     scheduler.on([](const Hit &, Global<GameTime>) {});
+    REQUIRE(scheduler.stages() == Stages{{0}, {1}});
+    scheduler.addParallel([](Emit<Hit>, const Position &) {}, "fight on all threads");
+    REQUIRE_THROWS_AS(scheduler.stages(), std::logic_error);
+  }
+
+  SECTION("A Listener Writes A Cache For A System, Not For A Loop") {
+    scheduler.add([](Query<const Position>, Emit<Hit>) {}, "fight");
+    scheduler.add([](Resources<const Texture>) {});
+    scheduler.on([](const Hit &, Resources<Texture>) {});
     REQUIRE(scheduler.stages() == Stages{{0}, {1}});
     scheduler.addParallel([](Emit<Hit>, const Position &) {}, "fight on all threads");
     REQUIRE_THROWS_AS(scheduler.stages(), std::logic_error);
@@ -1277,7 +1286,7 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     ResourceCache<Texture> textures;
     std::atomic<int> loads = 0;
     scheduler.provide(textures);
-    scheduler.addParallel([&](Entity entity, Commands commands, Resources<Texture> cache, const Velocity &) {
+    scheduler.addParallel([&](Entity entity, Commands commands, Resources<const Texture> cache, const Velocity &) {
       // Four keys for all entities: each is loaded once.
       const int id = static_cast<int>(sc::ecs::indexOf(entity) % 4);
       ResourceHandle<Texture> albedo = cache->load(static_cast<sc::h64>(id), [&] {
@@ -1540,7 +1549,7 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     scheduler.provide(named);
     Texture *got = nullptr;
     Texture *gotNamed = nullptr;
-    scheduler.add([&](Resources<Texture> cache, Resources<Texture, std::string> byName) {
+    scheduler.add([&](Resources<const Texture> cache, Resources<const Texture, std::string> byName) {
       got = &*cache->load(1, [] { return Texture{1}; });
       gotNamed = &*byName->load("one", [] { return Texture{2}; });
     });
@@ -1549,6 +1558,41 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     REQUIRE(gotNamed->id == 2);
     textures.collect();
     named.collect();
+  }
+
+  SECTION("Readers Of A Cache Run Apart From Its Writer") {
+    ResourceCache<Texture> textures;
+    ResourceCache<Texture, std::string> named;
+    scheduler.provide(textures);
+    scheduler.provide(named);
+    scheduler.add([](Resources<const Texture>) {}, "read");
+    scheduler.add([](Resources<const Texture>) {}, "read as well");
+    scheduler.add([](Resources<Texture, std::string>) {}, "write another cache");
+    scheduler.add([](Resources<Texture>) {}, "write");
+    const std::vector<std::vector<size_t>> &stages = scheduler.stages();
+    REQUIRE(stages.size() == 2);
+    CHECK(stages[0] == std::vector<size_t>{0, 1, 2});
+    CHECK(stages[1] == std::vector<size_t>{3});
+  }
+
+  SECTION("A Key Bound In A Stage Is There For Get After It") {
+    ResourceCache<Texture> textures;
+    scheduler.provide(textures);
+    ResourceHandle<Texture> kept;
+    bool lentInItsStage = true;
+    const Texture *after = nullptr;
+    scheduler.add([&](Resources<const Texture> cache) {
+      kept = cache->load(1, [] { return Texture{1}; });
+      lentInItsStage = cache->get(1) != nullptr;
+    });
+    // Writes the cache, so it runs in the next stage.
+    scheduler.add([&](Resources<Texture> cache) { after = cache->get(1); });
+    scheduler.run(world);
+    // Not yet in the map get looks into: apply comes after the stage.
+    CHECK_FALSE(lentInItsStage);
+    REQUIRE(after == &*kept);
+    kept.reset();
+    CHECK(textures.collect() == 1);
   }
 
   SECTION("Listeners Run Where The Event Is Emitted") {
