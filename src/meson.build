@@ -1,4 +1,5 @@
 sc_sources = files(
+  'sc/io/file_reader.cpp',
   'sc/localizations/magpie_translator.cpp',
   'sc/logger/logger.cpp',
   'sc/memory/arena_pool.cpp',

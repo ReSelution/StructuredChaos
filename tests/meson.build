@@ -129,6 +129,19 @@ benchmark(
   timeout: 300,
 )
 
+test_io = executable(
+  'test_io',
+  sources: [
+    'io/test_file_reader.cpp',
+  ],
+  dependencies: [
+    catch2_dep,
+    sc_dep,
+  ],
+)
+
+test('IO Tests', test_io, env: test_env, timeout: test_timeout)
+
 test_memory = executable(
   'test_memory',
   sources: [
