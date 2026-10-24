@@ -700,11 +700,12 @@ namespace sc::ecs::internal {
           assertNotLooped(this, index);
           if constexpr (HAS_VALUE) {
             there(valueAt(index));
+            touch(index);
           } else {
-            // No values, and so no address for one.
+            // No values, and so no address for one, and nothing that changed:
+            // a tag replaced is no change for Changed, as through Commands.
             there(nullptr);
           }
-          touch(index);
         } else {
           occupy(header, number, slot, 1);
           if constexpr (HAS_VALUE) {

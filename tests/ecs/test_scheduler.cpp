@@ -1757,3 +1757,69 @@ TEST_CASE("ECS Changes", "[ecs][scheduler][changes][threading]") {
     REQUIRE_THROWS_AS(loop(), std::logic_error);
   }
 }
+
+TEST_CASE("ECS Changes Of A Tag", "[ecs][scheduler][changes][threading]") {
+  sc::threading::init();
+
+  World world;
+  world.trackChanges<Frozen>();
+  std::vector<Entity> entities;
+  for (size_t i = 0; i < (2 * PAGE_SIZE) + 300; ++i) {
+    entities.push_back(world.create(Position{.x = static_cast<float>(i), .y = 0.0f}));
+  }
+  // Frozen before the reader first runs, on every 8th entity.
+  for (size_t i = 0; i < entities.size(); i += 8) {
+    world.emplace<Frozen>(entities[i]);
+  }
+  // The entities of the word of an entity that are frozen.
+  const auto wordOf = [&](Entity entity) {
+    return static_cast<size_t>(std::ranges::count_if(entities, [&](Entity other) {
+      return (sc::ecs::indexOf(other) >> 6) == (sc::ecs::indexOf(entity) >> 6) && world.contains<Frozen>(other);
+    }));
+  };
+
+  std::atomic<size_t> seen = 0;
+  Scheduler reader;
+  reader.addParallel<Query<const Position, Changed<Frozen>>>(
+      [&](const Position &) { seen.fetch_add(1, std::memory_order_relaxed); });
+  const auto read = [&] {
+    seen = 0;
+    reader.run(world);
+    return seen.load();
+  };
+  REQUIRE(read() == (entities.size() + 7) / 8);
+  REQUIRE(read() == 0);
+
+  SECTION("Adding It Is A Change, With The Word Around It") {
+    world.emplace<Frozen>(entities[5]);
+    REQUIRE(read() == wordOf(entities[5]));
+
+    Scheduler commands;
+    commands.add([&](Commands recorded) { recorded.emplace<Frozen>(entities[PAGE_SIZE + 1]); });
+    commands.run(world);
+    REQUIRE(read() == wordOf(entities[PAGE_SIZE + 1]));
+
+    Scheduler edits;
+    edits.add([&](Edit<Frozen> edit) { (void) edit.emplaceOrReplace<Frozen>(entities.back()); });
+    edits.run(world);
+    REQUIRE(read() == wordOf(entities.back()));
+  }
+
+  SECTION("Replacing It Is None, Through World, Commands And Edit") {
+    // Every 8th entity has it already.
+    world.emplaceOrReplace<Frozen>(entities[8]);
+    REQUIRE(read() == 0);
+
+    Scheduler writers;
+    writers.add([&](Commands commands) { commands.emplaceOrReplace<Frozen>(entities[16]); });
+    writers.add([&](Edit<Frozen> edit) { (void) edit.emplaceOrReplace<Frozen>(entities[24]); });
+    writers.add([&](LocalEdit<Frozen> edit) { (void) edit.emplaceOrReplace<Frozen>(entities[32]); });
+    writers.run(world);
+    REQUIRE(read() == 0);
+  }
+
+  SECTION("Erasing It Is None: the entity has no tag to be seen with") {
+    world.erase<Frozen>(entities[8]);
+    REQUIRE(read() == 0);
+  }
+}
