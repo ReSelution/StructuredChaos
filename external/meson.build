@@ -75,6 +75,14 @@ atomic_queue_dep = dependency(
   default_options: ['tests=false'],
 )
 
+# sc::io::FileReader reads through io_uring on Linux; elsewhere it reads
+# synchronously and needs nothing.
+if host_machine.system() == 'linux'
+  liburing_dep = dependency('liburing', fallback: ['liburing', 'liburing_dep'])
+else
+  liburing_dep = dependency('', required: false)
+endif
+
 # Needed by the public headers, so every consumer gets them as well.
 # TODO: entt and pfr were only used by the old sc::ecs, which is gone; entt
 # is still needed by tests/ecs_compare. Taking them out of here would break a
@@ -91,6 +99,7 @@ sc_public_deps = [
 
 # Only used inside the library's own sources.
 sc_private_deps = [
+  liburing_dep,
   simdutf_dep,
 ]
 
