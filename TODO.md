@@ -8,11 +8,11 @@ Found while integrating `sc::ecs` into [ecs_benchmark](https://github.com/abeiml
 
 ## Decisions of the benchmark integration to review
 
-- [ ] **Single thread:** the `World` wrapper of the benchmark calls `sc::threading::init(0)` once, so that the
-  benchmark thread has a slot of its own in `EntityAllocator::withShare` instead of going through `m_sharedMutex`. At
-  `b3e1fef` the difference no longer shows (create + 2 `emplace` of 65 536 entities, one thread: 10.34 ns per entity
-  without `init(0)`, 10.29 with it). Either the mutex is gone from this path or uncontended it costs nothing; check
-  before the comment in the benchmark's `World.h` is relied on (a TODO there says the same).
+- **Single thread:** the `World` wrapper of the benchmark calls `sc::threading::init(0)` once, so that the
+  benchmark thread has a slot of its own in `EntityAllocator::withShare` instead of going through `m_sharedMutex`.
+  Still needed at `25cf384`: a create that takes a new index costs 6.4 ns without it and 0.94 with it (65 536
+  entities, clang; with 2 `emplace` 10.7 and 8.6). Indices from the free list skip `withShare`, which is why
+  `BM_CreateEntities` (destroys between iterations) showed 10.34 against 10.29 at `b3e1fef`.
 - **No malloc override:** mimalloc is built with `MI_OVERRIDE OFF`; ecs uses it only through its own `mi_*` calls,
   the rest of the benchmark runs on the system malloc like every other framework. `tests/ecs_compare` instead uses
   mimalloc for all libraries.
