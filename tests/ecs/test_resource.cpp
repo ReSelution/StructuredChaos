@@ -16,7 +16,6 @@
 
 #include "sc/ecs/resource.hpp"
 #include "sc/ecs/world.hpp"
-#include "sc/io/file_reader.hpp"
 #include "sc/threading/threading.hpp"
 
 namespace {
@@ -60,12 +59,15 @@ namespace {
     TextureFiles(const TextureFiles &) = delete;
     TextureFiles &operator=(const TextureFiles &) = delete;
 
-    [[nodiscard]] std::string write(int id) const {
-      const std::filesystem::path file = dir / (std::to_string(id) + ".tex");
+    [[nodiscard]] std::string path(int id) const { return (dir / (std::to_string(id) + ".tex")).string(); }
+
+    // NOLINTNEXTLINE(modernize-use-nodiscard): written for the file, the path is a convenience
+    std::string write(int id) const {
+      const std::string file = path(id);
       std::ofstream stream(file, std::ios::binary);
       stream.put(static_cast<char>(id));
       stream << std::string(1000, 'x');
-      return file.string();
+      return file;
     }
 
     [[nodiscard]] std::string missing() const { return (dir / "missing.tex").string(); }
@@ -701,29 +703,70 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
   sc::threading::init();
   Texture::alive = 0;
   const TextureFiles textures;
-  sc::io::FileReader files;
   std::atomic<int> builds{0};
   const auto build = [&](std::span<const std::byte> bytes) {
     builds.fetch_add(1);
     return fromBytes(bytes);
   };
 
-  SECTION("the handle comes first, the bytes with a poll, the texture from a task") {
+  SECTION("the handle comes first, the bytes with apply, as the scheduler calls it after every stage") {
     ResourceCache<Texture> cache;
-    const ResourceHandle<Texture> texture = cache.bind(1, files, textures.write(1), build);
+    const ResourceHandle<Texture> texture = cache.bind(9, textures.write(9), build);
     REQUIRE(static_cast<bool>(texture));
+    // The bytes come only with a poll, which apply does.
     CHECK(!texture.ready());
-    while (!texture.ready()) {
-      (void) files.poll();
+    CHECK(cache.reads() == 1);
+    int applies = 0;
+    while (!texture.ready() && applies < 100000) {
+      (void) cache.apply();
+      ++applies;
       std::this_thread::yield();
     }
-    CHECK(texture->id == 1);
+    REQUIRE(texture.ready());
+    CHECK(texture->id == 9);
     CHECK(builds.load() == 1);
+    CHECK(cache.reads() == 0);
+  }
+
+  SECTION("with the path and the build of the cache") {
+    std::atomic<int> paths{0};
+    ResourceCache<Texture> cache(
+        [&](const sc::h64 &key) {
+          paths.fetch_add(1);
+          return textures.path(static_cast<int>(key));
+        },
+        build);
+    textures.write(10);
+    const ResourceHandle<Texture> first = cache.bind(10);
+    const ResourceHandle<Texture> second = cache.bind(10);
+    CHECK(first == second);
+    first.wait();
+    CHECK(first->id == 10);
+    (void) cache.apply();
+    // From the map apply fills, without a path either.
+    CHECK(cache.bind(10) == first);
+    // Only for the new key.
+    CHECK(paths.load() == 1);
+
+    ResourceHandle<Texture> missing = cache.bind(11);
+    CHECK_THROWS_AS(missing.wait(), std::system_error);
+    missing.reset();
+    sc::threading::waitUntilFinished();
+    CHECK(cache.collect() == 1);
+  }
+
+  SECTION("a path that throws fails the resource") {
+    ResourceCache<Texture> cache([](const sc::h64 &) -> std::string { throw std::runtime_error("no such asset"); },
+                                 build);
+    const ResourceHandle<Texture> texture = cache.bind(12);
+    CHECK(texture.failed());
+    CHECK_THROWS_AS(texture.wait(), std::runtime_error);
+    CHECK(cache.reads() == 0);
   }
 
   SECTION("wait polls the reader itself") {
     ResourceCache<Texture> cache;
-    const ResourceHandle<Texture> texture = cache.bind(2, files, textures.write(2), build);
+    const ResourceHandle<Texture> texture = cache.bind(2, textures.write(2), build);
     texture.wait();
     CHECK(texture->id == 2);
   }
@@ -731,18 +774,18 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
   SECTION("a key bound again is read once") {
     ResourceCache<Texture> cache;
     const std::string path = textures.write(3);
-    const ResourceHandle<Texture> first = cache.bind(3, files, path, build);
-    const ResourceHandle<Texture> second = cache.bind(3, files, path, build);
+    const ResourceHandle<Texture> first = cache.bind(3, path, build);
+    const ResourceHandle<Texture> second = cache.bind(3, path, build);
     CHECK(first == second);
     second.wait();
     sc::threading::waitUntilFinished();
     CHECK(builds.load() == 1);
-    CHECK(files.pending() == 0);
+    CHECK(cache.reads() == 0);
   }
 
   SECTION("a file that cannot be read fails the resource") {
     ResourceCache<Texture> cache;
-    ResourceHandle<Texture> texture = cache.bind(4, files, textures.missing(), build);
+    ResourceHandle<Texture> texture = cache.bind(4, textures.missing(), build);
     try {
       texture.wait();
       FAIL("no exception");
@@ -757,9 +800,8 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
 
   SECTION("a build that throws fails the resource") {
     ResourceCache<Texture> cache;
-    const ResourceHandle<Texture> texture =
-        cache.bind(5, files, textures.write(5),
-                   [](std::span<const std::byte>) -> Texture { throw std::runtime_error("bad texture"); });
+    const ResourceHandle<Texture> texture = cache.bind(
+        5, textures.write(5), [](std::span<const std::byte>) -> Texture { throw std::runtime_error("bad texture"); });
     CHECK_THROWS_AS(texture.wait(), std::runtime_error);
     CHECK(texture.failed());
   }
@@ -767,16 +809,16 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
   SECTION("a read whose handles went is parked once its bytes are there") {
     ResourceCache<Texture> cache;
     const std::string path = textures.write(6);
-    cache.bind(6, files, path, build).reset();
-    while (files.pending() != 0) {
-      (void) files.wait();
+    cache.bind(6, path, build).reset();
+    while (cache.reads() != 0) {
+      (void) cache.apply();
     }
     sc::threading::waitUntilFinished();
     CHECK(builds.load() == 0);
 
     // Bound again, it is built from the bytes it has, without a read.
-    const ResourceHandle<Texture> texture = cache.bind(6, files, path, build);
-    CHECK(files.pending() == 0);
+    const ResourceHandle<Texture> texture = cache.bind(6, path, build);
+    CHECK(cache.reads() == 0);
     texture.wait();
     CHECK(texture->id == 6);
     CHECK(builds.load() == 1);
@@ -785,12 +827,13 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
   SECTION("the destructor of the cache polls for reads under way") {
     {
       ResourceCache<Texture> cache;
-      cache.bind(7, files, textures.write(7), build).reset();
+      cache.bind(7, textures.write(7), build).reset();
     }
-    CHECK(files.pending() == 0);
+    // Got here: the destructor has not waited for a poll nobody does.
+    SUCCEED();
   }
 
-  SECTION("many threads bind files, one polls") {
+  SECTION("many threads bind files, the waits poll") {
     ResourceCache<Texture> cache;
     constexpr int KEYS = 100;
     std::vector<std::string> paths;
@@ -801,7 +844,7 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
     sc::threading::parallelFor(handles.size(), 8, 4, [&](size_t first, size_t last) {
       for (size_t i = first; i < last; ++i) {
         const auto key = static_cast<int>(i % KEYS);
-        handles[i] = cache.bind(static_cast<uint64_t>(key), files, paths[static_cast<size_t>(key)], build);
+        handles[i] = cache.bind(static_cast<uint64_t>(key), paths[static_cast<size_t>(key)], build);
       }
     });
     for (size_t i = 0; i < handles.size(); ++i) {
@@ -817,9 +860,9 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
     sc::threading::init(0);
     {
       ResourceCache<Texture> cache;
-      const ResourceHandle<Texture> texture = cache.bind(8, files, textures.write(8), build);
-      while (files.pending() != 0) {
-        (void) files.wait();
+      const ResourceHandle<Texture> texture = cache.bind(8, textures.write(8), build);
+      while (cache.reads() != 0) {
+        (void) cache.apply();
       }
       CHECK(texture.ready());
       CHECK(texture->id == 8);

@@ -21,7 +21,6 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include <ankerl/unordered_dense.h>
 
@@ -193,8 +192,7 @@ namespace sc::ecs::internal {
     // them, and only sleeps if there is none. Throws what the loader threw.
     //
     // While its file is read, it waits in the reader's wait instead: the
-    // bytes come only to whoever polls it. Throws what a done of another
-    // read of that reader throws, too.
+    // bytes come only to whoever polls it.
     void wait() {
       while (true) {
         claim(PendingRun::Load);
@@ -401,40 +399,40 @@ namespace sc::ecs {
     // What bind(key) loads with: called with the key on the pool, on several
     // threads at once.
     using DefaultLoader = std::move_only_function<T(const Key &) const>;
+    // What bind(key) reads and builds with instead, given both: the path of
+    // the file of a new key, and what makes the T of its bytes, on the pool,
+    // on several threads at once.
+    using FilePath = std::move_only_function<std::string(const Key &) const>;
+    using DefaultBuilder = std::move_only_function<T(std::span<const std::byte>) const>;
 
     // Without a loader of its own, bind takes one every time.
-    explicit ResourceCache(uint8_t owners = 1, size_t maxLoads = 0) : ResourceCache(nullptr, owners, maxLoads) {}
+    explicit ResourceCache(uint8_t owners = 1, size_t maxLoads = 0) :
+        ResourceCache(nullptr, nullptr, nullptr, owners, maxLoads) {}
 
     // maxLoads: how many loads of bind run on the pool at once; 0 for a
     // quarter of the workers there are when a load starts, at least one.
     explicit ResourceCache(DefaultLoader loader, uint8_t owners = 1, size_t maxLoads = 0) :
-        m_owners(owners), m_unused(std::make_unique<UnusedList[]>(owners)),
-        m_readers(std::make_unique<ReaderLock[]>(READERS)), m_shards(std::make_unique<Shard[]>(SHARDS)),
-        m_loader(std::move(loader)), m_maxLoads(maxLoads) {
-      assert(owners != 0);
-    }
+        ResourceCache(std::move(loader), nullptr, nullptr, owners, maxLoads) {}
+
+    // bind(key) reads the file at path(key) through the cache's reader and
+    // makes the resource with build, see bind with a file. path is called
+    // only for a key that is not there yet.
+    ResourceCache(FilePath path, DefaultBuilder build, uint8_t owners = 1, size_t maxLoads = 0) :
+        ResourceCache(nullptr, std::move(path), std::move(build), owners, maxLoads) {}
 
     // Everything there is goes. Waits for the loads on the pool first. No
     // handle may be left, and no member running.
     ~ResourceCache() {
-      // Reads of files come only with a poll of their reader, which nobody
+      // Reads of files come only with a poll of the reader, which nobody
       // else may do any more.
       while (true) {
-        std::vector<io::FileReader *> files;
         {
           std::unique_lock lock(m_taskMutex);
           if (m_tasksDone.wait_for(lock, std::chrono::milliseconds(1), [this] { return m_tasks == 0; })) {
             break;
           }
-          files = m_files;
         }
-        for (io::FileReader *const reader: files) {
-          try {
-            (void) reader->poll();
-            // NOLINTNEXTLINE(bugprone-empty-catch): what a done of somebody else throws is not ours to handle
-          } catch (...) {
-          }
-        }
+        pollFiles();
       }
       const auto destroyAll = [](const Map &map) {
         for (const auto &[key, entry]: map) {
@@ -454,15 +452,15 @@ namespace sc::ecs {
 
     // --- next to everything ------------------------------------------------
 
-    // The resource of the key, loaded with the loader of the cache if it is
-    // new, for owner 0.
+    // The resource of the key, if it is new loaded with the loader of the
+    // cache, or read from the file at its path and built, for owner 0.
     [[nodiscard]] ResourceHandle<T> bind(const Key &key) const { return bind(key, uint8_t{0}); }
 
-    // The same for the given owner. std::logic_error for a cache without a
-    // loader of its own.
+    // The same for the given owner. std::logic_error for a cache with
+    // neither.
     [[nodiscard]] ResourceHandle<T> bind(const Key &key, uint8_t owner) const {
       if (!m_loader) {
-        throw std::logic_error("ResourceCache: bind without a loader on a cache that has none");
+        return bindWithFilePath(key, owner);
       }
       return bind(key, owner, [this, key] { return m_loader(key); });
     }
@@ -543,32 +541,27 @@ namespace sc::ecs {
     // path if it is new, for owner 0.
     template<typename Build>
       requires ResourceBuilder<std::decay_t<Build>, T> && std::constructible_from<std::decay_t<Build>, Build>
-    [[nodiscard]] ResourceHandle<T> bind(const Key &key, io::FileReader &files, std::string path, Build &&build) const {
-      return bind(key, 0, files, std::move(path), std::forward<Build>(build));
+    [[nodiscard]] ResourceHandle<T> bind(const Key &key, std::string path, Build &&build) const {
+      return bind(key, 0, std::move(path), std::forward<Build>(build));
     }
 
-    // As bind with a loader, but in two steps if the key is new: files reads
-    // the file at path, without a worker that waits for it, and once a poll
-    // of files has the bytes, a task of the pool calls a copy of build with
-    // them, under maxLoads as any load; without workers, in that poll. The
-    // handle is failed() with a std::system_error if the file cannot be
-    // read.
+    // As bind with a loader, but in two steps if the key is new: the cache's
+    // io::FileReader reads the file at path, without a worker that waits for
+    // it, and once a poll of it has the bytes, a task of the pool calls a
+    // copy of build with them, under maxLoads as any load; without workers,
+    // in that poll. The handle is failed() with a std::system_error if the
+    // file cannot be read.
     //
-    // Somebody has to poll files: the scheduler, the game, or the wait of a
-    // handle, which does while the file is read. The destructor of the cache
-    // polls the readers of reads still under way, so files must live until
-    // the cache is gone or its reads are done.
+    // The reader is made by the first bind with a file, so a cache without
+    // one has no io_uring; std::system_error if the kernel has none for us.
+    // apply polls it, which the scheduler calls after every stage, and so
+    // does the wait of a handle while its file is read; through io_uring the
+    // bytes are there after two polls at the earliest, one for the open and
+    // one for the read.
     template<typename Build>
       requires ResourceBuilder<std::decay_t<Build>, T> && std::constructible_from<std::decay_t<Build>, Build>
-    [[nodiscard]] ResourceHandle<T> bind(const Key &key, uint8_t owner, io::FileReader &files, std::string path,
-                                         Build &&build) const {
-      assert(owner < m_owners);
-      const KeyHash hash = m_published.hash_for(key);
-      if (ResourceHandle<T> published = bindPublished(key, hash)) {
-        assert(published.m_entry->owner == owner);
-        return published;
-      }
-      return bindFresh(key, hash, owner, files, std::move(path), std::forward<Build>(build));
+    [[nodiscard]] ResourceHandle<T> bind(const Key &key, uint8_t owner, std::string path, Build &&build) const {
+      return bindFile(key, owner, [&path] { return std::move(path); }, std::forward<Build>(build));
     }
 
     // The resource of the key, loaded by loader() on the calling thread if
@@ -631,6 +624,10 @@ namespace sc::ecs {
     }
 
     [[nodiscard]] uint8_t owners() const noexcept { return m_owners; }
+
+    // How many files of bind are being read, whose bytes have not reached
+    // the cache yet: for a loading screen, say.
+    [[nodiscard]] size_t reads() const noexcept { return m_reads.load(std::memory_order_relaxed); }
 
     // --- next to each other, not next to the members below -----------------
 
@@ -745,8 +742,14 @@ namespace sc::ecs {
 
     // Takes the keys bound since the last apply into the map that find and
     // get look into without a lock, and returns how many. The scheduler
-    // calls it after every stage; without a new key it takes no lock.
+    // calls it after every stage; without a new key and without a read of
+    // bind with a file under way it takes no lock.
+    //
+    // Polls the reader of those reads first, so that their bytes reach the
+    // cache, and a build that runs in the poll (without workers) may bind
+    // keys, which are taken in right after.
     size_t apply() {
+      pollFiles();
       if (m_freshCount.load(std::memory_order_relaxed) == 0) {
         return 0;
       }
@@ -805,6 +808,13 @@ namespace sc::ecs {
     }
 
   private:
+    ResourceCache(DefaultLoader loader, FilePath path, DefaultBuilder build, uint8_t owners, size_t maxLoads) :
+        m_owners(owners), m_unused(std::make_unique<UnusedList[]>(owners)),
+        m_readers(std::make_unique<ReaderLock[]>(READERS)), m_shards(std::make_unique<Shard[]>(SHARDS)),
+        m_loader(std::move(loader)), m_filePath(std::move(path)), m_build(std::move(build)), m_maxLoads(maxLoads) {
+      assert(owners != 0);
+    }
+
     struct alignas(64) UnusedList {
       std::atomic<Base *> head{nullptr};
     };
@@ -950,20 +960,49 @@ namespace sc::ecs {
       return nullptr;
     }
 
+    // bind(key, owner) of a cache with a path and a build instead of a
+    // loader. Out of line: with it in bind(key, owner), bind of a key with
+    // the loader of the cache took 470-490 ns instead of 300-315 on 8
+    // threads in half of the runs (measured, threads pinned to cores; the
+    // cause is not found, see the commit of bind with a FileReader).
+    [[gnu::noinline]] ResourceHandle<T> bindWithFilePath(const Key &key, uint8_t owner) const {
+      if (!m_build) {
+        throw std::logic_error("ResourceCache: bind without a loader on a cache that has none");
+      }
+      // The path only for a key that is not there yet.
+      return bindFile(
+          key, owner, [this, &key] { return m_filePath(key); },
+          [this](std::span<const std::byte> bytes) { return m_build(bytes); });
+    }
+
+    // bind with a file, with the path from pathOf, called only for a key
+    // that is not there yet.
+    template<typename PathOf, typename Build>
+    [[nodiscard]] ResourceHandle<T> bindFile(const Key &key, uint8_t owner, PathOf &&pathOf, Build &&build) const {
+      assert(owner < m_owners);
+      const KeyHash hash = m_published.hash_for(key);
+      if (ResourceHandle<T> published = bindPublished(key, hash)) {
+        assert(published.m_entry->owner == owner);
+        return published;
+      }
+      return bindFresh(key, hash, owner, std::forward<PathOf>(pathOf), std::forward<Build>(build));
+    }
+
     // What bind with a file does after bindPublished.
-    template<typename Build>
-    [[nodiscard]] ResourceHandle<T> bindFresh(const Key &key, KeyHash hash, uint8_t owner, io::FileReader &files,
-                                              std::string path, Build &&build) const {
+    template<typename PathOf, typename Build>
+    [[nodiscard]] ResourceHandle<T> bindFresh(const Key &key, KeyHash hash, uint8_t owner, PathOf &&pathOf,
+                                              Build &&build) const {
+      io::FileReader &reader = files();
       Entry *made = nullptr;
       ResourceHandle<T> handle = findOrMake(key, hash, owner, made, [&](Entry &entry) {
         // Nobody may claim the load before the bytes are there.
         entry.claimed.store(true, std::memory_order_relaxed);
-        entry.reading.store(&files, std::memory_order_relaxed);
+        entry.reading.store(&reader, std::memory_order_relaxed);
         // One count for the caller, one for the read.
         entry.acquire();
       });
       if (made != nullptr) {
-        startRead(made, files, std::move(path), std::forward<Build>(build));
+        startRead(made, reader, std::forward<PathOf>(pathOf), std::forward<Build>(build));
       }
       return handle;
     }
@@ -1019,16 +1058,17 @@ namespace sc::ecs {
 
     // Hands the file of a new entry to the reader, with a count of the entry
     // and counted in m_tasks until its done has run.
-    template<typename Build>
-    void startRead(Entry *entry, io::FileReader &files, std::string path, Build &&build) const {
+    template<typename PathOf, typename Build>
+    void startRead(Entry *entry, io::FileReader &files, PathOf &&pathOf, Build &&build) const {
       {
         const std::scoped_lock lock(m_taskMutex);
-        if (std::ranges::find(m_files, &files) == m_files.end()) {
-          m_files.push_back(&files);
-        }
         ++m_tasks;
       }
+      // Release: whoever sees it above 0 sees m_files made.
+      m_reads.fetch_add(1, std::memory_order_release);
       try {
+        // A pathOf that throws fails the entry as a read that cannot start.
+        std::string path = std::forward<PathOf>(pathOf)();
         files.read(path,
                    [this, entry, path, build = std::decay_t<Build>(std::forward<Build>(build))](
                        io::FileResult file) mutable { bytesRead(entry, std::move(file), path, std::move(build)); });
@@ -1076,9 +1116,24 @@ namespace sc::ecs {
     }
 
     void readDone() const noexcept {
+      m_reads.fetch_sub(1, std::memory_order_relaxed);
       const std::scoped_lock lock(m_taskMutex);
       if (--m_tasks == 0) {
         m_tasksDone.notify_all();
+      }
+    }
+
+    // The reader of bind with a file, made by the first one.
+    [[nodiscard]] io::FileReader &files() const {
+      std::call_once(m_filesMade, [this] { m_files = std::make_unique<io::FileReader>(); });
+      return *m_files;
+    }
+
+    // For apply and the destructor: polls the reader while reads are under
+    // way.
+    void pollFiles() const {
+      if (m_reads.load(std::memory_order_acquire) != 0) {
+        (void) m_files->poll();
       }
     }
 
@@ -1217,6 +1272,8 @@ namespace sc::ecs {
     std::unique_ptr<ReaderLock[]> m_readers;
     std::unique_ptr<Shard[]> m_shards;
     DefaultLoader m_loader;
+    FilePath m_filePath;
+    DefaultBuilder m_build;
     // Keys put into a shard since the last apply. Changed under the lock of
     // the shard, read by apply without one: one bound while apply looks is
     // taken in by the next.
@@ -1230,9 +1287,11 @@ namespace sc::ecs {
     // the count of their task, under m_taskMutex.
     mutable size_t m_running = 0;
     mutable std::deque<Base *> m_waiting;
-    // The readers files of bind have been given to, for the destructor,
-    // under m_taskMutex.
-    mutable std::vector<io::FileReader *> m_files;
+    mutable std::once_flag m_filesMade;
+    mutable std::unique_ptr<io::FileReader> m_files;
+    // Reads of bind with a file whose done has not run yet, so that apply
+    // polls only while there are some.
+    mutable std::atomic<size_t> m_reads{0};
     mutable std::condition_variable m_tasksDone;
   };
 
