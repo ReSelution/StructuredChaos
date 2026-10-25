@@ -9,6 +9,7 @@
 #include <fstream>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -73,12 +74,38 @@ namespace {
     [[nodiscard]] std::string missing() const { return (dir / "missing.tex").string(); }
   };
 
-  // Called on workers, where Catch's macros must not be used: a file of
+  // Called on the lane, where Catch's macros must not be used: a file of
   // the wrong size gives -1, which the CHECKs of the id see.
   Texture fromBytes(std::span<const std::byte> bytes) {
     return Texture(bytes.size() == 1001 ? static_cast<int>(bytes[0]) : -1);
   }
 
+
+  // Keeps every thread of the lane busy until release, so that a task of
+  // bind waits in its queue.
+  std::vector<sc::threading::BackgroundTask<void>> blockLane(std::atomic<bool> &release) {
+    const size_t threads = sc::threading::backgroundThreadCount();
+    std::atomic<size_t> busy{0};
+    std::vector<sc::threading::BackgroundTask<void>> blockers;
+    for (size_t i = 0; i < threads; ++i) {
+      blockers.push_back(sc::threading::spawn([&busy, &release] {
+        busy.fetch_add(1);
+        release.wait(false);
+      }));
+    }
+    while (busy.load() != threads) {
+      std::this_thread::yield();
+    }
+    return blockers;
+  }
+
+  void unblock(std::atomic<bool> &release, std::vector<sc::threading::BackgroundTask<void>> &blockers) {
+    release.store(true);
+    release.notify_all();
+    for (auto &blocker: blockers) {
+      blocker.get();
+    }
+  }
 } // namespace
 
 TEST_CASE("ECS Resource Collect", "[ecs][resource]") {
@@ -242,7 +269,7 @@ TEST_CASE("ECS Resource Loader Throws", "[ecs][resource][threading]") {
     CHECK(thrown.load() == WAITERS);
     CHECK(cache.size() == 1);
     texture.reset();
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     CHECK(cache.collect() == 1);
   }
 }
@@ -274,7 +301,7 @@ TEST_CASE("ECS Resource Owners", "[ecs][resource][threading]") {
       cache.bind(static_cast<uint64_t>(key), owner, [key] { return Texture(key); }).reset();
       (void) cache.collect(owner);
     }
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     (void) cache.collect(0);
     (void) cache.collect(1);
 
@@ -315,6 +342,18 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     CHECK(texture->id == 5);
     CHECK(cache.bind(5) == texture);
     CHECK(loads.load() == 1);
+  }
+
+  SECTION("the loader runs on the lane, not on the pool") {
+    ResourceCache<Texture> cache;
+    std::atomic<bool> onLane{false};
+    const ResourceHandle<Texture> texture = cache.bind(1, [&] {
+      onLane = sc::threading::onBackgroundThread();
+      return Texture(1);
+    });
+    sc::threading::waitUntilBackgroundFinished();
+    CHECK(texture.ready());
+    CHECK(onLane.load());
   }
 
   SECTION("without a loader of the cache") {
@@ -379,7 +418,7 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     for (size_t i = 0; i < HANDLES; ++i) {
       REQUIRE(handles[i] == handles[i % KEYS]);
     }
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     CHECK(loads.load() == static_cast<int>(KEYS));
     CHECK(cache.size() == KEYS);
     CHECK(cache.apply() == KEYS);
@@ -387,9 +426,9 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
   }
 
   SECTION("many threads bind and drop while tasks park and start again") {
-    // Measured with counters in the entry: about 3 000 loads parked, 2 600
-    // started again by a bind and 950 done by a thread that waits. Four
-    // helpers leave the other workers free to run the tasks meanwhile; a key
+    // Measured with counters in the entry, while the tasks ran on the pool:
+    // about 3 000 loads parked, 2 600 started again by a bind and 950 done
+    // by a thread that waits. Four helpers bind; a key
     // is waited for by every third key only, and collect is rare enough for
     // a parked one to be bound again first.
     ResourceCache<Texture> cache;
@@ -412,7 +451,7 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
       }
     });
     CHECK(wrong.load() == 0);
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     (void) cache.collect();
     CHECK(cache.size() == 0);
   }
@@ -429,13 +468,13 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     CHECK(inner->id == 2);
   }
 
-  SECTION("a loader binds without workers, where it runs in bind") {
+  SECTION("a loader binds without a lane, where it runs in bind") {
     // A bind that held its lock while it ran the loader would wait for itself
     // if both keys fall into one shard; with 64 shards, one of 64 keys does.
-    // init does nothing while the pool runs.
+    // init does nothing while the pool and the lane run.
     sc::threading::shutdown();
-    sc::threading::init(0);
-    REQUIRE(sc::threading::threadSlots() == 1);
+    sc::threading::init(0, 0);
+    REQUIRE(sc::threading::backgroundThreadCount() == 0);
     {
       ResourceCache<Texture> cache;
       std::vector<ResourceHandle<Texture>> inner(64);
@@ -452,34 +491,24 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     sc::threading::init();
   }
 
-  SECTION("one who waits loads it while all workers are busy") {
+  SECTION("one who waits loads it while the lane is busy") {
     ResourceCache<Texture> cache;
-    const size_t workers = sc::threading::threadSlots() - 1;
-    std::atomic<size_t> busy{0};
     std::atomic<bool> release{false};
-    for (size_t i = 0; i < workers; ++i) {
-      sc::threading::detach([&] {
-        busy.fetch_add(1);
-        release.wait(false);
-      });
-    }
-    while (busy.load() != workers) {
-      std::this_thread::yield();
-    }
+    std::vector<sc::threading::BackgroundTask<void>> blockers = blockLane(release);
 
     std::thread::id loadedOn;
     const ResourceHandle<Texture> texture = cache.bind(1, [&] {
       loadedOn = std::this_thread::get_id();
       return Texture(1);
     });
-    // Without a free worker the task waits in the queue: wait takes the load.
+    // Without a free thread of the lane the task waits in its queue: wait
+    // takes the load.
     texture.wait();
     CHECK(loadedOn == std::this_thread::get_id());
     CHECK(texture->id == 1);
 
-    release.store(true);
-    release.notify_all();
-    sc::threading::waitUntilFinished();
+    unblock(release, blockers);
+    sc::threading::waitUntilBackgroundFinished();
   }
 
   SECTION("a loader that throws") {
@@ -492,7 +521,7 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     texture.reset();
     // wait() returns once the state is Failed, but the task may still hold its
     // count then; the entry is queued by whoever lets go last.
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     CHECK(cache.collect() == 1);
   }
 
@@ -517,21 +546,8 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
 
   SECTION("a load whose handles went before its task started waits for the next bind") {
     ResourceCache<Texture> cache;
-    const size_t workers = sc::threading::threadSlots() - 1;
-    if (workers == 0) {
-      SKIP("No pool threads to keep busy");
-    }
-    std::atomic<size_t> busy{0};
     std::atomic<bool> release{false};
-    for (size_t i = 0; i < workers; ++i) {
-      sc::threading::detach([&] {
-        busy.fetch_add(1);
-        release.wait(false);
-      });
-    }
-    while (busy.load() != workers) {
-      std::this_thread::yield();
-    }
+    std::vector<sc::threading::BackgroundTask<void>> blockers = blockLane(release);
     std::atomic<int> loads{0};
     const auto loader = [&] {
       loads.fetch_add(1);
@@ -539,9 +555,8 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     };
     cache.bind(1, loader).reset();
     cache.bind(2, loader).reset();
-    release.store(true);
-    release.notify_all();
-    sc::threading::waitUntilFinished();
+    unblock(release, blockers);
+    sc::threading::waitUntilBackgroundFinished();
     CHECK(loads.load() == 0);
     CHECK(cache.size() == 2);
     CHECK(cache.apply() == 2);
@@ -578,29 +593,26 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
       CHECK(cache.size() == 0);
     }
 
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     CHECK(loads.load() <= 1);
   }
 
-  SECTION("a task that shutdown drops fails its resource, also one that waits in the cache") {
+  SECTION("a task that shutdownBackground drops fails its resource, also one that waits in the cache") {
     ResourceCache<Texture> cache(1, 1);
-    const size_t workers = sc::threading::threadSlots() - 1;
-    if (workers == 0) {
-      SKIP("No pool threads to keep busy");
-    }
+    // Until shutdownBackground stops them: a thread of the lane that returns
+    // from here stops then instead of taking the task of bind.
+    const size_t threads = sc::threading::backgroundThreadCount();
     std::atomic<size_t> busy{0};
-    // shutdown requests the stop and sets the worker count to 0 under one
-    // lock, before it joins: once threadSlots is 1, a worker that returns
-    // from here stops instead of taking the task of bind.
-    for (size_t i = 0; i < workers; ++i) {
-      sc::threading::detach([&] {
+    std::vector<sc::threading::BackgroundTask<void>> blockers;
+    for (size_t i = 0; i < threads; ++i) {
+      blockers.push_back(sc::threading::spawn([&](const std::stop_token &stop) {
         busy.fetch_add(1);
-        while (sc::threading::threadSlots() > 1) {
+        while (!stop.stop_requested()) {
           std::this_thread::yield();
         }
-      });
+      }));
     }
-    while (busy.load() != workers) {
+    while (busy.load() != threads) {
       std::this_thread::yield();
     }
 
@@ -612,7 +624,10 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     ResourceHandle<Texture> texture = cache.bind(1, loader);
     // With one load at a time, this one waits in the cache.
     ResourceHandle<Texture> waiting = cache.bind(2, loader);
-    sc::threading::shutdown();
+    sc::threading::shutdownBackground();
+    for (auto &blocker: blockers) {
+      blocker.get();
+    }
 
     CHECK(texture.failed());
     CHECK(!texture.ready());
@@ -623,8 +638,8 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
     texture.reset();
     waiting.reset();
     CHECK(cache.collect() == 2);
-    // The tests after this one expect a pool.
-    sc::threading::init();
+    // The tests after this one expect a lane.
+    sc::threading::initBackground();
   }
   CHECK(Texture::alive.load() == 0);
 }
@@ -632,9 +647,9 @@ TEST_CASE("ECS Resource Bind", "[ecs][resource][threading]") {
 TEST_CASE("ECS Resource Loads In Flight", "[ecs][resource][threading]") {
   sc::threading::init();
   Texture::alive = 0;
-  const size_t workers = sc::threading::threadSlots() - 1;
-  if (workers < 2) {
-    SKIP("Needs two workers for loads to run at once");
+  const size_t threads = sc::threading::backgroundThreadCount();
+  if (threads < 2) {
+    SKIP("Needs two threads of the lane for loads to run at once");
   }
 
   // Binds 40 keys whose loaders take a while and returns how many of them
@@ -654,7 +669,7 @@ TEST_CASE("ECS Resource Loads In Flight", "[ecs][resource][threading]") {
         return Texture(key);
       }));
     }
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     for (int key = 0; key < 40; ++key) {
       CHECK(handles[static_cast<size_t>(key)]->id == key);
     }
@@ -668,11 +683,11 @@ TEST_CASE("ECS Resource Loads In Flight", "[ecs][resource][threading]") {
     CHECK(most <= 2);
   }
 
-  SECTION("a quarter of the workers by default") {
+  SECTION("half the lane by default") {
     ResourceCache<Texture> cache;
     const size_t most = mostAtOnce(cache);
     CHECK(most >= 1);
-    CHECK(most <= std::max<size_t>(1, workers / 4));
+    CHECK(most <= std::max<size_t>(1, threads / 2));
   }
 
   SECTION("one who waits loads it while it waits in the cache") {
@@ -694,7 +709,7 @@ TEST_CASE("ECS Resource Loads In Flight", "[ecs][resource][threading]") {
     release.store(true);
     release.notify_all();
     first.wait();
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
   }
   CHECK(Texture::alive.load() == 0);
 }
@@ -751,7 +766,7 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
     ResourceHandle<Texture> missing = cache.bind(11);
     CHECK_THROWS_AS(missing.wait(), std::system_error);
     missing.reset();
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     CHECK(cache.collect() == 1);
   }
 
@@ -778,7 +793,7 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
     const ResourceHandle<Texture> second = cache.bind(3, path, build);
     CHECK(first == second);
     second.wait();
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     CHECK(builds.load() == 1);
     CHECK(cache.reads() == 0);
   }
@@ -813,7 +828,7 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
     while (cache.reads() != 0) {
       (void) cache.apply();
     }
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     CHECK(builds.load() == 0);
 
     // Bound again, it is built from the bytes it has, without a read.
@@ -851,13 +866,13 @@ TEST_CASE("ECS Resource Bind File", "[ecs][resource][io]") {
       handles[i].wait();
       CHECK(handles[i]->id == static_cast<int>(i % KEYS));
     }
-    sc::threading::waitUntilFinished();
+    sc::threading::waitUntilBackgroundFinished();
     CHECK(builds.load() == KEYS);
   }
 
-  SECTION("without workers the texture is built in the poll") {
+  SECTION("without a lane the texture is built in the poll") {
     sc::threading::shutdown();
-    sc::threading::init(0);
+    sc::threading::init(0, 0);
     {
       ResourceCache<Texture> cache;
       const ResourceHandle<Texture> texture = cache.bind(8, textures.write(8), build);

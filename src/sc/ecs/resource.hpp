@@ -79,7 +79,7 @@ namespace sc::ecs::internal {
 
     std::atomic<uint32_t> refs{1};
     std::atomic<ResourceState> state{ResourceState::Loading};
-    // False while its load waits in the queue of the pool: the first thread
+    // False while its load waits in the queue of the lane: the first thread
     // to set it calls pending, the task or one that waits for the resource.
     // Also true while it is parked; the thread that takes PARKED clears it.
     std::atomic<bool> claimed{false};
@@ -153,7 +153,7 @@ namespace sc::ecs::internal {
       }
     }
 
-    // Takes the load left in the queue of the pool, if nobody has yet, and
+    // Takes the load left in the queue of the lane, if nobody has yet, and
     // runs it (Load) or lets it fail (Fail). True if this thread took it.
     bool claim(PendingRun run) noexcept {
       if (claimed.load(std::memory_order_relaxed) || claimed.exchange(true, std::memory_order_acq_rel)) {
@@ -186,10 +186,12 @@ namespace sc::ecs::internal {
     [[nodiscard]] bool parked() const noexcept { return (refs.load(std::memory_order_relaxed) & PARKED) != 0; }
 
     // Until the load of the entry is over. A load that has not started yet is
-    // done here, so that threads of the pool that all wait for it do not wait
-    // for a task none of them is free to run. Otherwise a thread that waits
-    // joins a parallelFor of another thread meanwhile, the loader's among
-    // them, and only sleeps if there is none. Throws what the loader threw.
+    // done here, so that a thread that waits for it does not wait behind
+    // other tasks of the lane. Otherwise a thread that waits joins a
+    // parallelFor of the frame meanwhile, unless it is a thread of the lane,
+    // and only sleeps if there is none; a parallelFor of a loader on the lane
+    // it does not join, see sc::threading::helpThread. Throws what the loader
+    // threw.
     //
     // While its file is read, it waits in the reader's wait instead: the
     // bytes come only to whoever polls it.
@@ -207,7 +209,10 @@ namespace sc::ecs::internal {
           continue;
         }
         const auto loaded = [this] { return state.load(std::memory_order_acquire) != ResourceState::Loading; };
-        if (!threading::helpThread(loaded)) {
+        // A loader of the lane that waits for another resource does not join
+        // the frame: at SCHED_IDLE, the frame would wait for its chunk until
+        // it gets a core.
+        if (threading::onBackgroundThread() || !threading::helpThread(loaded)) {
           state.wait(ResourceState::Loading, std::memory_order_acquire);
         }
       }
@@ -318,7 +323,7 @@ namespace sc::ecs {
     internal::ResourceEntry<T> *m_entry = nullptr;
   };
 
-  // Resources shared by key, each loaded once on the pool, as entt's
+  // Resources shared by key, each loaded once on the background lane, as entt's
   // resource_cache, and given back only where their owner says.
   //
   //   ResourceCache<Texture> textures([](h64 key) { return Texture(assets.path(key)); });
@@ -332,15 +337,16 @@ namespace sc::ecs {
   //   scheduler.add([](Resources<Texture> textures) { textures->collect(); }, "collect textures");
   //
   // bind gives the handle of a key right away. If the key is new, it starts
-  // the load on the pool, with the loader of the cache or the one it is
+  // the load on the background lane (sc::threading::spawn), with the loader
+  // of the cache or the one it is
   // given; the handle is ready() once it is done. Every bind of the key gets
   // the same resource, also from threads that bind it at the same time.
   //
-  // At most maxLoads of these loads run on the pool at once, a quarter of
-  // the workers by default; the others wait in the cache, not in the queue
-  // of the pool. A loader that waits for the disk keeps its worker from
-  // joining the parallelFor of a frame, so the rest of the workers stay free
-  // for that.
+  // Not on the pool: a loader that waits for the disk or decodes for long
+  // would keep a worker from the parallelFor of a frame. At most maxLoads of
+  // these loads run on the lane at once, half of its threads by default; the
+  // others wait in the cache, not in the queue of the lane, so that loads
+  // leave the lane to other tasks as well.
   //
   // Which members may run at the same time:
   //
@@ -396,11 +402,11 @@ namespace sc::ecs {
     using KeyHash = Map::precomputed_hash;
 
   public:
-    // What bind(key) loads with: called with the key on the pool, on several
+    // What bind(key) loads with: called with the key on the lane, on several
     // threads at once.
     using DefaultLoader = std::move_only_function<T(const Key &) const>;
     // What bind(key) reads and builds with instead, given both: the path of
-    // the file of a new key, and what makes the T of its bytes, on the pool,
+    // the file of a new key, and what makes the T of its bytes, on the lane,
     // on several threads at once.
     using FilePath = std::move_only_function<std::string(const Key &) const>;
     using DefaultBuilder = std::move_only_function<T(std::span<const std::byte>) const>;
@@ -409,8 +415,8 @@ namespace sc::ecs {
     explicit ResourceCache(uint8_t owners = 1, size_t maxLoads = 0) :
         ResourceCache(nullptr, nullptr, nullptr, owners, maxLoads) {}
 
-    // maxLoads: how many loads of bind run on the pool at once; 0 for a
-    // quarter of the workers there are when a load starts, at least one.
+    // maxLoads: how many loads of bind run on the lane at once; 0 for half of
+    // the threads it has when a load starts, at least one.
     explicit ResourceCache(DefaultLoader loader, uint8_t owners = 1, size_t maxLoads = 0) :
         ResourceCache(std::move(loader), nullptr, nullptr, owners, maxLoads) {}
 
@@ -420,7 +426,7 @@ namespace sc::ecs {
     ResourceCache(FilePath path, DefaultBuilder build, uint8_t owners = 1, size_t maxLoads = 0) :
         ResourceCache(nullptr, std::move(path), std::move(build), owners, maxLoads) {}
 
-    // Everything there is goes. Waits for the loads on the pool first. No
+    // Everything there is goes. Waits for the loads on the lane first. No
     // handle may be left, and no member running.
     ~ResourceCache() {
       // Reads of files come only with a poll of the reader, which nobody
@@ -474,10 +480,10 @@ namespace sc::ecs {
     }
 
     // The resource of the key right away, loaded or not. If the key is new,
-    // a task of the pool calls a copy of loader, and the handle is ready()
+    // a task of the lane calls a copy of loader, and the handle is ready()
     // once it is done, failed() if loader threw; with maxLoads running, the
     // task waits in the cache first. A thread that waits for it before the
-    // task starts calls the loader itself, and without workers in the pool it
+    // task starts calls the loader itself, and without threads in the lane it
     // is called here. The owner belongs to the resource: if it is
     // there already, it keeps the one it was loaded with, and debug builds
     // assert that it is the same.
@@ -490,8 +496,8 @@ namespace sc::ecs {
     // A load whose task finds every handle gone before it starts is not done:
     // the next bind or find of the key starts it again.
     //
-    // threading::shutdown drops tasks that have not started, those that wait
-    // in the cache too: their resources fail.
+    // threading::shutdownBackground drops tasks that have not started, those
+    // that wait in the cache too: their resources fail.
     template<typename Loader>
       requires ResourceLoader<std::decay_t<Loader>, T> && std::constructible_from<std::decay_t<Loader>, Loader>
     [[nodiscard]] ResourceHandle<T> bind(const Key &key, uint8_t owner, Loader &&loader) const {
@@ -527,7 +533,7 @@ namespace sc::ecs {
         }
       }
       ResourceHandle<T> handle(entry);
-      // Not under the lock: without workers the loader runs here, and it may
+      // Not under the lock: without a lane the loader runs here, and it may
       // bind keys of the same shard.
       if (made) {
         startTask(entry);
@@ -546,9 +552,9 @@ namespace sc::ecs {
     }
 
     // As bind with a loader, but in two steps if the key is new: the cache's
-    // io::FileReader reads the file at path, without a worker that waits for
-    // it, and once a poll of it has the bytes, a task of the pool calls a
-    // copy of build with them, under maxLoads as any load; without workers,
+    // io::FileReader reads the file at path, without a thread that waits for
+    // it, and once a poll of it has the bytes, a task of the lane calls a
+    // copy of build with them, under maxLoads as any load; without a lane,
     // in that poll. The handle is failed() with a std::system_error if the
     // file cannot be read.
     //
@@ -688,7 +694,7 @@ namespace sc::ecs {
     // threw; the resource is failed then.
     //
     // Nobody may use the old one meanwhile: the scheduler keeps systems
-    // apart, not a loader on the pool that holds a handle of it.
+    // apart, not a loader on the lane that holds a handle of it.
     template<typename Loader>
       requires ResourceLoader<Loader, T>
     ResourceHandle<T> forceLoad(const Key &key, uint8_t owner, Loader &&loader) {
@@ -746,7 +752,7 @@ namespace sc::ecs {
     // bind with a file under way it takes no lock.
     //
     // Polls the reader of those reads first, so that their bytes reach the
-    // cache, and a build that runs in the poll (without workers) may bind
+    // cache, and a build that runs in the poll (without a lane) may bind
     // keys, which are taken in right after.
     size_t apply() {
       pollFiles();
@@ -908,15 +914,15 @@ namespace sc::ecs {
       }
     };
 
-    // The task of bind on the pool. Holds one count of the entry and is
+    // The task of bind on the lane. Holds one count of the entry and is
     // counted in m_tasks until it goes, whether it ran or was dropped; on the
-    // pool, also in m_running.
+    // lane, also in m_running.
     class Task {
     public:
-      Task(const ResourceCache *cache, Base *entry, bool onPool) noexcept :
-          m_cache(cache), m_entry(entry), m_onPool(onPool) {}
+      Task(const ResourceCache *cache, Base *entry, bool onLane) noexcept :
+          m_cache(cache), m_entry(entry), m_onLane(onLane) {}
       Task(Task &&other) noexcept :
-          m_cache(other.m_cache), m_entry(std::exchange(other.m_entry, nullptr)), m_onPool(other.m_onPool),
+          m_cache(other.m_cache), m_entry(std::exchange(other.m_entry, nullptr)), m_onLane(other.m_onLane),
           m_ran(other.m_ran) {}
       Task &operator=(Task &&) = delete;
 
@@ -928,7 +934,7 @@ namespace sc::ecs {
             m_entry->claim(internal::PendingRun::Fail);
           }
           m_entry->release();
-          m_cache->taskDone(m_onPool);
+          m_cache->taskDone(m_onLane);
         }
       }
 
@@ -940,7 +946,7 @@ namespace sc::ecs {
     private:
       const ResourceCache *m_cache;
       Base *m_entry;
-      bool m_onPool;
+      bool m_onLane;
       bool m_ran = false;
     };
 
@@ -1101,7 +1107,7 @@ namespace sc::ecs {
       entry->unpark();
       entry->reading.store(nullptr, std::memory_order_release);
       // noexcept on purpose, as PendingLoad::run: a task that cannot be
-      // detached for want of memory would leave the entry loading for ever.
+      // queued for want of memory would leave the entry loading for ever.
       startTask(entry);
       readDone();
     }
@@ -1157,7 +1163,7 @@ namespace sc::ecs {
         restart = entry->acquireFound();
       }
       ResourceHandle<T> handle(entry);
-      // Not under the lock: without workers the loader runs here, and it may
+      // Not under the lock: without a lane the loader runs here, and it may
       // bind keys too.
       if (restart) {
         startParked(entry);
@@ -1175,35 +1181,43 @@ namespace sc::ecs {
 
     // Runs the pending load of the entry as a task, which takes over one
     // count of it, or lets it wait in m_waiting while maxLoads run. Without
-    // workers it runs here, and no limit counts it.
+    // threads in the lane it runs here, and no limit counts it.
     void startTask(Base *entry) const {
-      const bool onPool = threading::threadSlots() > 1;
+      const bool onLane = threading::backgroundThreadCount() != 0;
       {
         const std::scoped_lock lock(m_taskMutex);
-        if (onPool && m_running >= loadLimit()) {
+        if (onLane && m_running >= loadLimit()) {
           m_waiting.push_back(entry);
           ++m_tasks;
           return;
         }
         ++m_tasks;
-        m_running += onPool ? 1 : 0;
+        m_running += onLane ? 1 : 0;
       }
-      Task task(this, entry, onPool);
-      if (onPool) {
-        threading::detach(std::move(task));
+      Task task(this, entry, onLane);
+      if (onLane) {
+        submit(std::move(task));
       } else {
         task();
       }
     }
 
-    // A task that ran or was dropped hands its place on the pool to the next
-    // load that waits. One that shutdown drops does so too: the next is
-    // detached into the queue shutdown is emptying, and dropped in turn.
-    void taskDone(bool onPool) const noexcept {
+    // Without a stop: a load has no point to stop at, and one whose handles
+    // all went is parked by its task anyway.
+    static void submit(Task task) {
+      threading::internal::submitBackground([task = std::move(task)](const std::stop_token &) mutable { task(); },
+                                            std::stop_source(std::nostopstate));
+    }
+
+    // A task that ran or was dropped hands its place on the lane to the next
+    // load that waits. One that shutdownBackground drops does so too: the
+    // next is queued where shutdownBackground is emptying, and dropped in
+    // turn.
+    void taskDone(bool onLane) const noexcept {
       Base *next = nullptr;
       {
         const std::scoped_lock lock(m_taskMutex);
-        if (onPool) {
+        if (onLane) {
           if (!m_waiting.empty() && m_running <= loadLimit()) {
             next = m_waiting.front();
             m_waiting.pop_front();
@@ -1217,16 +1231,25 @@ namespace sc::ecs {
         }
       }
       if (next != nullptr) {
-        threading::detach(Task(this, next, true));
+        submit(Task(this, next, true));
       }
     }
 
-    // The maxLoads given to the constructor, or a quarter of the workers.
+    // The maxLoads given to the constructor, or half the threads of the lane:
+    // 500 loads bound at once next to 40 frames of a parallelFor of 1600 x
+    // 10 us (Ryzen 7 5800X, 15 workers, 4 threads of the lane), median ms per
+    // frame, ms for the loads and the frames, ms another task of the lane
+    // spawned right after waits: without loads 1.16-1.22; loads that sleep
+    // 2 ms, maxLoads 1 / 2 / 4: 1.22-1.27, 813-902, 0 / 1.26, 522, 0 / 1.24-
+    // 1.25, 266-286, 2.0-2.4; loads that compute 2 ms: 1.29, 1030-1057, 0 /
+    // 1.29-1.34, 566-568, 0 / 1.35-1.37, 303, 2.3-3.3. On the pool before,
+    // a quarter of the workers (3), sleeping: 1.22-1.25 against 1.09-1.11
+    // without, 353.
     [[nodiscard]] size_t loadLimit() const noexcept {
       if (m_maxLoads != 0) {
         return m_maxLoads;
       }
-      return std::max<size_t>(1, (threading::threadSlots() - 1) / 4);
+      return std::max<size_t>(1, threading::backgroundThreadCount() / 2);
     }
 
     // Calls the loader for an entry that is loading, and takes over one count
@@ -1279,11 +1302,15 @@ namespace sc::ecs {
     // taken in by the next.
     mutable std::atomic<size_t> m_freshCount{0};
     size_t m_maxLoads;
+    // TODO: taken by taskDone on a thread of the lane, at SCHED_IDLE, and by
+    // startTask in a bind of a system: a system that binds a new key while
+    // such a thread holds it waits until the thread gets a core. Held for a
+    // few instructions; not measured.
     mutable std::mutex m_taskMutex;
     // Loads of bind that have not gone yet, waiting ones too, under
     // m_taskMutex.
     mutable size_t m_tasks = 0;
-    // Tasks on the pool, and the entries that wait for a place there with
+    // Tasks on the lane, and the entries that wait for a place there with
     // the count of their task, under m_taskMutex.
     mutable size_t m_running = 0;
     mutable std::deque<Base *> m_waiting;
