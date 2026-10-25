@@ -304,10 +304,9 @@ with parallel.
 - **Scaling:** systems at 1M, no changes, 482 → 59 µs on 16 threads (8.2x; flecs 5.2x). 100K: 47 → 10 µs, about 10 µs
   being the fixed cost of two parallel loops.
 - [ ] Not measured: uneven work per entity, more than 16 threads, against a pool such as TBB or OpenMP.
-- [ ] **The state of the logging at exit:** a worker that logs first (a detached task that throws) makes the state
-  of `sc/logger` and the registry of spdlog after `initPool` registered `shutdownPool` with atexit, so they are
-  destroyed while the workers still run. TSan reports it for the lane, which `initLogState` fixed (`77e5e62`);
-  `initPool` has a TODO, `initLogState()` there would do.
+- **The state of the logging outlives the pool:** `initPool` calls `initLogState` before it registers
+  `shutdownPool` with atexit, as `initBackground` does (`77e5e62`). Before, 64 detached tasks that throw and a return
+  from `main` gave a heap-use-after-free in the registry of spdlog under TSan, 10 of 10 runs; now 0 of 10.
 - **One queue, no priorities** (`f40b2df`): everything on the pool is work of the frame. The queue maps 64 MB instead
   of 3 x 64 MB of address space (commit limit on Windows).
 
