@@ -1734,15 +1734,15 @@ namespace sc::ecs {
           // them either way; why was not found. Iterating 2 components on
           // every 2nd entity of 100K, on one thread, took 3.5 % less. GCC the
           // same either way.
-          // TODO: -Wunused-lambda-capture for generations in every loop whose
-          // function takes no entity (e.g. test_world.cpp:401); capture it
-          // only WITH_ENTITY, without giving up the copies above.
           const auto call = [&function, &watcher, values, base, generations](uint32_t slot) SC_FORCE_INLINE_LAMBDA {
             watcher.at(base + slot);
             if constexpr (WITH_ENTITY) {
               std::apply(function, std::tuple_cat(std::tuple{makeEntity(base + slot, generations[slot])},
                                                   internal::componentOn(std::get<G>(values), slot)...));
             } else {
+              // Null here. Captured anyway so that there is one lambda for
+              // both; this use keeps -Wunused-lambda-capture quiet.
+              static_cast<void>(generations);
               std::apply(function, std::tuple_cat(internal::componentOn(std::get<G>(values), slot)...));
             }
           };
