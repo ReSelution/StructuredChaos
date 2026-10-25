@@ -546,6 +546,40 @@ namespace sc::ecs::internal {
     return index;
   }
 
+  // Reserved addresses that get their memory from the start on, as far as
+  // they are used: the bytes before the count may be touched, the ones
+  // behind it not yet (on Windows they fault, elsewhere commit does
+  // nothing). memory::commit may run for the same bytes on several threads,
+  // so growing takes no lock.
+  class CommittedStart {
+  public:
+    explicit CommittedStart(size_t bytes) noexcept : m_bytes(bytes) {}
+
+    // Makes the bytes before end usable; end is at most the size given.
+    SC_FORCE_INLINE void reach(std::byte *start, size_t end) {
+      if (end > m_committed.load(std::memory_order_acquire)) [[unlikely]] {
+        grow(start, end);
+      }
+    }
+
+  private:
+    // Whole pages of the OS, but not past the end of the part.
+    [[gnu::noinline, gnu::cold]] void grow(std::byte *start, size_t end) {
+      const size_t target =
+          std::min(m_bytes, (end + memory::OS_PAGE_SIZE - 1) / memory::OS_PAGE_SIZE * memory::OS_PAGE_SIZE);
+      size_t committed = m_committed.load(std::memory_order_acquire);
+      if (committed < target) {
+        memory::commit(start + committed, target - committed);
+      }
+      while (committed < target && !m_committed.compare_exchange_weak(committed, target, std::memory_order_acq_rel,
+                                                                      std::memory_order_acquire)) {
+      }
+    }
+
+    std::atomic<size_t> m_committed{0};
+    size_t m_bytes;
+  };
+
   template<typename... Types>
   struct List {};
 
@@ -633,13 +667,8 @@ namespace sc::ecs {
 
     // The pages are those of every column of the world, see Pages.
     explicit World(Pages pages = Pages::Auto) : m_pages(pages), m_table(memory::reserve(TABLE_BYTES)) {
-      // All null from the start, and without memory until used.
-      // TODO: TABLE_BYTES is about 1 MiB per world, committed right away. On
-      // Windows that counts against the commit limit for every world, though
-      // only programs with more than NEAR_COMPONENT_TYPES component types
-      // touch it. Could be made in blocks when first used, as the headers of
-      // a column are.
-      memory::commit(m_table, TABLE_BYTES);
+      // All null from the start, and without memory until used, see
+      // CommittedStart.
       auto *const start = static_cast<std::byte *>(m_table);
       m_farColumns = {reinterpret_cast<std::atomic<internal::ColumnBase *> *>(start), FAR_COMPONENT_TYPES};
       m_columnList = {reinterpret_cast<internal::ColumnBase **>(start + FAR_BYTES), internal::MAX_COMPONENT_TYPES};
@@ -1502,7 +1531,10 @@ namespace sc::ecs {
     // the first time.
     template<typename... Components>
     [[nodiscard]] uint32_t areaOf() {
-      std::atomic<uint32_t> &slot = m_setAreas[internal::setIndex<std::remove_cvref_t<Components>...>()];
+      const size_t set = internal::setIndex<std::remove_cvref_t<Components>...>();
+      m_setsCommitted.reach(reinterpret_cast<std::byte *>(m_setAreas.data()),
+                            (set + 1) * sizeof(std::atomic<uint32_t>));
+      std::atomic<uint32_t> &slot = m_setAreas[set];
       if (const uint32_t area = slot.load(std::memory_order_acquire); area != 0) [[likely]] {
         return area;
       }
@@ -1555,7 +1587,15 @@ namespace sc::ecs {
     // slotOf for a type from NEAR_COMPONENT_TYPES on, out of the loops that
     // look up a column.
     SC_NOINLINE SC_COLD const std::atomic<internal::ColumnBase *> &farSlot(size_t index) const {
-      return m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
+      return farSlotAt(index);
+    }
+
+    // The far slot of a type, with its memory.
+    std::atomic<internal::ColumnBase *> &farSlotAt(size_t index) const {
+      const size_t at = index - internal::NEAR_COMPONENT_TYPES;
+      m_farCommitted.reach(reinterpret_cast<std::byte *>(m_farColumns.data()),
+                           (at + 1) * sizeof(std::atomic<internal::ColumnBase *>));
+      return m_farColumns[at];
     }
 
     // The columns of the components a loop names, as it uses them: a loop
@@ -1637,7 +1677,7 @@ namespace sc::ecs {
     // look up a column.
     template<typename Type>
     SC_NOINLINE SC_COLD internal::Column<Type> &farColumn(size_t index) {
-      std::atomic<internal::ColumnBase *> &slot = m_farColumns[index - internal::NEAR_COMPONENT_TYPES];
+      std::atomic<internal::ColumnBase *> &slot = farSlotAt(index);
       if (internal::ColumnBase *found = slot.load(std::memory_order_acquire)) [[likely]] {
         return static_cast<internal::Column<Type> &>(*found);
       }
@@ -1653,11 +1693,13 @@ namespace sc::ecs {
       if (internal::ColumnBase *found = slot.load(std::memory_order_relaxed)) {
         return static_cast<internal::Column<Type> &>(*found);
       }
+      const size_t count = m_columnCount.load(std::memory_order_relaxed);
+      m_listCommitted.reach(reinterpret_cast<std::byte *>(m_columnList.data()),
+                            (count + 1) * sizeof(internal::ColumnBase *));
       // Owned until the push, which may throw.
       std::unique_ptr<internal::Column<Type>> owned{new internal::Column<Type>{m_pages}};
       m_columnPages.push_back(owned->headerPages());
       auto *const made = owned.release();
-      const size_t count = m_columnCount.load(std::memory_order_relaxed);
       m_columnList[count] = made;
       m_columnCount.store(count + 1, std::memory_order_release);
       slot.store(made, std::memory_order_release);
@@ -1829,8 +1871,8 @@ namespace sc::ecs {
     static constexpr size_t FAR_COMPONENT_TYPES = internal::MAX_COMPONENT_TYPES - internal::NEAR_COMPONENT_TYPES;
     static constexpr size_t FAR_BYTES = sizeof(internal::ColumnBase *) * FAR_COMPONENT_TYPES;
     static constexpr size_t LIST_BYTES = sizeof(internal::ColumnBase *) * internal::MAX_COMPONENT_TYPES;
-    static constexpr size_t TABLE_BYTES =
-        FAR_BYTES + LIST_BYTES + (sizeof(std::atomic<uint32_t>) * internal::MAX_COMPONENT_SETS);
+    static constexpr size_t SETS_BYTES = sizeof(std::atomic<uint32_t>) * internal::MAX_COMPONENT_SETS;
+    static constexpr size_t TABLE_BYTES = FAR_BYTES + LIST_BYTES + SETS_BYTES;
     // No word of a kill page yet, for destroyQuietly: past every index / 64.
     static constexpr uint32_t NO_WORD = ~uint32_t{0};
     // For every page there may be.
@@ -1851,6 +1893,11 @@ namespace sc::ecs {
     // The area of every set of components, at internal::setIndex; 0 for none
     // yet. Written once, under m_columnMutex.
     std::span<std::atomic<uint32_t>> m_setAreas;
+    // How far each of the three has its memory. Mutable: a const lookup of a
+    // far column may be the first to touch its slot.
+    mutable internal::CommittedStart m_farCommitted{FAR_BYTES};
+    internal::CommittedStart m_listCommitted{LIST_BYTES};
+    internal::CommittedStart m_setsCommitted{SETS_BYTES};
     std::atomic<size_t> m_columnCount{0};
     // Held while a column or the area of a set is made.
     std::mutex m_columnMutex;

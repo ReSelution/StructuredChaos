@@ -17,6 +17,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "sc/ecs/world.hpp"
@@ -1578,6 +1579,48 @@ TEST_CASE("World Components", "[ecs][world]") {
       REQUIRE(right == entities.size());
     }
   }
+}
+
+namespace {
+
+  // A component type of its own for every number.
+  template<size_t N>
+  struct Numbered {
+    size_t value;
+  };
+
+  // Numbers the type and the set of only it, without a world.
+  template<size_t N>
+  void numberType() {
+    static_cast<void>(sc::ecs::internal::componentIndex<Numbered<N>>());
+    static_cast<void>(sc::ecs::internal::setIndex<Numbered<N>>());
+  }
+
+} // namespace
+
+TEST_CASE("World Tables Past Their First Page", "[ecs][world]") {
+  // A page of the OS holds 512 far slots or 1024 areas of sets, which a world
+  // gives memory only when used; on Windows touching one without it faults.
+  // Called through a table, as a fold over 1100 types is too deep for clang.
+  constexpr size_t COUNT = 1100;
+  constexpr auto numbering = []<size_t... N>(std::index_sequence<N...>) {
+    return std::array<void (*)(), sizeof...(N)>{&numberType<N>...};
+  }(std::make_index_sequence<COUNT>{});
+  for (void (*const number)(): numbering) {
+    number();
+  }
+  using Last = Numbered<COUNT - 1>;
+  REQUIRE(sc::ecs::internal::componentIndex<Last>() >= sc::ecs::internal::NEAR_COMPONENT_TYPES + 512);
+  REQUIRE(sc::ecs::internal::setIndex<Last>() >= 1024);
+
+  World world;
+  const World &constWorld = world;
+  const Entity entity = world.create(Last{.value = 7});
+  REQUIRE(world.get<Last>(entity).value == 7);
+  REQUIRE(constWorld.get<Last>(entity).value == 7);
+  // A far slot without a column, read through a const world.
+  REQUIRE_FALSE(constWorld.contains<Numbered<COUNT - 2>>(entity));
+  REQUIRE(world.alive() == 1);
 }
 
 TEST_CASE("World Loops", "[ecs][world][threading]") {
