@@ -934,6 +934,11 @@ namespace sc::ecs {
       assertAlone();
       if (m_killPlace == nullptr) {
         m_killPlace = static_cast<uint32_t *>(memory::reserve(KILL_PLACE_BYTES));
+        // TODO: KILL_PLACE_BYTES is 4 MiB, committed at the first destroy of
+        // many; on Windows that counts against the commit limit, though only
+        // the places of pages in use are touched. CommittedStart does not fit
+        // (pages are not used from the first on); blocks as for the headers
+        // of a column would.
         memory::commit(m_killPlace, KILL_PLACE_BYTES);
       }
       // The bits of the entities of one word of a kill page, gathered here
