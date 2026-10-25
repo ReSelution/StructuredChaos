@@ -27,12 +27,12 @@ out from the pages instead of counted (its own cost not measured).
 ## Resource cache
 
 `ResourceCache<T>` in `src/sc/ecs/resource.hpp`: `bind(key)` gives a handle once, at spawn, and loads a new key on
-the pool with the cache's loader or the one given; afterwards a system only asks `ready()`. `find` and `get` read
+the background lane with the cache's loader or the one given; afterwards a system only asks `ready()`. `find` and `get` read
 without a lock, `forceLoad`, `apply` and `collect` change the map and must not run next to them.
 
 - [ ] **A debug check for pointers of `get`:** they are good until the next `forceLoad` or `collect` (in a system, the
   end of its stage); nothing catches one that is kept longer.
-- [ ] **`forceLoad` while a loader on the pool uses the old resource:** the scheduler keeps systems apart, not tasks.
+- [ ] **`forceLoad` while a loader on the lane uses the old resource:** the scheduler keeps systems apart, not tasks.
   A reload that keeps the old one until the new one is loaded needs a second place in the entry.
 - [ ] **Unload and reload with the handles kept:** today a resource goes only once all its handles are gone, and
   comes back by binding the key again. For entities that stay while their textures go (texture streaming, LOD), an
@@ -40,6 +40,9 @@ without a lock, `forceLoad`, `apply` and `collect` change the map and must not r
   Only once the world streams that way; chunks that are destroyed and spawned again need nothing more.
 - [ ] **One allocation per push in `DeletionQueue`:** the function with its captures, plus one per `bind` of a new key
   (the copy of the loader). Not measured; typed lists (`VkImage` + `VmaAllocation`) if thousands per frame show.
+- [ ] **`m_taskMutex` next to the lane:** `taskDone` takes it on a thread of the lane, at SCHED_IDLE, and `startTask`
+  in a `bind` of a system. A system that binds a new key while such a thread holds it waits until the thread gets a
+  core. Held for a few instructions; not measured. A count without a lock if it shows.
 - [ ] **Frames overlapping without a render thread:** `Scheduler::run` must not be called from a pool thread, so a
   render world cannot run its systems next to the simulation of the next frame yet (as Bevy's extract or Naughty
   Dog's fiber jobs do). Only matters once a CPU-bound frame shows it.
@@ -48,7 +51,13 @@ Done: `Resources<T, Key, Hash>` as a system parameter after `scheduler.provide(c
 measured); GPU resources go through `memory::DeletionQueue` in their destructor, the cache knows no frames; whoever
 waits for a task that has not started runs the loader itself.
 
-- **At most maxLoads loads of bind on the pool at once** (constructor, default a quarter of the workers when a load
+- **Loads on the background lane** (`aa491ba`), of a loader and of a build once a read has the bytes; without
+  threads in the lane, `bind` loads where it is called. maxLoads is half the lane by default, so loads leave it to
+  other tasks. 500 loads bound at once next to 40 frames (Ryzen 7 5800X, 15 workers, 4 lane threads), median ms per
+  frame / ms for loads and frames: without loads 1.16-1.22; sleeping 2 ms, default 1.26 / 522, whole lane 1.24-1.25 /
+  266-286 (another lane task waits 2.0-2.4 ms then); computing 2 ms, default 1.29-1.34 / 566. A thread of the lane
+  that waits for a resource does not join a `parallelFor` of the frame.
+- **At most maxLoads loads of bind on the pool at once** (before the lane) (constructor, default a quarter of the workers when a load
   starts, at least one); the others wait in the cache, and whoever waits for one loads it itself. A loader that
   blocks keeps its worker from the frame's `parallelFor`. Measured with 500 loads that sleep 2 ms (as a blocking read
   would) bound at once, then 40 frames of a `parallelFor` of 1600 x 10 us (clang, 15 workers): no loads 1.09-1.11 ms
@@ -295,6 +304,40 @@ with parallel.
 - **Scaling:** systems at 1M, no changes, 482 → 59 µs on 16 threads (8.2x; flecs 5.2x). 100K: 47 → 10 µs, about 10 µs
   being the fixed cost of two parallel loops.
 - [ ] Not measured: uneven work per entity, more than 16 threads, against a pool such as TBB or OpenMP.
+- [ ] **The state of the logging at exit:** a worker that logs first (a detached task that throws) makes the state
+  of `sc/logger` and the registry of spdlog after `initPool` registered `shutdownPool` with atexit, so they are
+  destroyed while the workers still run. TSan reports it for the lane, which `initLogState` fixed (`77e5e62`);
+  `initPool` has a TODO, `initLogState()` there would do.
+- **One queue, no priorities** (`f40b2df`): everything on the pool is work of the frame. The queue maps 64 MB instead
+  of 3 x 64 MB of address space (commit limit on Windows).
+
+## Background lane and Tasks
+
+`sc::threading::spawn` and `Service` in `src/sc/threading/background.hpp`: threads beside the pool for what takes
+longer than a frame or blocks; `Tasks` in `src/sc/ecs/scheduler.hpp` gives the result back through Commands at the
+start of `Scheduler::run`.
+
+- [ ] **A parameter of `addParallel` that is not a known one counts as a component:** `Entity` anywhere but first,
+  or a new kind of system parameter missing from `isLoopExtra` (as `Tasks` was at first), and the loop silently runs
+  over no entity. TODO at `LoopRest`; a `static_assert` against `Entity` and the `SystemParam` types would catch it.
+- [ ] **Not measured:** the priority of the lane on Windows (`THREAD_PRIORITY_BELOW_NORMAL`); the default size of the
+  lane (a quarter of the hardware threads, measured with 4 and 8); why a niceness does nothing on Linux.
+
+Done:
+
+- **The lane** (`ef29382`): a `RingQueue` and a semaphore of its own, no lock that a system in `spawn` could wait for.
+  A blocking call costs the frame nothing: 500 tasks that sleep 2 ms, median ms per frame 3.00 on the pool, 1.12-1.15
+  on the lane, 1.13-1.18 without.
+- **SCHED_IDLE, not a niceness** (`ef29382`): 8 tasks that compute 200 ms, median ms per frame: on the pool 2.44-2.55,
+  nice 0 / 10 / 19 alike 2.50-2.71, SCHED_IDLE 1.41-1.49, none 1.13-1.18.
+- **A `parallelFor` of the lane gets half the workers, only while the frame has none for them** (`ef29382`): they
+  leave after the chunk in hand. A loop that runs all the time with 100 us chunks, one frame per 16 ms, median / p99
+  ms per frame: no loop 1.21 / 1.3-1.4, all workers 2.2-2.6 / 4.3-4.8, half 1.20-1.27 / 1.4-2.4; the loop does 11.9
+  / 6.8 s of work per second, 0.9 alone. Sixteen SCHED_IDLE threads without the pool cost the frame as much as all
+  workers: the load on every core, not the wait for a chunk.
+- **`Tasks`** (`0aab5d5`): `then` once at the start of `run`, so every system of a run sees the same results; a
+  `TaskHandle` is one `stop_source`, `cancel` also keeps `then` from being called after the work is done. A run
+  without tasks: 33.4 ns before, 35.2 with the check whether the queue is empty.
 
 ## Random access
 
