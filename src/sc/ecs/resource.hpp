@@ -3,12 +3,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
-#include <chrono>
 #include <concepts>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -85,6 +82,10 @@ namespace sc::ecs::internal {
     std::atomic<bool> claimed{false};
     uint8_t owner;
     ResourceEntry *nextUnused = nullptr;
+    // While its load waits for a place on the lane, see
+    // ResourceCache::dispatch; not nextUnused, as its last handle may queue
+    // it meanwhile.
+    ResourceEntry *nextWaiting = nullptr;
     std::atomic<ResourceEntry *> *unused;
     // The load left for later: Load loads, Fail lets it fail without calling
     // the loader, Free only frees it, for a parked entry that goes. Each frees
@@ -430,15 +431,17 @@ namespace sc::ecs {
     // handle may be left, and no member running.
     ~ResourceCache() {
       // Reads of files come only with a poll of the reader, which nobody
-      // else may do any more.
-      while (true) {
-        {
-          std::unique_lock lock(m_taskMutex);
-          if (m_tasksDone.wait_for(lock, std::chrono::milliseconds(1), [this] { return m_tasks == 0; })) {
-            break;
-          }
+      // else may do any more. The done of a read counts its build in before
+      // it counts the read out, so the count of tasks only falls to 0 once
+      // the reads are over.
+      while (m_reads.load(std::memory_order_acquire) != 0) {
+        if (m_files->wait() == 0) {
+          std::this_thread::yield();
         }
-        pollFiles();
+      }
+      for (size_t now = m_tasks.load(std::memory_order_acquire); now != 0;
+           now = m_tasks.load(std::memory_order_acquire)) {
+        m_tasks.wait(now, std::memory_order_acquire);
       }
       const auto destroyAll = [](const Map &map) {
         for (const auto &[key, entry]: map) {
@@ -1066,10 +1069,7 @@ namespace sc::ecs {
     // and counted in m_tasks until its done has run.
     template<typename PathOf, typename Build>
     void startRead(Entry *entry, io::FileReader &files, PathOf &&pathOf, Build &&build) const {
-      {
-        const std::scoped_lock lock(m_taskMutex);
-        ++m_tasks;
-      }
+      m_tasks.fetch_add(1, std::memory_order_relaxed);
       // Release: whoever sees it above 0 sees m_files made.
       m_reads.fetch_add(1, std::memory_order_release);
       try {
@@ -1123,10 +1123,7 @@ namespace sc::ecs {
 
     void readDone() const noexcept {
       m_reads.fetch_sub(1, std::memory_order_relaxed);
-      const std::scoped_lock lock(m_taskMutex);
-      if (--m_tasks == 0) {
-        m_tasksDone.notify_all();
-      }
+      taskGone();
     }
 
     // The reader of bind with a file, made by the first one.
@@ -1180,25 +1177,87 @@ namespace sc::ecs {
     }
 
     // Runs the pending load of the entry as a task, which takes over one
-    // count of it, or lets it wait in m_waiting while maxLoads run. Without
-    // threads in the lane it runs here, and no limit counts it.
+    // count of it: on the lane once one of maxLoads places is free, see
+    // dispatch. Without threads in the lane it runs here, and no limit counts
+    // it.
     void startTask(Base *entry) const {
-      const bool onLane = threading::backgroundThreadCount() != 0;
-      {
-        const std::scoped_lock lock(m_taskMutex);
-        if (onLane && m_running >= loadLimit()) {
-          m_waiting.push_back(entry);
-          ++m_tasks;
+      m_tasks.fetch_add(1, std::memory_order_relaxed);
+      if (threading::backgroundThreadCount() == 0) {
+        Task(this, entry, false)();
+        return;
+      }
+      // A push only, and dispatch takes the whole list, so no ABA.
+      Base *head = m_incoming.load(std::memory_order_relaxed);
+      do {
+        entry->nextWaiting = head;
+      } while (!m_incoming.compare_exchange_weak(head, entry, std::memory_order_release, std::memory_order_relaxed));
+      dispatch();
+    }
+
+    // Starts loads that wait while fewer than maxLoads run, without a lock:
+    // the threads of the lane run at SCHED_IDLE, and a system that binds a
+    // key must not wait for one of them that holds a lock until it gets a
+    // core. One thread dispatches at a time; whoever comes meanwhile leaves
+    // a request, which the one that dispatches sees before it stops, and
+    // returns. 2000 new keys bound per frame on every pool thread while the
+    // lane finishes loads of 50 us (Ryzen 7 5800X, 15 workers, 4 threads of
+    // the lane), median / p99 ms per frame: with one mutex for this 0.386-
+    // 0.391 / 0.62-0.70, now 0.314-0.320 / 0.58-0.63; the loads take as long
+    // as before. The outliers of 2-3 ms come either way, cause not looked
+    // into.
+    void dispatch() const noexcept {
+      uint32_t handled = 1;
+      if (m_dispatchRequests.fetch_add(1, std::memory_order_acq_rel) != 0) {
+        return;
+      }
+      while (true) {
+        dispatchOnce();
+        const uint32_t left = m_dispatchRequests.fetch_sub(handled, std::memory_order_acq_rel) - handled;
+        if (left == 0) {
           return;
         }
-        ++m_tasks;
-        m_running += onLane ? 1 : 0;
+        handled = left;
       }
-      Task task(this, entry, onLane);
-      if (onLane) {
-        submit(std::move(task));
-      } else {
-        task();
+    }
+
+    // For the thread that dispatches: moves what was pushed since to the end
+    // of m_queued, in the order of startTask, and starts from its front.
+    // Only this thread raises m_running, so no more than the limit start.
+    void dispatchOnce() const noexcept {
+      Base *pushed = m_incoming.exchange(nullptr, std::memory_order_acquire);
+      // Newest first as pushed; reversed, the oldest goes first.
+      Base *oldest = nullptr;
+      Base *newest = pushed;
+      while (pushed != nullptr) {
+        Base *const next = pushed->nextWaiting;
+        pushed->nextWaiting = oldest;
+        oldest = pushed;
+        pushed = next;
+      }
+      if (oldest != nullptr) {
+        if (m_queuedTail != nullptr) {
+          m_queuedTail->nextWaiting = oldest;
+        } else {
+          m_queuedHead = oldest;
+        }
+        m_queuedTail = newest;
+      }
+      while (m_queuedHead != nullptr && m_running.load(std::memory_order_acquire) < loadLimit()) {
+        Base *const entry = m_queuedHead;
+        m_queuedHead = entry->nextWaiting;
+        if (m_queuedHead == nullptr) {
+          m_queuedTail = nullptr;
+        }
+        entry->nextWaiting = nullptr;
+        m_running.fetch_add(1, std::memory_order_relaxed);
+        submit(Task(this, entry, true));
+      }
+    }
+
+    // A load of bind or a read went: the destructor waits for none to be left.
+    void taskGone() const noexcept {
+      if (m_tasks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        m_tasks.notify_all();
       }
     }
 
@@ -1214,25 +1273,11 @@ namespace sc::ecs {
     // next is queued where shutdownBackground is emptying, and dropped in
     // turn.
     void taskDone(bool onLane) const noexcept {
-      Base *next = nullptr;
-      {
-        const std::scoped_lock lock(m_taskMutex);
-        if (onLane) {
-          if (!m_waiting.empty() && m_running <= loadLimit()) {
-            next = m_waiting.front();
-            m_waiting.pop_front();
-          } else {
-            --m_running;
-          }
-        }
-        // Not 0 with a next one: it is counted until its task goes.
-        if (--m_tasks == 0) {
-          m_tasksDone.notify_all();
-        }
+      if (onLane) {
+        m_running.fetch_sub(1, std::memory_order_acq_rel);
+        dispatch();
       }
-      if (next != nullptr) {
-        submit(Task(this, next, true));
-      }
+      taskGone();
     }
 
     // The maxLoads given to the constructor, or half the threads of the lane:
@@ -1302,24 +1347,26 @@ namespace sc::ecs {
     // taken in by the next.
     mutable std::atomic<size_t> m_freshCount{0};
     size_t m_maxLoads;
-    // TODO: taken by taskDone on a thread of the lane, at SCHED_IDLE, and by
-    // startTask in a bind of a system: a system that binds a new key while
-    // such a thread holds it waits until the thread gets a core. Held for a
-    // few instructions; not measured.
-    mutable std::mutex m_taskMutex;
-    // Loads of bind that have not gone yet, waiting ones too, under
-    // m_taskMutex.
-    mutable size_t m_tasks = 0;
-    // Tasks on the lane, and the entries that wait for a place there with
-    // the count of their task, under m_taskMutex.
-    mutable size_t m_running = 0;
-    mutable std::deque<Base *> m_waiting;
+    // Loads of bind that have not gone yet, waiting ones too, and reads whose
+    // done has not run.
+    mutable std::atomic<size_t> m_tasks{0};
+    // Tasks on the lane, raised only by the thread that dispatches.
+    mutable std::atomic<size_t> m_running{0};
+    // Loads that wait for a place on the lane with the count of their task:
+    // pushed by startTask, newest first, and taken whole by dispatch.
+    mutable std::atomic<Base *> m_incoming{nullptr};
+    // Those dispatch took and could not start yet, oldest first; only the
+    // thread that dispatches touches them.
+    mutable Base *m_queuedHead = nullptr;
+    mutable Base *m_queuedTail = nullptr;
+    // Calls of dispatch not handled yet; the one that takes it from 0
+    // dispatches.
+    mutable std::atomic<uint32_t> m_dispatchRequests{0};
     mutable std::once_flag m_filesMade;
     mutable std::unique_ptr<io::FileReader> m_files;
     // Reads of bind with a file whose done has not run yet, so that apply
     // polls only while there are some.
     mutable std::atomic<size_t> m_reads{0};
-    mutable std::condition_variable m_tasksDone;
   };
 
 } // namespace sc::ecs

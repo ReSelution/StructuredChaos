@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <stop_token>
@@ -681,6 +682,56 @@ TEST_CASE("ECS Resource Loads In Flight", "[ecs][resource][threading]") {
     const size_t most = mostAtOnce(cache);
     CHECK(most >= 1);
     CHECK(most <= 2);
+  }
+
+  SECTION("at most maxLoads at once while many threads bind") {
+    ResourceCache<Texture> cache(1, 2);
+    constexpr size_t KEYS = 400;
+    std::atomic<size_t> running{0};
+    std::atomic<size_t> most{0};
+    std::vector<ResourceHandle<Texture>> handles(KEYS);
+    sc::threading::parallelFor(KEYS, 4, [&](size_t first, size_t last) {
+      for (size_t i = first; i < last; ++i) {
+        handles[i] = cache.bind(static_cast<uint64_t>(i), [&, i] {
+          const size_t now = running.fetch_add(1) + 1;
+          size_t seen = most.load();
+          while (seen < now && !most.compare_exchange_weak(seen, now)) {
+          }
+          std::this_thread::sleep_for(std::chrono::microseconds(100));
+          running.fetch_sub(1);
+          return Texture(static_cast<int>(i));
+        });
+      }
+    });
+    sc::threading::waitUntilBackgroundFinished();
+    for (size_t i = 0; i < KEYS; ++i) {
+      REQUIRE(handles[i].ready());
+      REQUIRE(handles[i]->id == static_cast<int>(i));
+    }
+    CHECK(most.load() >= 1);
+    CHECK(most.load() <= 2);
+  }
+
+  SECTION("loads that wait start in the order of bind") {
+    ResourceCache<Texture> cache(1, 1);
+    std::atomic<bool> release{false};
+    std::vector<sc::threading::BackgroundTask<void>> blockers = blockLane(release);
+    std::mutex mutex;
+    std::vector<int> order;
+    std::vector<ResourceHandle<Texture>> handles;
+    for (int key = 0; key < 50; ++key) {
+      handles.push_back(cache.bind(static_cast<uint64_t>(key), [&, key] {
+        {
+          const std::scoped_lock lock(mutex);
+          order.push_back(key);
+        }
+        return Texture(key);
+      }));
+    }
+    unblock(release, blockers);
+    sc::threading::waitUntilBackgroundFinished();
+    REQUIRE(order.size() == 50);
+    CHECK(std::ranges::is_sorted(order));
   }
 
   SECTION("half the lane by default") {

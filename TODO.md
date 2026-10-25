@@ -40,9 +40,6 @@ without a lock, `forceLoad`, `apply` and `collect` change the map and must not r
   Only once the world streams that way; chunks that are destroyed and spawned again need nothing more.
 - [ ] **One allocation per push in `DeletionQueue`:** the function with its captures, plus one per `bind` of a new key
   (the copy of the loader). Not measured; typed lists (`VkImage` + `VmaAllocation`) if thousands per frame show.
-- [ ] **`m_taskMutex` next to the lane:** `taskDone` takes it on a thread of the lane, at SCHED_IDLE, and `startTask`
-  in a `bind` of a system. A system that binds a new key while such a thread holds it waits until the thread gets a
-  core. Held for a few instructions; not measured. A count without a lock if it shows.
 - [ ] **Frames overlapping without a render thread:** `Scheduler::run` must not be called from a pool thread, so a
   render world cannot run its systems next to the simulation of the next frame yet (as Bevy's extract or Naughty
   Dog's fiber jobs do). Only matters once a CPU-bound frame shows it.
@@ -51,6 +48,10 @@ Done: `Resources<T, Key, Hash>` as a system parameter after `scheduler.provide(c
 measured); GPU resources go through `memory::DeletionQueue` in their destructor, the cache knows no frames; whoever
 waits for a task that has not started runs the loader itself.
 
+- **No lock to start and finish a load:** a mutex was taken by `taskDone` on the lane, at SCHED_IDLE, and by
+  `startTask` in a `bind` of a system. Now a push-only list that one thread at a time takes and dispatches from, in
+  the order of `bind`. 2000 new keys bound per frame on every pool thread while the lane finishes loads of 50 us,
+  median / p99 ms per frame: 0.386-0.391 / 0.62-0.70 before, 0.314-0.320 / 0.58-0.63 now; loads as fast as before.
 - **Loads on the background lane** (`aa491ba`), of a loader and of a build once a read has the bytes; without
   threads in the lane, `bind` loads where it is called. maxLoads is half the lane by default, so loads leave it to
   other tasks. 500 loads bound at once next to 40 frames (Ryzen 7 5800X, 15 workers, 4 lane threads), median ms per
