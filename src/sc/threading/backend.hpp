@@ -1,7 +1,5 @@
 #pragma once
 
-#include <algorithm>
-#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -29,28 +27,25 @@ namespace sc::threading::internal {
   // nobody waits for.
   void logDetachedException() noexcept;
 
-  struct Queues {
-    std::array<TaskQueue, PRIORITY_COUNT> byPriority;
+  // One queue: everything on the pool is work of the frame, see detach.
+  struct Queue {
+    TaskQueue tasks;
 
-    bool tryPopAny(MoveOnlyFunction &task, int32_t workerId) {
-      return std::ranges::any_of(byPriority, [&](TaskQueue &q) { return q.tryPop(task, workerId); });
-    }
+    bool tryPop(MoveOnlyFunction &task, int32_t workerId) { return tasks.tryPop(task, workerId); }
 
-    [[nodiscard]] bool empty() const {
-      return std::ranges::all_of(byPriority, [](const TaskQueue &q) { return q.empty(); });
-    }
+    [[nodiscard]] bool empty() const { return tasks.empty(); }
 
     // Builds the task first, which may throw, and only then counts and pushes
     // it, which does not. A failed task leaves no trace in the pool.
-    template<Priority P, typename Callable>
+    template<typename Callable>
     void submit(Callable &&callable) {
       MoveOnlyFunction task(std::forward<Callable>(callable));
       onTaskEnqueued();
-      byPriority[static_cast<size_t>(P)].push(std::move(task));
+      tasks.push(std::move(task));
     }
   };
 
-  extern Queues queues;
+  extern Queue queue;
 
   // 0 for the thread that called init, a positive number for pool workers
   // and NO_THREAD_ID for every other thread.

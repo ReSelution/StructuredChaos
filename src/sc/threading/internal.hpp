@@ -26,7 +26,7 @@ namespace sc::threading::internal {
     return static_cast<ElementRef<R, T>>(item);
   }
 
-  // Capacity of each priority queue. The queue blocks a producer while it is
+  // Capacity of the queue of the pool. The queue blocks a producer while it is
   // full, which could stall a pool whose workers all produce, so it is large.
   // The memory of a slot is only touched when it is used, see RingQueue.
   inline constexpr uint64_t QUEUE_CAP = 1000000;

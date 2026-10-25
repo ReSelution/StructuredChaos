@@ -18,7 +18,7 @@
 
 namespace sc::threading::internal {
 
-  template<Priority P, typename F, typename... Args>
+  template<typename F, typename... Args>
     requires std::invocable<F, Args...>
   auto enqueue(F &&f, Args &&...args) -> std::future<std::invoke_result_t<F, Args...>> {
     using ReturnType = std::invoke_result_t<F, Args...>;
@@ -29,7 +29,7 @@ namespace sc::threading::internal {
         sizeof(std::decay_t<F>) + (sizeof(std::decay_t<Args>) + ... + 0) + sizeof(std::promise<ReturnType>);
 
     if constexpr (CAPTURE_SIZE <= INLINE_CAPTURE_LIMIT) {
-      queues.submit<P>([f = std::forward<F>(f), ... args = std::forward<Args>(args), p = std::move(promise)]() mutable {
+      queue.submit([f = std::forward<F>(f), ... args = std::forward<Args>(args), p = std::move(promise)]() mutable {
         try {
           if constexpr (std::is_void_v<ReturnType>) {
             f(std::forward<Args>(args)...);
@@ -44,7 +44,7 @@ namespace sc::threading::internal {
     } else {
       auto ctx = std::make_unique<std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>>>(
           std::forward<F>(f), std::make_tuple(std::forward<Args>(args)...));
-      queues.submit<P>([ctx = std::move(ctx), p = std::move(promise)]() mutable {
+      queue.submit([ctx = std::move(ctx), p = std::move(promise)]() mutable {
         try {
           auto &func = std::get<0>(*ctx);
           auto &savedArgs = std::get<1>(*ctx);
@@ -73,7 +73,7 @@ namespace sc::threading::internal {
   // range only if it was passed as an rvalue.
 
   // Without results: one future for the whole batch, see BatchState.
-  template<Priority P, typename R, typename F, typename... Args>
+  template<typename R, typename F, typename... Args>
   std::future<void> enqueueBatchInlineVoid(R &&r, size_t size, F &&f, Args &&...args) {
     auto state = std::make_shared<BatchState>(size);
     auto future = state->batchPromise.get_future();
@@ -83,7 +83,7 @@ namespace sc::threading::internal {
     }
 
     for (auto &&item: r) {
-      queues.submit<P>([f, args..., arg = forwardElement<R>(item), state]() mutable {
+      queue.submit([f, args..., arg = forwardElement<R>(item), state]() mutable {
         std::exception_ptr error;
         try {
           f(std::move(arg), args...);
@@ -97,7 +97,7 @@ namespace sc::threading::internal {
   }
 
   // With results: one future per element.
-  template<Priority P, typename RetType, typename R, typename F, typename... Args>
+  template<typename RetType, typename R, typename F, typename... Args>
   FutureGroup<RetType> enqueueBatchInline(R &&r, size_t size, F &&f, Args &&...args) {
     FutureGroup<RetType> futures;
     futures.reserve(size);
@@ -105,7 +105,7 @@ namespace sc::threading::internal {
     for (auto &&item: r) {
       std::promise<RetType> promise;
       futures.push(promise.get_future());
-      queues.submit<P>([f, args..., arg = forwardElement<R>(item), p = std::move(promise)]() mutable {
+      queue.submit([f, args..., arg = forwardElement<R>(item), p = std::move(promise)]() mutable {
         try {
           p.set_value(f(std::move(arg), args...));
         } catch (...) {
@@ -116,7 +116,7 @@ namespace sc::threading::internal {
     return futures;
   }
 
-  template<Priority P, typename R, typename F, typename... Args>
+  template<typename R, typename F, typename... Args>
   std::future<void> enqueueBatchMergedVoid(R &&r, size_t size, F &&f, Args &&...args) {
     auto shared = std::make_shared<MergedState<R, Args...>>(size, std::forward<R>(r), std::forward<Args>(args)...);
     auto future = shared->batchPromise.get_future();
@@ -125,7 +125,7 @@ namespace sc::threading::internal {
     }
 
     for (size_t i = 0; i < size; ++i) {
-      queues.submit<P>([f, shared, i]() mutable {
+      queue.submit([f, shared, i]() mutable {
         std::exception_ptr error;
         try {
           std::apply([&](auto &&...unpacked) { f(std::move(shared->payload[i]), unpacked...); }, shared->savedArgs);
@@ -138,7 +138,7 @@ namespace sc::threading::internal {
     return future;
   }
 
-  template<Priority P, typename RetType, typename R, typename F, typename... Args>
+  template<typename RetType, typename R, typename F, typename... Args>
   FutureGroup<RetType> enqueueBatchMerged(R &&r, size_t size, F &&f, Args &&...args) {
     struct State : MergedState<R, Args...> {
       std::vector<std::promise<RetType>> promises;
@@ -155,7 +155,7 @@ namespace sc::threading::internal {
     }
 
     for (size_t i = 0; i < size; ++i) {
-      queues.submit<P>([f, shared, i]() mutable {
+      queue.submit([f, shared, i]() mutable {
         try {
           shared->promises[i].set_value(std::apply(
               [&](auto &&...unpacked) { return f(std::move(shared->payload[i]), unpacked...); }, shared->savedArgs));
@@ -167,7 +167,7 @@ namespace sc::threading::internal {
     return futures;
   }
 
-  template<Priority P, std::ranges::sized_range R, typename F, typename... Args>
+  template<std::ranges::sized_range R, typename F, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...>
   auto enqueueBatch(R &&r, F &&f, Args &&...args) {
     const auto count = static_cast<size_t>(std::ranges::size(r));
@@ -184,17 +184,17 @@ namespace sc::threading::internal {
     auto dispatch = [&]() {
       if constexpr (inlineCaptures) {
         if constexpr (isVoid) {
-          return enqueueBatchInlineVoid<P>(std::forward<R>(r), count, std::forward<F>(f), std::forward<Args>(args)...);
+          return enqueueBatchInlineVoid(std::forward<R>(r), count, std::forward<F>(f), std::forward<Args>(args)...);
         } else {
-          return enqueueBatchInline<P, RetType>(std::forward<R>(r), count, std::forward<F>(f),
-                                                std::forward<Args>(args)...);
+          return enqueueBatchInline<RetType>(std::forward<R>(r), count, std::forward<F>(f),
+                                             std::forward<Args>(args)...);
         }
       } else {
         if constexpr (isVoid) {
-          return enqueueBatchMergedVoid<P>(std::forward<R>(r), count, std::forward<F>(f), std::forward<Args>(args)...);
+          return enqueueBatchMergedVoid(std::forward<R>(r), count, std::forward<F>(f), std::forward<Args>(args)...);
         } else {
-          return enqueueBatchMerged<P, RetType>(std::forward<R>(r), count, std::forward<F>(f),
-                                                std::forward<Args>(args)...);
+          return enqueueBatchMerged<RetType>(std::forward<R>(r), count, std::forward<F>(f),
+                                             std::forward<Args>(args)...);
         }
       }
     };

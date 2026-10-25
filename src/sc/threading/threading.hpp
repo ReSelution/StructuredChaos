@@ -30,7 +30,7 @@ namespace sc::threading {
 
   // Joins a parallelFor loop of another thread that has room for helpers, if
   // there is one, works on it until nothing of it is left to take and returns
-  // whether there was one. Tasks of the queues are left to the pool.
+  // whether there was one. Tasks of the queue are left to the pool.
   //
   // For a thread that waits for something another thread does and would
   // otherwise only yield, typically for what that thread loads in a
@@ -119,64 +119,42 @@ namespace sc::threading {
     internal::parallelFor(count, grain, helpers, function, onTicket);
   }
 
+  // The tasks of detach and enqueue run on the workers of the pool, which
+  // every parallelFor of a frame needs: they are for work that is done well
+  // within a frame, which is why they have no priority among them.
+
   // Runs the function on the pool. Nobody waits for it; an exception it
   // throws is logged and dropped.
-  template<Priority P, typename F, typename... Args>
-    requires std::invocable<F, Args...> && std::is_void_v<std::invoke_result_t<F, Args...>>
-  void detach(F &&f, Args &&...args) {
-    internal::detach<P>(std::forward<F>(f), std::forward<Args>(args)...);
-  }
-
   template<typename F, typename... Args>
     requires std::invocable<F, Args...> && std::is_void_v<std::invoke_result_t<F, Args...>>
   void detach(F &&f, Args &&...args) {
-    detach<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args)...);
+    internal::detach(std::forward<F>(f), std::forward<Args>(args)...);
   }
 
   // One task per element of the range; finished (or nullptr) is called once
   // the last of them is done.
-  template<Priority P, std::ranges::sized_range R, typename F, typename Finished, typename... Args>
-    requires std::invocable<F, std::ranges::range_value_t<R>, Args...> &&
-             std::is_void_v<std::invoke_result_t<F, std::ranges::range_value_t<R>, Args...>>
-  void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
-    internal::detachBatch<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
-                             std::forward<Args>(args)...);
-  }
-
   template<std::ranges::sized_range R, typename F, typename Finished, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...> &&
              std::is_void_v<std::invoke_result_t<F, std::ranges::range_value_t<R>, Args...>>
   void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
-    detachBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
-                                  std::forward<Args>(args)...);
+    internal::detachBatch(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
+                          std::forward<Args>(args)...);
   }
 
   // Runs the function on the pool; the future gets its result or exception.
-  template<Priority P, typename F, typename... Args>
-    requires std::invocable<F, Args...>
-  auto enqueue(F &&f, Args &&...args) -> std::future<std::invoke_result_t<F, Args...>> {
-    return internal::enqueue<P>(std::forward<F>(f), std::forward<Args>(args)...);
-  }
-
   template<typename F, typename... Args>
     requires std::invocable<F, Args...>
   auto enqueue(F &&f, Args &&...args) -> std::future<std::invoke_result_t<F, Args...>> {
-    return enqueue<Priority::Normal>(std::forward<F>(f), std::forward<Args>(args)...);
+    return internal::enqueue(std::forward<F>(f), std::forward<Args>(args)...);
   }
 
   // One task per element of the range. Returns a std::future<void> for a
   // function without result, otherwise a FutureGroup with one future per
   // element, in the order of the range.
-  template<Priority P, std::ranges::sized_range R, typename F, typename... Args>
-    requires std::invocable<F, std::ranges::range_value_t<R>, Args...>
-  auto enqueueBatch(R &&r, F &&f, Args &&...args) {
-    return internal::enqueueBatch<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
-  }
-
   template<std::ranges::sized_range R, typename F, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...>
   auto enqueueBatch(R &&r, F &&f, Args &&...args) {
-    return enqueueBatch<Priority::Normal>(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
+    return internal::enqueueBatch(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
   }
 
 } // namespace sc::threading

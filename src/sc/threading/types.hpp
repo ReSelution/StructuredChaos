@@ -19,14 +19,6 @@ namespace sc::threading {
     uint64_t value = 0;
   };
 
-  enum class Priority : int32_t {
-    High,
-    Normal,
-    Low,
-  };
-
-  inline constexpr size_t PRIORITY_COUNT = 3;
-
   // The threadId of every thread that is neither a pool worker nor the thread
   // that called init.
   inline constexpr uint32_t NO_THREAD_ID = UINT32_MAX;

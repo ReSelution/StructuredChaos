@@ -1,5 +1,7 @@
 #include "backend.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -28,7 +30,7 @@
 
 namespace sc::threading::internal {
 
-  Queues queues;
+  Queue queue;
   constinit thread_local uint32_t currentThreadId = NO_THREAD_ID;
 
   namespace {
@@ -38,7 +40,7 @@ namespace sc::threading::internal {
     // threads.size(), for readers that must not take the mutex.
     std::atomic<size_t> workerCount{0};
 
-    inline constexpr size_t MAX_TASKS = QUEUE_CAP * PRIORITY_COUNT;
+    inline constexpr size_t MAX_TASKS = QUEUE_CAP;
     std::counting_semaphore<MAX_TASKS> poolSemaphore{0};
 
     // Tasks that were enqueued and have not finished yet, and the threads that
@@ -136,7 +138,7 @@ namespace sc::threading::internal {
           continue;
         }
         MoveOnlyFunction task;
-        if (queues.tryPopAny(task, static_cast<int32_t>(currentThreadId))) {
+        if (queue.tryPop(task, static_cast<int32_t>(currentThreadId))) {
           runTask(task);
           continue;
         }
@@ -221,7 +223,7 @@ namespace sc::threading::internal {
     // blocking, and waitUntilFinished returns.
     MoveOnlyFunction task;
     size_t dropped = 0;
-    while (queues.tryPopAny(task, 0)) {
+    while (queue.tryPop(task, 0)) {
       task = nullptr;
       ++dropped;
     }

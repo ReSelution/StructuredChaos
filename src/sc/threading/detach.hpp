@@ -14,13 +14,13 @@
 
 namespace sc::threading::internal {
 
-  template<Priority P, typename F, typename... Args>
+  template<typename F, typename... Args>
     requires std::invocable<F, Args...> && std::is_void_v<std::invoke_result_t<F, Args...>>
   void detach(F &&f, Args &&...args) {
     constexpr size_t CAPTURE_SIZE = sizeof(std::decay_t<F>) + (sizeof(std::decay_t<Args>) + ... + 0);
 
     if constexpr (CAPTURE_SIZE <= INLINE_CAPTURE_LIMIT) {
-      queues.submit<P>([f = std::forward<F>(f), ... args = std::forward<Args>(args)]() mutable {
+      queue.submit([f = std::forward<F>(f), ... args = std::forward<Args>(args)]() mutable {
         try {
           f(std::forward<Args>(args)...);
         } catch (...) {
@@ -30,7 +30,7 @@ namespace sc::threading::internal {
     } else {
       auto ctx = std::make_unique<std::tuple<std::decay_t<F>, std::tuple<std::decay_t<Args>...>>>(
           std::forward<F>(f), std::make_tuple(std::forward<Args>(args)...));
-      queues.submit<P>([ctx = std::move(ctx)]() mutable {
+      queue.submit([ctx = std::move(ctx)]() mutable {
         auto &func = std::get<0>(*ctx);
         auto &savedArgs = std::get<1>(*ctx);
         try {
@@ -48,10 +48,10 @@ namespace sc::threading::internal {
   // all tasks of the batch index into (merged). Elements are moved out of the
   // range only if it was passed as an rvalue.
 
-  template<Priority P, typename R, typename F, typename... Args>
+  template<typename R, typename F, typename... Args>
   void detachBatchInline(R &&r, F &&f, Args &&...args) {
     for (auto &&item: r) {
-      queues.submit<P>([f, args..., arg = forwardElement<R>(item)]() mutable {
+      queue.submit([f, args..., arg = forwardElement<R>(item)]() mutable {
         try {
           f(std::move(arg), args...);
         } catch (...) {
@@ -61,12 +61,12 @@ namespace sc::threading::internal {
     }
   }
 
-  template<Priority P, typename R, typename F, typename Finished, typename... Args>
+  template<typename R, typename F, typename Finished, typename... Args>
   void detachBatchInlineWithCallback(R &&r, F &&f, Finished &&finished, size_t count, Args &&...args) {
     auto state = std::make_shared<DetachBatchState>(count, std::forward<Finished>(finished));
 
     for (auto &&item: r) {
-      queues.submit<P>([f, args..., arg = forwardElement<R>(item), state]() mutable {
+      queue.submit([f, args..., arg = forwardElement<R>(item), state]() mutable {
         try {
           f(std::move(arg), args...);
         } catch (...) {
@@ -77,13 +77,13 @@ namespace sc::threading::internal {
     }
   }
 
-  template<Priority P, typename R, typename F, typename... Args>
+  template<typename R, typename F, typename... Args>
   void detachBatchMerged(R &&r, F &&f, size_t count, Args &&...args) {
     auto shared =
         std::make_shared<DetachedMergedStateNoCallback<R, Args...>>(std::forward<R>(r), std::forward<Args>(args)...);
 
     for (size_t i = 0; i < count; ++i) {
-      queues.submit<P>([f, shared, i]() mutable {
+      queue.submit([f, shared, i]() mutable {
         try {
           std::apply([&](auto &&...unpacked) { f(std::move(shared->payload[i]), unpacked...); }, shared->savedArgs);
         } catch (...) {
@@ -93,13 +93,13 @@ namespace sc::threading::internal {
     }
   }
 
-  template<Priority P, typename R, typename F, typename Finished, typename... Args>
+  template<typename R, typename F, typename Finished, typename... Args>
   void detachBatchMergedWithCallback(R &&r, F &&f, Finished &&finished, size_t count, Args &&...args) {
     auto shared = std::make_shared<DetachedMergedState<R, Args...>>(
         count, std::forward<R>(r), MoveOnlyFunction(std::forward<Finished>(finished)), std::forward<Args>(args)...);
 
     for (size_t i = 0; i < count; ++i) {
-      queues.submit<P>([f, shared, i]() mutable {
+      queue.submit([f, shared, i]() mutable {
         try {
           std::apply([&](auto &&...unpacked) { f(std::move(shared->payload[i]), unpacked...); }, shared->savedArgs);
         } catch (...) {
@@ -110,7 +110,7 @@ namespace sc::threading::internal {
     }
   }
 
-  template<Priority P, std::ranges::sized_range R, typename F, typename Finished, typename... Args>
+  template<std::ranges::sized_range R, typename F, typename Finished, typename... Args>
     requires std::invocable<F, std::ranges::range_value_t<R>, Args...> &&
              std::is_void_v<std::invoke_result_t<F, std::ranges::range_value_t<R>, Args...>>
   void detachBatch(R &&r, F &&f, Finished &&finished, Args &&...args) {
@@ -130,17 +130,17 @@ namespace sc::threading::internal {
 
     if constexpr (inlineCaptures) {
       if constexpr (hasCallback) {
-        detachBatchInlineWithCallback<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
-                                         count, std::forward<Args>(args)...);
+        detachBatchInlineWithCallback(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished), count,
+                                      std::forward<Args>(args)...);
       } else {
-        detachBatchInline<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
+        detachBatchInline(std::forward<R>(r), std::forward<F>(f), std::forward<Args>(args)...);
       }
     } else {
       if constexpr (hasCallback) {
-        detachBatchMergedWithCallback<P>(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished),
-                                         count, std::forward<Args>(args)...);
+        detachBatchMergedWithCallback(std::forward<R>(r), std::forward<F>(f), std::forward<Finished>(finished), count,
+                                      std::forward<Args>(args)...);
       } else {
-        detachBatchMerged<P>(std::forward<R>(r), std::forward<F>(f), count, std::forward<Args>(args)...);
+        detachBatchMerged(std::forward<R>(r), std::forward<F>(f), count, std::forward<Args>(args)...);
       }
     }
     signalWork(count);

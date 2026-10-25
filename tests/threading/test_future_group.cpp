@@ -370,15 +370,6 @@ TEST_CASE("FutureGroup From enqueueBatch", "[threading][future_group]") {
     REQUIRE(results.back() == static_cast<int>(task_count) + 99);
   }
 
-  SECTION("Accepts A Priority") {
-    auto group = sc::threading::enqueueBatch<sc::threading::Priority::High>(
-        std::move(tasks), [](int value) { return std::to_string(value); });
-
-    auto results = group.get();
-    REQUIRE(results.size() == task_count);
-    REQUIRE(results[42] == "42");
-  }
-
   SECTION("Becomes Ready Once The Pool Is Idle") {
     auto group = sc::threading::enqueueBatch(std::move(tasks), [](int value) { return value; });
 

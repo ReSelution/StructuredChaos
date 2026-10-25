@@ -206,16 +206,6 @@ TEST_CASE("Threading Single Task Detach", "[threading][detach]") {
     REQUIRE(weight_size.load() == breaker.weight.size());
   }
 
-  SECTION("Accepts A Priority") {
-    std::atomic<int> executed{0};
-
-    sc::threading::detach<sc::threading::Priority::High>([&executed]() { executed.fetch_add(1); });
-    sc::threading::detach<sc::threading::Priority::Low>([&executed]() { executed.fetch_add(1); });
-    sc::threading::waitUntilFinished();
-
-    REQUIRE(executed.load() == 2);
-  }
-
   SECTION("Executes Every One Of Many Single Tasks") {
     constexpr int task_count = 5000;
     std::atomic<int> executed{0};
@@ -274,12 +264,6 @@ TEST_CASE("Threading Single Task Enqueue", "[threading][enqueue]") {
         breaker);
 
     REQUIRE(future.get() == breaker.weight.size() * 3);
-  }
-
-  SECTION("Accepts A Priority") {
-    auto future = sc::threading::enqueue<sc::threading::Priority::High>([]() { return std::string{"high"}; });
-
-    REQUIRE(future.get() == "high");
   }
 
   SECTION("Reports The Worker Id") {
