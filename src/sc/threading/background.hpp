@@ -64,6 +64,17 @@ namespace sc::threading {
     struct BackgroundResult<F> {
       using type = std::invoke_result_t<F &, std::stop_token>;
     };
+
+    // Calls the function with the token if it takes one.
+    template<typename F>
+    decltype(auto) invokeBackground(F &f, std::stop_token token) {
+      if constexpr (std::invocable<F &, std::stop_token>) {
+        return f(std::move(token));
+      } else {
+        (void) token;
+        return f();
+      }
+    }
   } // namespace internal
 
   // The result of a function spawn put on the lane. Move-only, like
@@ -132,21 +143,11 @@ namespace sc::threading {
     internal::submitBackground(
         [f = Function(std::forward<F>(f)), p = std::move(promise)](std::stop_token token) mutable {
           try {
-            if constexpr (std::invocable<Function &, std::stop_token>) {
-              if constexpr (std::is_void_v<Result>) {
-                f(std::move(token));
-                p.set_value();
-              } else {
-                p.set_value(f(std::move(token)));
-              }
+            if constexpr (std::is_void_v<Result>) {
+              internal::invokeBackground(f, std::move(token));
+              p.set_value();
             } else {
-              (void) token;
-              if constexpr (std::is_void_v<Result>) {
-                f();
-                p.set_value();
-              } else {
-                p.set_value(f());
-              }
+              p.set_value(internal::invokeBackground(f, std::move(token)));
             }
           } catch (...) {
             p.set_exception(std::current_exception());

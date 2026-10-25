@@ -15,12 +15,14 @@
 #include <new>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "sc/threading/ring_queue.hpp"
 #include "sc/threading/threading.hpp"
 #include "sc/util/macros.hpp"
 
@@ -1269,6 +1271,120 @@ namespace sc::ecs {
     std::span<internal::CommandList> m_lists;
   };
 
+  namespace internal {
+    // What the tasks of a scheduler's Tasks left for it: the continuation and
+    // the stop of the task, which a cancel after the work sets as well. Kept
+    // alive by every task that is still on the lane, so a scheduler may go
+    // before its tasks; what they leave then is dropped.
+    struct TaskBoard : std::enable_shared_from_this<TaskBoard> {
+      struct Finished {
+        std::move_only_function<void(Commands)> then;
+        std::stop_source stop{std::nostopstate};
+      };
+
+      // A task of the lane that finds it full waits (spinning) until run
+      // takes some out. 64 bytes a slot (clang, libstdc++), 256 KB of address
+      // space, touched only where a slot is used.
+      static constexpr size_t CAPACITY = 4096;
+
+      // Without a lock: the threads of the lane run at SCHED_IDLE, and run
+      // would wait for one that holds it until it gets a core.
+      threading::RingQueue<Finished, CAPACITY> finished;
+    };
+  } // namespace internal
+
+  // A task of Tasks, to cancel it later. Copies share the task; a copy is one
+  // pointer, to keep as a component of the entity the task works for.
+  // Destroying it does not cancel the task.
+  class TaskHandle {
+  public:
+    TaskHandle() = default;
+
+    // Asks the work to stop through its token, and then is not called any
+    // more, also if the work is done already but run has not got to it.
+    void cancel() const noexcept { m_stop.request_stop(); }
+
+    [[nodiscard]] bool cancelled() const noexcept { return m_stop.stop_requested(); }
+
+    // False for a default constructed one.
+    [[nodiscard]] bool valid() const noexcept { return m_stop.stop_possible(); }
+
+  private:
+    friend class Tasks;
+
+    explicit TaskHandle(std::stop_source stop) noexcept : m_stop(std::move(stop)) {}
+
+    // Mutable: a stop is no change of the handle, so a const one in a query
+    // cancels as well.
+    mutable std::stop_source m_stop{std::nostopstate};
+  };
+
+  // Work for the background lane, as a parameter of a system: the work runs
+  // on the lane, where it may compute or block for as long as it takes, and
+  // what it returns comes back to the world through Commands at the start of
+  // a later run.
+  //
+  //   scheduler.addParallel([](Entity chunk, Tasks tasks, Commands commands, const ChunkRequest &request) {
+  //     commands.emplace<Generating>(chunk, tasks.spawn([request] { return generate(request); },
+  //                                                     [chunk](Mesh mesh, Commands commands) {
+  //                                                       commands.emplace<Mesh>(chunk, std::move(mesh));
+  //                                                     }));
+  //     commands.erase<ChunkRequest>(chunk);
+  //   });
+  //
+  // The work must not touch the world, the systems may be running; whatever
+  // it needs it takes by value. then runs on the thread of run, before its
+  // first stage, alone, with Commands that are applied right after it, hooks
+  // included. A task that is not done yet comes in a later run; nothing comes
+  // before sc::threading::init has started the lane. Takes nothing of the
+  // world, so systems with Tasks run next to each other and in loops.
+  class Tasks {
+  public:
+    explicit Tasks(internal::TaskBoard &board) noexcept : m_board(&board) {}
+
+    // work() or work(std::stop_token) runs on the lane, then(result,
+    // Commands) or, for work without result, then(Commands) later on the
+    // thread of run. An exception of the work is logged and then is not
+    // called; one of then is passed on by run.
+    template<typename Work, typename Then>
+      requires std::invocable<std::decay_t<Work> &, std::stop_token> || std::invocable<std::decay_t<Work> &>
+    TaskHandle spawn(Work &&work, Then &&then) const {
+      using WorkType = std::decay_t<Work>;
+      using ThenType = std::decay_t<Then>;
+      using Result = threading::internal::BackgroundResult<WorkType>::type;
+      if constexpr (std::is_void_v<Result>) {
+        static_assert(std::is_invocable_v<ThenType &, Commands>, "then takes Commands");
+      } else {
+        static_assert(std::is_invocable_v<ThenType &, Result, Commands>, "then takes the result and Commands");
+      }
+
+      std::stop_source stop;
+      threading::internal::submitBackground(
+          [work = WorkType(std::forward<Work>(work)), then = ThenType(std::forward<Then>(then)),
+           board = m_board->shared_from_this(), stop](std::stop_token token) mutable {
+            try {
+              if constexpr (std::is_void_v<Result>) {
+                threading::internal::invokeBackground(work, std::move(token));
+                board->finished.push({.then = [then = std::move(then)](Commands commands) mutable { then(commands); },
+                                      .stop = std::move(stop)});
+              } else {
+                board->finished.push({.then = [then = std::move(then),
+                                               result = threading::internal::invokeBackground(work, std::move(token))](
+                                                  Commands commands) mutable { then(std::move(result), commands); },
+                                      .stop = std::move(stop)});
+              }
+            } catch (...) {
+              threading::internal::logDetachedException();
+            }
+          },
+          stop);
+      return TaskHandle(std::move(stop));
+    }
+
+  private:
+    internal::TaskBoard *m_board;
+  };
+
   // The ResourceCache given to the scheduler with provide, as a parameter of
   // a system: Resources<const T> gives the const members (bind, find, get),
   // Resources<T> all of them, and the scheduler keeps a system that takes
@@ -1526,6 +1642,8 @@ namespace sc::ecs::internal {
     // The tick of the clock of the world at the end of the system's last
     // run, for its queries with Changed terms; 0 before the first.
     uint32_t since = 0;
+    // Of the scheduler, for Tasks; null outside of run.
+    TaskBoard *tasks = nullptr;
   };
 
 } // namespace sc::ecs::internal
@@ -1639,6 +1757,19 @@ namespace sc::ecs::internal {
   };
 
   template<>
+  struct SystemParam<Tasks> {
+    // The work does not touch the world, and then runs alone.
+    static void declare(SystemAccess &) {}
+
+    static Tasks fetch(const SystemContext &context) {
+      if (context.tasks == nullptr) {
+        throw std::logic_error("\"" + context.name + "\" takes Tasks outside a system");
+      }
+      return Tasks{*context.tasks};
+    }
+  };
+
+  template<>
   struct SystemParam<World &> {
     static void declare(SystemAccess &access) { access.exclusive = true; }
 
@@ -1741,6 +1872,8 @@ namespace sc::ecs::internal {
   inline constexpr bool isLoopExtra<Spawn> = true;
   template<>
   inline constexpr bool isLoopExtra<Commands> = true;
+  template<>
+  inline constexpr bool isLoopExtra<Tasks> = true;
   template<typename... Terms>
   inline constexpr bool isLoopExtra<Query<Terms...>> = true;
   template<typename T, typename Key, typename Hash>
@@ -1751,8 +1884,8 @@ namespace sc::ecs::internal {
   inline constexpr bool isLoopExtra<Global<T>> = true;
 
   // The parameters of a function for Scheduler::addParallel: the entity, then
-  // Edit, Spawn, Commands, queries, Resources, Emit and Global, all of them
-  // optional, and then the components.
+  // Edit, Spawn, Commands, Tasks, queries, Resources, Emit and Global, all of
+  // them optional, and then the components.
   template<bool WithEntity, typename Extras, typename... Rest>
   struct LoopRest;
 
@@ -1964,10 +2097,9 @@ namespace sc::ecs {
           throw std::logic_error("the scheduler has a cache of this type already");
         }
       }
-      // TODO: not clang-formatted since 57375cf; clang-format-check of CI fails on it.
-      m_caches.push_back({.tag = tag,
-                          .cache = &cache,
-                          .apply = [](void *provided) { return static_cast<ResourceCache<T, Key, Hash> *>(provided)->apply(); }});
+      m_caches.push_back({.tag = tag, .cache = &cache, .apply = [](void *provided) {
+                            return static_cast<ResourceCache<T, Key, Hash> *>(provided)->apply();
+                          }});
       return *this;
     }
 
@@ -1992,7 +2124,8 @@ namespace sc::ecs {
     // Runs every system once. Stages with more than one system and systems
     // added with addParallel run on the thread pool, so sc::threading::init
     // must have been called before, and run must not be called from a pool
-    // thread.
+    // thread. Before the first stage it calls then of the tasks of Tasks that
+    // are done, see Tasks.
     //
     // If a system throws, the systems running at the same time still finish,
     // what they recorded through Commands is not done, later systems are
@@ -2016,6 +2149,7 @@ namespace sc::ecs {
           lists = std::vector<internal::CommandList>(threads + 1);
         }
       }
+      applyFinishedTasks(world);
 
       for (const std::vector<size_t> &stage: stages) {
         try {
@@ -2029,7 +2163,8 @@ namespace sc::ecs {
                         .caches = m_caches,
                         .events = m_events,
                         .name = system.name,
-                        .since = system.lastRun});
+                        .since = system.lastRun,
+                        .tasks = m_tasks.get()});
             system.lastRun = world.tick();
           });
         } catch (...) {
@@ -2173,7 +2308,12 @@ namespace sc::ecs {
     // What the hooks that apply runs make their parameters from: what they
     // record goes to the lists of the set.
     [[nodiscard]] internal::SystemContext hookContext(World &world, size_t set) {
-      return {.world = world, .commands = m_hookLists[set], .caches = m_caches, .events = m_events, .name = HOOKS_NAME};
+      return {.world = world,
+              .commands = m_hookLists[set],
+              .caches = m_caches,
+              .events = m_events,
+              .name = HOOKS_NAME,
+              .tasks = m_tasks.get()};
     }
 
     // What the hooks of the last apply recorded, which went to set 0, and
@@ -2197,6 +2337,48 @@ namespace sc::ecs {
         world.advanceTick();
         m_applier.apply(world, m_stageLists, context);
         recorded = next;
+      }
+    }
+
+    // Calls then of every task of Tasks that is done and not cancelled, with
+    // Commands into the first set of hook lists, and applies them with the
+    // hooks they set off, as runHookRounds does after a stage. At the start of
+    // run, not after every stage: every system of a run sees the same results,
+    // and a run without one costs a look at the queue. If then throws, what
+    // the continuations recorded is dropped; the ones not called yet stay for
+    // the next run.
+    void applyFinishedTasks(World &world) {
+      // Two loads, without making a Finished first: run of one system that
+      // does nothing, without tasks (clang), 33.4 ns before Tasks, 39.4 with
+      // a tryPop alone, 35.2 with this.
+      if (m_tasks->finished.empty()) {
+        return;
+      }
+      bool called = false;
+      try {
+        // Emptied after every task: what it captured goes before the next.
+        for (internal::TaskBoard::Finished task; m_tasks->finished.tryPop(task, 0); task = {}) {
+          if (!task.stop.stop_requested()) {
+            called = true;
+            task.then(Commands{world, m_hookLists[0]});
+          }
+        }
+        if (!called) {
+          return;
+        }
+        runHookRounds(world);
+        // After the hooks, which may bind keys.
+        for (const internal::ProvidedCache &provided: m_caches) {
+          provided.apply(provided.cache);
+        }
+      } catch (...) {
+        for (std::vector<internal::CommandList> &lists: m_hookLists) {
+          for (internal::CommandList &list: lists) {
+            list.clear();
+          }
+        }
+        m_applier.dropHooked();
+        throw;
       }
     }
 
@@ -2415,6 +2597,8 @@ namespace sc::ecs {
     // What the hooks run after the changes of a stage record, two sets, see
     // runHookRounds.
     std::array<std::vector<internal::CommandList>, 2> m_hookLists;
+    // What the tasks of Tasks leave for applyFinishedTasks.
+    std::shared_ptr<internal::TaskBoard> m_tasks = std::make_shared<internal::TaskBoard>();
   };
 
 } // namespace sc::ecs

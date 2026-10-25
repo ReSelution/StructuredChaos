@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <utility>
@@ -33,6 +35,8 @@ namespace {
   using sc::ecs::Resources;
   using sc::ecs::Scheduler;
   using sc::ecs::Spawn;
+  using sc::ecs::TaskHandle;
+  using sc::ecs::Tasks;
   using sc::ecs::World;
 
   struct Position {
@@ -110,6 +114,28 @@ namespace {
   };
 
   using Stages = std::vector<std::vector<size_t>>;
+
+  // Runs the scheduler until done says so, at most for 5 s; whether it did.
+  template<typename Done>
+  bool runUntil(Scheduler &scheduler, World &world, Done &&done) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!done()) {
+      if (std::chrono::steady_clock::now() > deadline) {
+        return false;
+      }
+      scheduler.run(world);
+      std::this_thread::yield();
+    }
+    return true;
+  }
+
+  // Spins until the flag is set, at most for 5 s.
+  void waitFor(const std::atomic<bool> &flag) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!flag.load() && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::yield();
+    }
+  }
 
   // Edit has no get: it would get past the bit that modify takes.
   template<typename EditType>
@@ -1821,5 +1847,195 @@ TEST_CASE("ECS Changes Of A Tag", "[ecs][scheduler][changes][threading]") {
   SECTION("Erasing It Is None: the entity has no tag to be seen with") {
     world.erase<Frozen>(entities[8]);
     REQUIRE(read() == 0);
+  }
+}
+
+TEST_CASE("ECS Tasks", "[ecs][scheduler][tasks][threading]") {
+  sc::threading::init();
+
+  World world;
+  Scheduler scheduler;
+
+  SECTION("The result of the work comes back through Commands") {
+    std::vector<Entity> entities;
+    for (int i = 0; i < 200; ++i) {
+      entities.push_back(world.create());
+      world.emplace<Spawner>(entities.back(), i);
+    }
+    // Once per entity: the request goes with the spawn.
+    scheduler.addParallel([](Entity entity, Tasks tasks, Commands commands, const Spawner &spawner) {
+      const int count = spawner.count;
+      (void) tasks.spawn([count] { return count * 2; },
+                         [entity](int doubled, Commands later) { later.emplace<Target>(entity, doubled); });
+      commands.erase<Spawner>(entity);
+    });
+
+    REQUIRE(runUntil(scheduler, world, [&] {
+      return std::ranges::all_of(entities, [&](Entity entity) { return world.tryGet<Target>(entity) != nullptr; });
+    }));
+    for (size_t i = 0; i < entities.size(); ++i) {
+      REQUIRE(world.get<Target>(entities[i]).value == static_cast<int>(i) * 2);
+    }
+  }
+
+  SECTION("then runs on the thread of run and sets off hooks") {
+    std::atomic<bool> onRunThread{false};
+    size_t added = 0;
+    world.onAdd<Health>([&](Entity, Health &) { ++added; });
+    bool spawned = false;
+    scheduler.add([&](Tasks tasks) {
+      if (std::exchange(spawned, true)) {
+        return;
+      }
+      (void) tasks.spawn([] {},
+                         [&, self = std::this_thread::get_id()](Commands commands) {
+                           onRunThread = std::this_thread::get_id() == self;
+                           commands.emplace<Health>(commands.create());
+                         });
+    });
+    REQUIRE(runUntil(scheduler, world, [&] { return added == 1; }));
+    REQUIRE(onRunThread);
+  }
+
+  SECTION("A cancelled task does not call then") {
+    std::atomic<bool> started{false};
+    std::atomic<bool> stopped{false};
+    bool called = false;
+    const Entity entity = world.create();
+    bool spawned = false;
+    scheduler.add([&](Tasks tasks, Commands commands) {
+      if (std::exchange(spawned, true)) {
+        return;
+      }
+      commands.emplace<TaskHandle>(entity, tasks.spawn(
+                                               [&](const std::stop_token &stop) {
+                                                 started = true;
+                                                 while (!stop.stop_requested()) {
+                                                   std::this_thread::yield();
+                                                 }
+                                                 stopped = true;
+                                                 return 1;
+                                               },
+                                               [&](int, Commands) { called = true; }));
+    });
+    scheduler.run(world);
+    waitFor(started);
+    REQUIRE(started);
+
+    // Through a const handle of a query, as a system would.
+    Scheduler cancel;
+    cancel.add([](Query<const TaskHandle> query) { query.each([](const TaskHandle &task) { task.cancel(); }); });
+    cancel.run(world);
+    waitFor(stopped);
+    REQUIRE(stopped);
+    REQUIRE(world.get<TaskHandle>(entity).cancelled());
+    for (int i = 0; i < 10; ++i) {
+      scheduler.run(world);
+    }
+    REQUIRE_FALSE(called);
+  }
+
+  SECTION("A task cancelled after its work does not call then") {
+    std::atomic<bool> worked{false};
+    bool called = false;
+    TaskHandle handle;
+    bool spawned = false;
+    scheduler.add([&](Tasks tasks) {
+      if (std::exchange(spawned, true)) {
+        return;
+      }
+      handle = tasks.spawn([&] { worked = true; }, [&](Commands) { called = true; });
+    });
+    scheduler.run(world);
+    waitFor(worked);
+    // Whether the work has left its then yet or not, it is not called.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    handle.cancel();
+    for (int i = 0; i < 10; ++i) {
+      scheduler.run(world);
+    }
+    REQUIRE(worked);
+    REQUIRE(handle.valid());
+    REQUIRE_FALSE(called);
+  }
+
+  SECTION("Commands of then do nothing for an entity that is gone") {
+    const Entity entity = world.create();
+    std::atomic<bool> release{false};
+    bool called = false;
+    bool spawned = false;
+    scheduler.add([&](Tasks tasks) {
+      if (std::exchange(spawned, true)) {
+        return;
+      }
+      (void) tasks.spawn([&] { waitFor(release); },
+                         [&, entity](Commands commands) {
+                           called = true;
+                           commands.emplace<Health>(entity);
+                         });
+    });
+    scheduler.run(world);
+    world.destroy(entity);
+    release = true;
+    REQUIRE(runUntil(scheduler, world, [&] { return called; }));
+    REQUIRE_FALSE(world.valid(entity));
+  }
+
+  SECTION("An exception of the work is logged and then is not called") {
+    std::atomic<bool> threw{false};
+    bool called = false;
+    bool spawned = false;
+    scheduler.add([&](Tasks tasks) {
+      if (std::exchange(spawned, true)) {
+        return;
+      }
+      (void) tasks.spawn(
+          [&]() -> int {
+            threw = true;
+            throw std::runtime_error("generation failed");
+          },
+          [&](int, Commands) { called = true; });
+    });
+    scheduler.run(world);
+    waitFor(threw);
+    for (int i = 0; i < 10; ++i) {
+      REQUIRE_NOTHROW(scheduler.run(world));
+    }
+    REQUIRE_FALSE(called);
+  }
+
+  SECTION("An exception of then is passed on by run, the next run goes on") {
+    int calls = 0;
+    int spawned = 0;
+    scheduler.add([&](Tasks tasks) {
+      if (spawned++ != 0) {
+        return;
+      }
+      (void) tasks.spawn([] {},
+                         [&](Commands commands) {
+                           ++calls;
+                           commands.emplace<Health>(commands.create());
+                           throw std::runtime_error("then failed");
+                         });
+    });
+    bool thrown = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!thrown && std::chrono::steady_clock::now() < deadline) {
+      try {
+        scheduler.run(world);
+      } catch (const std::runtime_error &) {
+        thrown = true;
+      }
+      std::this_thread::yield();
+    }
+    REQUIRE(thrown);
+    REQUIRE(calls == 1);
+    // What then recorded before it threw is dropped.
+    size_t healthy = 0;
+    Scheduler count;
+    count.add([&](Query<const Health> query) { query.each([&](const Health &) { ++healthy; }); });
+    count.run(world);
+    REQUIRE(healthy == 0);
+    REQUIRE_NOTHROW(scheduler.run(world));
   }
 }
