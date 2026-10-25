@@ -1886,6 +1886,10 @@ namespace sc::ecs::internal {
   // The parameters of a function for Scheduler::addParallel: the entity, then
   // Edit, Spawn, Commands, Tasks, queries, Resources, Emit and Global, all of
   // them optional, and then the components.
+  // TODO: a parameter that is not one of these, Entity anywhere but first or
+  // a new kind of system parameter missing from isLoopExtra, counts as a
+  // component, and the loop silently runs over no entity; a static_assert
+  // against Entity and the SystemParam types there would catch it.
   template<bool WithEntity, typename Extras, typename... Rest>
   struct LoopRest;
 
