@@ -17,7 +17,7 @@ Found while integrating `sc::ecs` into [ecs_benchmark](https://github.com/abeiml
   the rest of the benchmark runs on the system malloc like every other framework. `tests/ecs_compare` instead uses
   mimalloc for all libraries.
 - **fmt from vcpkg:** spdlog is built with `SPDLOG_FMT_EXTERNAL`. `SPDLOG_USE_STD_FORMAT` fails because
-  `sc/logger/logger.hpp:139` uses `fmt_lib::runtime`, which `std` does not have; the bundled fmt has the same include
+  `sc/logger/logger.hpp:147` uses `fmt_lib::runtime`, which `std` does not have; the bundled fmt has the same include
   guards as the `<fmt/core.h>` of the benchmark's `base/systems/DataSystem.h`.
 
 Done: `emplaceOrReplace` (returns `Emplaced`, not a reference that could outlive the `making` bit; `erase` always
@@ -92,8 +92,8 @@ waits for a task that has not started runs the loader itself.
   834 (the count of the entry), one thread 9.0 / 6.2, `bind` 130 / 1 375, one thread 12.3 / 9.2. Tried on the way:
   64 shards with a `std::shared_mutex` each for every lookup (93-101 / 1 510, one thread 18.5; one key on 8 threads
   858 against 398 with one mutex: `pthread_rwlock` retries its CAS when readers meet).
-- **`bind` without a loader** uses the cache's (`ResourceCache(loader)`, called with the key on the pool); `load`
-  loads a new key on the calling thread, without a task, so that no task holds a count after it returns.
+- **`bind` without a loader** uses the cache's (`ResourceCache(loader)`, called with the key on the background lane);
+  `load` loads a new key on the calling thread, without a task, so that no task holds a count after it returns.
 - **A failed load stays** in the map, so that binding the key again does not load it again; `forceLoad` loads it anew,
   in the same entry, so every handle sees a reload.
 - **`TransparentHash` by default:** an h64 key is its own hash, and one hash finds the shard and the key.
@@ -165,8 +165,12 @@ of components the loop does not name. The scheduler rejects a system that edits 
   lock: `get<const T>` on other entities is already safe within a stage, the scheduler keeps writers of `T` out of
   it and `Commands::erase` only applies at the end of the stage.
 - [ ] **Determinism:** immediate changes from several threads land in an order that depends on timing (the comment on
-  `World::each` that said so now states the rule instead); a command buffer applies them in a fixed order. Relevant for replays and lockstep networking;
-  state it as a trade-off, not only as a speed gain.
+  `World::each` that said so now states the rule instead); a command buffer applies them in a fixed order. Relevant
+  for replays and lockstep networking; state it as a trade-off, not only as a speed gain.
+- [ ] **Reads of a component the loop edits, not checked:** neither `SystemAccess::modifiesGotten` nor
+  `usesModifiedOtherwise` catches a loop that writes `Health` through `Edit` and reads it through a
+  `Query<const Health>` (or a listener with one): it reads the `Health` of other entities while other threads of the
+  loop write it. See the TODO at `modifiesGotten`.
 
 Dropped with the rule: a page lock while iterating (deadlock when two loops `modify` into each other's pages, a
 waiting `modify` waits up to a whole page) and the non-blocking `modify` with a mailbox per page that needed it.
@@ -245,8 +249,8 @@ in a create of a span makes every entity first, then passes the exception on. Me
 `SETS_WITH_WORLD` (100K entities in three sets, µs, after / with): the 1st set 23.8 / 5.9 on one thread, 5.4 / 3.4 on
 all; memory of the world 2.36 / 1.68 MB.
 
-- [ ] **The same sets for the other libraries** in `ecs_compare`, file by file; archetypes iterate like the areas but
-  move on every emplace.
+- [ ] **The same sets for the other libraries** in `ecs_compare` (entt, flecs, gaia, mustache), file by file;
+  archetypes iterate like the areas but move on every emplace.
 - [ ] **Only a hint at create:** components added later do not move the entity. In ecs_benchmark the mixed entities
   get their hero components only after create; there it helps only if the factory gives the layout at create. The
   benchmark notes should say that sc gets a hint the others do not need (mustache's factory uses `create<...>()` the
