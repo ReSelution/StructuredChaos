@@ -1,11 +1,4 @@
 # Dependency
-# Only for tests/ecs_compare; not passed on to consumers.
-# 64-bit ids give 2^32 entities per registry instead of 2^20.
-entt_dep = dependency(
-  'entt',
-  fallback: ['entt', 'entt_dep'],
-  default_options: ['use_atomic=true', 'id_type=std::uint64_t'],
-)
 spdlog_dep = dependency(
   'spdlog',
   fallback: ['spdlog', 'spdlog_dep'],
