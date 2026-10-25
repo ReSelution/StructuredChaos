@@ -36,6 +36,14 @@ namespace sc::threading {
   // well, and it runs on its own at exit.
   void shutdownBackground();
 
+  // How many threads the lane has, 0 before initBackground and after
+  // shutdownBackground.
+  [[nodiscard]] size_t backgroundThreadCount() noexcept;
+
+  // Returns once every job that was put on the lane has run or was dropped,
+  // its captures destroyed. Waits for good if there are jobs and no lane.
+  void waitUntilBackgroundFinished();
+
   // Whether the calling thread is one of the lane or of a Service. A
   // parallelFor of such a thread gets workers of the pool only while the
   // frame has nothing for them: before every chunk they look for a loop or a

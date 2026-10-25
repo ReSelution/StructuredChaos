@@ -1,6 +1,7 @@
 #include "background.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -35,7 +36,39 @@ namespace sc::threading {
   } // namespace internal
 
   namespace {
+    // Jobs that were put on the lane and have not gone yet.
+    std::atomic<size_t> outstanding{0};
+
+    // Counts a job out once it goes: first in QueuedJob, so it is destroyed
+    // after the job, and whoever waits may rely on its captures being gone.
+    class Outstanding {
+    public:
+      Outstanding() = default;
+      explicit Outstanding(bool counted) noexcept : m_counted(counted) {}
+      Outstanding(Outstanding &&other) noexcept : m_counted(std::exchange(other.m_counted, false)) {}
+      Outstanding &operator=(Outstanding &&other) noexcept {
+        if (this != &other) {
+          finish();
+          m_counted = std::exchange(other.m_counted, false);
+        }
+        return *this;
+      }
+      Outstanding(const Outstanding &) = delete;
+      Outstanding &operator=(const Outstanding &) = delete;
+      ~Outstanding() { finish(); }
+
+    private:
+      void finish() noexcept {
+        if (std::exchange(m_counted, false) && outstanding.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+          outstanding.notify_all();
+        }
+      }
+
+      bool m_counted = false;
+    };
+
     struct QueuedJob {
+      Outstanding counted;
       internal::BackgroundJob job;
       // Without a state of its own: a default constructed stop_source
       // allocates one, and every turn of a thread of the lane makes a job.
@@ -58,6 +91,8 @@ namespace sc::threading {
     // Guards laneThreads in initBackground and shutdownBackground.
     std::mutex laneThreadMutex;
     std::vector<std::jthread> laneThreads;
+    // laneThreads.size(), for readers that must not take the mutex.
+    std::atomic<size_t> laneThreadCount{0};
 
     // Lower than the pool, so that a task that computes gets a core only when
     // the workers leave it. Lowering needs no rights; a failure leaves the
@@ -145,6 +180,7 @@ namespace sc::threading {
     for (size_t i = 0; i < threads; ++i) {
       laneThreads.emplace_back(laneThread, i);
     }
+    laneThreadCount.store(laneThreads.size(), std::memory_order_release);
   }
 
   void shutdownBackground() {
@@ -152,6 +188,7 @@ namespace sc::threading {
     {
       std::scoped_lock lock(laneThreadMutex);
       stopping.swap(laneThreads);
+      laneThreadCount.store(0, std::memory_order_release);
     }
     // Stops the jobs that are running as well, see runJob.
     for (std::jthread &thread: stopping) {
@@ -170,11 +207,22 @@ namespace sc::threading {
     }
   }
 
+  size_t backgroundThreadCount() noexcept { return laneThreadCount.load(std::memory_order_acquire); }
+
+  void waitUntilBackgroundFinished() {
+    for (size_t now = outstanding.load(std::memory_order_acquire); now != 0;
+         now = outstanding.load(std::memory_order_acquire)) {
+      outstanding.wait(now, std::memory_order_acquire);
+    }
+  }
+
   bool onBackgroundThread() noexcept { return internal::backgroundThread; }
 
   namespace internal {
     void submitBackground(BackgroundJob job, std::stop_source stop) {
-      laneQueue.push({.job = std::move(job), .stop = std::move(stop)});
+      // Before the push: a thread of the lane may run and finish it right away.
+      outstanding.fetch_add(1, std::memory_order_relaxed);
+      laneQueue.push({.counted = Outstanding(true), .job = std::move(job), .stop = std::move(stop)});
       laneSemaphore.release();
     }
 
