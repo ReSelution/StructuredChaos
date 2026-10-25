@@ -167,10 +167,11 @@ of components the loop does not name. The scheduler rejects a system that edits 
 - [ ] **Determinism:** immediate changes from several threads land in an order that depends on timing (the comment on
   `World::each` that said so now states the rule instead); a command buffer applies them in a fixed order. Relevant
   for replays and lockstep networking; state it as a trade-off, not only as a speed gain.
-- [ ] **Reads of a component the loop edits, not checked:** neither `SystemAccess::modifiesGotten` nor
-  `usesModifiedOtherwise` catches a loop that writes `Health` through `Edit` and reads it through a
-  `Query<const Health>` (or a listener with one): it reads the `Health` of other entities while other threads of the
-  loop write it. See the TODO at `modifiesGotten`.
+
+Decided on 2026-10-25: reading a component the loop writes, on other entities, through a query of the function or of
+a listener of an event it emits, is the caller's to keep apart, as writing through `get` (2026-10-22); only the comment
+on `addParallel` says so. Rejecting it would also reject loops whose entities do not meet those they read (the players
+reading the `Health` of their enemies).
 
 Dropped with the rule: a page lock while iterating (deadlock when two loops `modify` into each other's pages, a
 waiting `modify` waits up to a whole page) and the non-blocking `modify` with a mailbox per page that needed it.

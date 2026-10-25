@@ -1565,10 +1565,9 @@ namespace sc::ecs::internal {
       }
     }
 
-    // Whether a component taken through Edit is also taken past it.
-    // TODO: not checked, here or in usesModifiedOtherwise: a loop that writes
-    // Health with a Query<const Health> (or a listener with one) reads the
-    // Health of other entities while other threads of the loop write it.
+    // Whether a component taken through Edit is also taken past it. Not
+    // what a loop writes on its own entities: reading it on other entities
+    // through a query is the function's to keep apart, see addParallel.
     [[nodiscard]] bool modifiesGotten() const noexcept {
       return std::ranges::any_of(modified,
                                  [this](size_t index) { return std::ranges::find(gotten, index) != gotten.end(); });
@@ -2072,7 +2071,11 @@ namespace sc::ecs {
     //
     // Writing through a query there is the function's to keep apart from the
     // other threads of the loop, which may be at the same entity, see
-    // World::get; Edit::modify takes turns with them.
+    // World::get; Edit::modify takes turns with them. So is reading, through
+    // a query of the function or of a listener of an event it emits, a
+    // component the loop writes: another thread may be writing it on that
+    // entity. Not checked, as a loop over the players may well read the
+    // Health of their enemies.
     //
     // grain is the number of pages a thread takes at a time.
     template<typename F>
