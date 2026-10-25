@@ -1159,11 +1159,10 @@ namespace sc::ecs {
     // parallel loop, writing a component of another entity through it is the
     // caller's to keep apart from the other threads of the loop, which may be
     // at the same entity; modify of Edit takes turns with them.
-    // TODO: no static_assert for a component without members, as tryGet has:
-    // Column::get forms its address from the null values of such a column,
-    // which UBSan reports as a null pointer with an offset.
     template<typename Component>
     [[nodiscard]] Component &get(Entity entity) {
+      static_assert(ColumnOf<Component>::HAS_VALUE,
+                    "a component without members has no value to get; ask with contains");
       assert(valid(entity));
       ColumnOf<Component> &found = column<Component>();
       if constexpr (!std::is_const_v<Component>) {
@@ -1175,6 +1174,8 @@ namespace sc::ecs {
 
     template<typename Component>
     [[nodiscard]] const std::remove_const_t<Component> &get(Entity entity) const {
+      static_assert(ColumnOf<Component>::HAS_VALUE,
+                    "a component without members has no value to get; ask with contains");
       assert(valid(entity));
       const ColumnOf<Component> *const found = findColumn<Component>();
       assert(found != nullptr);

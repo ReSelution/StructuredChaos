@@ -789,11 +789,11 @@ namespace sc::ecs {
     // The component of any entity that exists and has it, named the way the
     // query names it. The scheduler keeps other systems from writing it, but
     // not the other threads of the same parallel loop: see World::get.
-    // TODO: no static_assert for a component without members, as tryGet has:
-    // Column::get forms its address from the null values of such a column.
     template<typename Component>
       requires named<Component>
     [[nodiscard]] Component &get(Entity entity) const {
+      static_assert(World::ColumnOf<Component>::HAS_VALUE,
+                    "a component without members has no value to get; ask with contains");
       assert(m_world->valid(entity));
       auto *const column = std::get<World::ColumnOf<Component> *>(m_columns);
       if constexpr (!std::is_const_v<Component>) {
