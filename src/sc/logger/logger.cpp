@@ -83,6 +83,12 @@ namespace sc {
 
   } // namespace
 
+  void initLogState() {
+    (void) logState();
+    // spdlog keeps the loggers in a static of its own.
+    (void) spdlog::details::registry::instance();
+  }
+
   void setLogDirectory(std::filesystem::path directory) {
     LogState &state = logState();
     std::scoped_lock lock(state.mutex);

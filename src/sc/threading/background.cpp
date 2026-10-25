@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "sc/logger/logger.hpp"
+
 #include "backend.hpp"
 #include "ring_queue.hpp"
 
@@ -133,6 +135,9 @@ namespace sc::threading {
       return;
     }
 
+    // Before the handler: a task that logs at exit finds the state still
+    // there, see initLogState.
+    initLogState();
     static std::once_flag atexitRegistered;
     std::call_once(atexitRegistered, [] { std::atexit(shutdownBackground); });
 

@@ -229,6 +229,10 @@ namespace sc::threading::internal {
     const size_t hardware = std::max<size_t>(std::thread::hardware_concurrency(), 2);
     const size_t threadCount = std::min<size_t>(requested, hardware - 1);
 
+    // TODO: a worker that logs first (a detached task that throws) makes the
+    // state of the logging after this handler, so it is destroyed while the
+    // workers still run; TSan reports it, see initBackground. initLogState()
+    // here would do.
     static std::once_flag atexitRegistered;
     std::call_once(atexitRegistered, [] { std::atexit(shutdownPool); });
 

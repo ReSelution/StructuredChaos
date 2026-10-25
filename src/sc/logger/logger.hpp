@@ -26,6 +26,14 @@ namespace sc {
 
   [[nodiscard]] std::filesystem::path logDirectory();
 
+  // Makes the state that every logger shares, spdlog's included, if it is
+  // not there yet, without a logger or a file. Made on first use otherwise,
+  // and a static that is made after an atexit handler is registered is
+  // destroyed before the handler runs: a thread that such a handler stops
+  // calls this before it registers the handler, so that it may log until it
+  // is stopped.
+  void initLogState();
+
   // Flushes and drops every logger of the process. Logging afterwards still
   // works through the loggers that already exist. A logger that is used for
   // the first time afterwards is set up anew and writes to the same file as
