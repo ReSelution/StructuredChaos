@@ -317,14 +317,15 @@ with parallel.
 longer than a frame or blocks; `Tasks` in `src/sc/ecs/scheduler.hpp` gives the result back through Commands at the
 start of `Scheduler::run`.
 
-- [ ] **A parameter of `addParallel` that is not a known one counts as a component:** `Entity` anywhere but first,
-  or a new kind of system parameter missing from `isLoopExtra` (as `Tasks` was at first), and the loop silently runs
-  over no entity. TODO at `LoopRest`; a `static_assert` against `Entity` and the `SystemParam` types would catch it.
 - [ ] **Not measured:** the priority of the lane on Windows (`THREAD_PRIORITY_BELOW_NORMAL`); the default size of the
   lane (a quarter of the hardware threads, measured with 4 and 8); why a niceness does nothing on Linux.
 
 Done:
 
+- **A parameter of `addParallel` that is not a component does not compile as one:** `static_assert`s at `LoopRest`
+  against `Entity` anywhere but first and against every type `SystemParam` is defined for (a system parameter after
+  a component, `World &`, or one missing from `isLoopExtra`, as `Tasks` was at first). Before, it counted as a
+  component and the loop ran over no entity without a word.
 - **The lane** (`ef29382`): a `RingQueue` and a semaphore of its own, no lock that a system in `spawn` could wait for.
   A blocking call costs the frame nothing: 500 tasks that sleep 2 ms, median ms per frame 3.00 on the pool, 1.12-1.15
   on the lane, 1.13-1.18 without.

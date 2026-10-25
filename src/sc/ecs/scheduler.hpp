@@ -1883,18 +1883,29 @@ namespace sc::ecs::internal {
   template<typename T>
   inline constexpr bool isLoopExtra<Global<T>> = true;
 
+  // Whether a parameter is one the scheduler makes for a system, as opposed
+  // to a component: SystemParam is defined for those only. Not by its
+  // declare, which Query overloads.
+  template<typename Param>
+  inline constexpr bool isSystemParam = requires { sizeof(SystemParamFor<Param>); };
+
   // The parameters of a function for Scheduler::addParallel: the entity, then
   // Edit, Spawn, Commands, Tasks, queries, Resources, Emit and Global, all of
   // them optional, and then the components.
-  // TODO: a parameter that is not one of these, Entity anywhere but first or
-  // a new kind of system parameter missing from isLoopExtra, counts as a
-  // component, and the loop silently runs over no entity; a static_assert
-  // against Entity and the SystemParam types there would catch it.
   template<bool WithEntity, typename Extras, typename... Rest>
   struct LoopRest;
 
+  // What is left are the components. Without the asserts, Entity anywhere but
+  // first, a parameter of a system after a component or one missing from
+  // isLoopExtra (as Tasks was at first) counted as a component, and the loop
+  // ran over no entity without a word.
   template<bool WithEntity, typename... Extras, typename... Components>
   struct LoopRest<WithEntity, List<Extras...>, Components...> {
+    static_assert((!std::is_same_v<std::remove_cvref_t<Components>, Entity> && ...),
+                  "addParallel: Entity is the first parameter of the function, or not there");
+    static_assert((!isSystemParam<Components> && ...),
+                  "addParallel: the parameters that are not components come before them, and only those of "
+                  "isLoopExtra are allowed in a loop");
     static constexpr bool ENTITY = WithEntity;
     using ExtraList = List<Extras...>;
     using ComponentList = List<Components...>;
