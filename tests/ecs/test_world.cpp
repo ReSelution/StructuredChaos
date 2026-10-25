@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <latch>
 #include <memory>
 #include <random>
 #include <span>
@@ -467,25 +468,22 @@ TEST_CASE("World Entities", "[ecs][world]") {
     constexpr size_t threadCount = 8;
     std::vector<Entity> created(perThread * threadCount);
     std::vector<Entity> createdRare(perThread * threadCount);
-    std::atomic<bool> go{false};
+    // A latch, not a spin on an atomic: under TSan the spinning threads kept
+    // the store of the main thread from getting TSan's lock on the atomic for
+    // minutes (seen 2026-10-22, runs of 15 s and of over 300 s).
+    std::latch go{1};
     {
       std::vector<std::jthread> threads;
       for (size_t t = 0; t < threadCount; ++t) {
         threads.emplace_back([&, t] {
-          // TODO: under TSan this spin can keep go.store below from getting
-          // TSan's lock on go for minutes (seen 2026-10-22: the main thread in
-          // FutexWait of __tsan_atomic8_store, the 8 threads here; runs of 15
-          // s and of over 300 s, which hit meson's timeout). std::latch or a
-          // yield in the loop would leave it the lock.
-          while (!go.load(std::memory_order_acquire)) {
-          }
+          go.wait();
           for (size_t i = 0; i < perThread; ++i) {
             created[(t * perThread) + i] = world.create();
             createdRare[(t * perThread) + i] = world.create(sc::ecs::rare);
           }
         });
       }
-      go.store(true, std::memory_order_release);
+      go.count_down();
     }
 
     std::unordered_set<uint32_t> indices;
