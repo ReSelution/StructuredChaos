@@ -1964,6 +1964,7 @@ namespace sc::ecs {
           throw std::logic_error("the scheduler has a cache of this type already");
         }
       }
+      // TODO: not clang-formatted since 57375cf; clang-format-check of CI fails on it.
       m_caches.push_back({.tag = tag,
                           .cache = &cache,
                           .apply = [](void *provided) { return static_cast<ResourceCache<T, Key, Hash> *>(provided)->apply(); }});
