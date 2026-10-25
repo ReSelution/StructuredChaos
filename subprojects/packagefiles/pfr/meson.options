@@ -1,2 +1,0 @@
-option('use_modules', type: 'boolean', value: false)
-option('build_tests', type: 'boolean', value: false)

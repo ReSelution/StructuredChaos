@@ -63,7 +63,7 @@ IncludeCategories:
     Priority: 2
   - Regex: '^<'
     Priority: 3
-  - Regex: '^"(ankerl|bcdec|entt|fastgltf|glm|mimalloc|pfr|rapidhash|simdjson|simdutf|spdlog|stb|xsimd)'
+  - Regex: '^"(ankerl|bcdec|entt|fastgltf|glm|mimalloc|rapidhash|simdjson|simdutf|spdlog|stb|xsimd)'
     Priority: 3
   - Regex: '^"sc/'
     Priority: 4

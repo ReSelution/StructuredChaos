@@ -1,7 +1,0 @@
-[wrap-git]
-url = https://github.com/apolukhin/pfr_non_boost.git
-revision = 2.3.2
-depth = 1
-patch_directory = pfr
-[provide]
-pfr = pfr_dep

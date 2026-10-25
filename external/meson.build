@@ -1,4 +1,5 @@
 # Dependency
+# Only for tests/ecs_compare; not passed on to consumers.
 # 64-bit ids give 2^32 entities per registry instead of 2^20.
 entt_dep = dependency(
   'entt',
@@ -67,7 +68,6 @@ simdutf_dep = dependency(
   default_options: ['default_library=static'],
 )
 rapidHash_dep = dependency('rapidHash', fallback: ['rapidHash', 'rapidHash_dep'])
-pfr_dep = dependency('pfr', fallback: ['pfr', 'pfr_dep'])
 # Its tests need Boost.
 atomic_queue_dep = dependency(
   'atomic_queue',
@@ -84,15 +84,10 @@ else
 endif
 
 # Needed by the public headers, so every consumer gets them as well.
-# TODO: entt and pfr were only used by the old sc::ecs, which is gone; entt
-# is still needed by tests/ecs_compare. Taking them out of here would break a
-# consumer that uses them through sc_dep (SAA?), so not before that is checked.
 sc_public_deps = [
-  entt_dep,
   spdlog_dep,
   unordered_dense_dep,
   mimalloc_dep,
-  pfr_dep,
   rapidHash_dep,
   atomic_queue_dep,
 ]
