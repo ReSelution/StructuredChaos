@@ -58,6 +58,9 @@ namespace sc::threading::internal {
     // fewer helpers.
     atomic_queue::AtomicQueue<uint64_t, PARALLEL_SLOTS> parallelTickets;
 
+    // The tickets of loops of the background lane, see helpBackground.
+    atomic_queue::AtomicQueue<uint64_t, PARALLEL_SLOTS> backgroundTickets;
+
     // Whether this thread was woken up for work it has not found yet.
     thread_local bool wokenForWork = false;
 
@@ -93,23 +96,6 @@ namespace sc::threading::internal {
       }
     }
 
-    // Shown in debuggers and profilers.
-    void setThreadName(std::string_view name) {
-#ifdef _WIN32
-      // A string_view is not necessarily terminated, so its length is passed on.
-      std::array<wchar_t, 64> wideName{};
-      std::swprintf(wideName.data(), wideName.size(), L"%.*hs", static_cast<int>(name.size()), name.data());
-      SetThreadDescription(GetCurrentThread(), wideName.data());
-#elifdef __linux__
-      // Linux allows 15 characters plus the terminator.
-      std::array<char, 16> shortName{};
-      name.copy(shortName.data(), shortName.size() - 1);
-      pthread_setname_np(pthread_self(), shortName.data());
-#else
-      (void) name;
-#endif
-    }
-
     void runTask(MoveOnlyFunction &task) {
       onTaskStarted();
       // The task wrappers of enqueue and detach catch everything themselves.
@@ -129,6 +115,36 @@ namespace sc::threading::internal {
       onTasksFinished();
     }
 
+    // Whether the frame has work for a worker: a loop or a task. Asked before
+    // every chunk of a loop of the lane.
+    bool frameWaiting(void *context) noexcept {
+      const bool waiting = !parallelTickets.was_empty() || !queue.empty();
+      if (waiting) {
+        *static_cast<bool *>(context) = true;
+      }
+      return waiting;
+    }
+
+    // Takes a ticket of a loop of the lane and works on it until nothing of
+    // it is left or the frame has work, which it then gets after the chunk
+    // in hand: the frame waits for at most one chunk of the lane per worker
+    // that is inside. A worker that left early puts the ticket back, so that
+    // the loop gets its helpers again once the frame is done.
+    bool helpBackground() {
+      uint64_t ticket = 0;
+      if (!backgroundTickets.try_pop(ticket)) {
+        return false;
+      }
+      takeWakeUp();
+      bool leftForFrame = false;
+      if (joinParallel(ticket, frameWaiting, &leftForFrame) && leftForFrame) {
+        // No wake-up with it: the workers are awake for the frame and look
+        // here again before they sleep. A full queue loses a helper.
+        (void) backgroundTickets.try_push(ticket);
+      }
+      return true;
+    }
+
     void workerThread(const std::stop_token &st, uint32_t id) {
       currentThreadId = id;
       setThreadName("sc-worker-" + std::to_string(id));
@@ -142,6 +158,10 @@ namespace sc::threading::internal {
           runTask(task);
           continue;
         }
+        // Last: the frame comes first.
+        if (helpBackground()) {
+          continue;
+        }
 
         wokenForWork = poolSemaphore.try_acquire_for(std::chrono::milliseconds(10));
       }
@@ -152,6 +172,22 @@ namespace sc::threading::internal {
       return (generation << ParallelSlot::HELPER_BITS) | (slot + 1);
     }
   } // namespace
+
+  void setThreadName(std::string_view name) {
+#ifdef _WIN32
+    // A string_view is not necessarily terminated, so its length is passed on.
+    std::array<wchar_t, 64> wideName{};
+    std::swprintf(wideName.data(), wideName.size(), L"%.*hs", static_cast<int>(name.size()), name.data());
+    SetThreadDescription(GetCurrentThread(), wideName.data());
+#elifdef __linux__
+    // Linux allows 15 characters plus the terminator.
+    std::array<char, 16> shortName{};
+    name.copy(shortName.data(), shortName.size() - 1);
+    pthread_setname_np(pthread_self(), shortName.data());
+#else
+    (void) name;
+#endif
+  }
 
   void onTaskEnqueued() noexcept {
     outstandingTasks.fetch_add(1, std::memory_order_relaxed);
@@ -235,7 +271,7 @@ namespace sc::threading::internal {
 
   size_t threadSlots() noexcept { return 1 + workerCount.load(std::memory_order_acquire); }
 
-  ParallelSlot *shareParallel(ParallelJob &job, size_t helpers, uint64_t *ticketOut) {
+  ParallelSlot *shareParallel(ParallelJob &job, size_t helpers, uint64_t *ticketOut, bool background) {
     helpers = std::min(helpers, workerCount.load(std::memory_order_acquire));
     if (helpers == 0 && ticketOut == nullptr) {
       return nullptr;
@@ -260,8 +296,9 @@ namespace sc::threading::internal {
     const uint64_t generation = slot->state.load(std::memory_order_acquire) >> ParallelSlot::HELPER_BITS;
     const uint64_t ticket = ticketOf(generation, index);
 
+    auto &tickets = background ? backgroundTickets : parallelTickets;
     size_t shared = 0;
-    while (shared < helpers && parallelTickets.try_push(ticket)) {
+    while (shared < helpers && tickets.try_push(ticket)) {
       ++shared;
     }
     if (ticketOut != nullptr) {

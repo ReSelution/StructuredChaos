@@ -52,6 +52,7 @@ executable(
 test_threading = executable(
   'test_threading',
   sources: [
+    'threading/test_background.cpp',
     'threading/test_ring_queue.cpp',
     'threading/test_future_group.cpp',
     'threading/test_threading.cpp',

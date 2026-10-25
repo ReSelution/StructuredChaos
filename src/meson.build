@@ -6,6 +6,7 @@ sc_sources = files(
   'sc/memory/monotonic_resource.cpp',
   'sc/memory/virtual_memory.cpp',
   'sc/stats/core.cpp',
+  'sc/threading/background.cpp',
   'sc/threading/backend.cpp',
   'sc/threading/ring_queue.cpp',
   'sc/threading/threading.cpp',

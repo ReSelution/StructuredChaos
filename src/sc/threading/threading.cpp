@@ -10,9 +10,16 @@ namespace sc::threading {
     return std::max(std::thread::hardware_concurrency(), 2U) - 1;
   }
 
-  void init(uint32_t threads) { internal::initPool(threads); }
+  void init(uint32_t threads, uint32_t backgroundThreads) {
+    internal::initPool(threads);
+    initBackground(backgroundThreads);
+  }
 
-  void shutdown() { internal::shutdownPool(); }
+  void shutdown() {
+    // First: a task of the lane may still put work on the pool.
+    shutdownBackground();
+    internal::shutdownPool();
+  }
 
   void waitUntilFinished() { internal::waitUntilFinished(); }
 

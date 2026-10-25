@@ -7,6 +7,7 @@
 #include <ranges>
 #include <type_traits>
 
+#include "background.hpp"
 #include "detach.hpp"
 #include "enqueue.hpp"
 #include "parallel_for.hpp"
@@ -18,11 +19,13 @@ namespace sc::threading {
   [[nodiscard]] uint32_t defaultWorkerCount() noexcept;
 
   // Starts the pool with the given number of workers, at most one less than
-  // the hardware has threads. Does nothing if it is running already.
-  void init(uint32_t threads = defaultWorkerCount());
+  // the hardware has threads, and the background lane, see initBackground.
+  // Does nothing for either if it is running already.
+  void init(uint32_t threads = defaultWorkerCount(), uint32_t backgroundThreads = defaultBackgroundCount());
 
-  // Stops and joins the workers. Tasks that have not started are dropped: a
-  // future of enqueue then throws std::future_error. Runs on its own at exit.
+  // Stops the lane, see shutdownBackground, then stops and joins the
+  // workers. Tasks that have not started are dropped: a future of enqueue
+  // then throws std::future_error. Runs on its own at exit.
   void shutdown();
 
   // Returns once every task that was enqueued or detached has finished.
@@ -121,7 +124,8 @@ namespace sc::threading {
 
   // The tasks of detach and enqueue run on the workers of the pool, which
   // every parallelFor of a frame needs: they are for work that is done well
-  // within a frame, which is why they have no priority among them.
+  // within a frame, which is why they have no priority among them. What
+  // blocks or computes for longer goes to spawn, see background.hpp.
 
   // Runs the function on the pool. Nobody waits for it; an exception it
   // throws is logged and dropped.

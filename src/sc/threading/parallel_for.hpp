@@ -18,6 +18,19 @@ namespace sc::threading::internal {
   void parallelFor(size_t count, size_t grain, size_t helpers, F &function, OnTicket &&onTicket = nullptr) {
     constexpr bool wantsTicket = !std::is_same_v<std::decay_t<OnTicket>, std::nullptr_t>;
     grain = std::max<size_t>(grain, 1);
+    if (backgroundThread && helpers == SIZE_MAX) {
+      // Half the workers for a loop of the lane unless it asks for more: a
+      // loop that runs all the time with 100 us chunks next to frames of a
+      // parallelFor of 1600 x 10 us, one per 16 ms (Ryzen 7 5800X, 15
+      // workers), median / p99 ms per frame: no loop 1.21 / 1.3-1.4, all
+      // workers 2.2-2.6 / 4.3-4.8, half 1.27 / 1.5-2.2; 10 us chunks 1.37-
+      // 1.48 / 2.9-3.0 and 1.24-1.29 / 1.7-1.9. The loop gets 11.9 and 6.8 s
+      // of work done per second, alone 0.9. Sixteen threads at SCHED_IDLE that
+      // compute without the pool cost the frame as much as all workers do, so
+      // it is the load on every core, not the waiting for a chunk; why was
+      // not looked into.
+      helpers = (threadSlots() - 1) / 2;
+    }
     if (count <= grain) {
       if (count != 0) {
         function(size_t{0}, count);
@@ -69,8 +82,8 @@ namespace sc::threading::internal {
 
     // One thread per chunk at most, this one included.
     uint64_t ticket = 0;
-    ParallelSlot *slot =
-        shareParallel(job, std::min(helpers, ((count + grain - 1) / grain) - 1), wantsTicket ? &ticket : nullptr);
+    ParallelSlot *slot = shareParallel(job, std::min(helpers, ((count + grain - 1) / grain) - 1),
+                                       wantsTicket ? &ticket : nullptr, backgroundThread);
     if constexpr (wantsTicket) {
       if (slot != nullptr) {
         try {

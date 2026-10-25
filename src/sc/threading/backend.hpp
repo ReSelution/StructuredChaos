@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <utility>
 
 #include "internal.hpp"
@@ -51,6 +52,13 @@ namespace sc::threading::internal {
   // and NO_THREAD_ID for every other thread.
   extern constinit thread_local uint32_t currentThreadId;
 
+  // True on the threads of the background lane and of a Service, see
+  // onBackgroundThread.
+  extern constinit thread_local bool backgroundThread;
+
+  // Shown in debuggers and profilers.
+  void setThreadName(std::string_view name);
+
   // Asked by a helper before it takes the next chunk of a loop, see
   // sc::threading::helpThread(stop). Null for whoever does not stop early.
   using StopCheck = bool (*)(void *context) noexcept;
@@ -87,7 +95,12 @@ namespace sc::threading::internal {
   // ticket was handed out; there is nothing to finish then. With ticket the
   // slot is opened in any case, unless all of them are taken, and its ticket
   // is written there for threads that join the loop by it.
-  [[nodiscard]] ParallelSlot *shareParallel(ParallelJob &job, size_t helpers, uint64_t *ticket = nullptr);
+  //
+  // The tickets of a loop of the background lane go to a queue of their own,
+  // see helpBackground: a worker takes one only when the frame has nothing
+  // for it.
+  [[nodiscard]] ParallelSlot *shareParallel(ParallelJob &job, size_t helpers, uint64_t *ticket = nullptr,
+                                            bool background = false);
 
   // Takes a ticket, if there is one, and works on its loop unless the ticket
   // is void. Only for threads that have nothing else to do. With a stop
