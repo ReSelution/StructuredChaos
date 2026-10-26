@@ -839,7 +839,8 @@ namespace sc::ecs {
     // as create of components, see there.
     SC_FORCE_INLINE bool destroy(Entity entity) {
       assertAlone();
-      if (!valid(entity)) {
+      const internal::EntityAllocator::Living living = m_entities.find(entity);
+      if (!living) {
         return false;
       }
       if (!m_removeHooked.empty()) [[unlikely]] {
@@ -857,7 +858,7 @@ namespace sc::ecs {
       } else {
         eraseAsking(index, count);
       }
-      m_entities.destroy(entity);
+      m_entities.destroy(living, index);
       return true;
     }
 

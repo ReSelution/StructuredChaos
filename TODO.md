@@ -222,8 +222,6 @@ unless noted, rank among 7–8 frameworks.
   flattered: its
   entity benchmarks never call `PicoEcsApplication::init()`, so its destroy skips `ecs_sync_destroy`. Bulk destroy
   (`fa865dc`) is below it: 4.2 / 5.3.
-- [ ] **Small costs of destroy:** `valid` and `EntityAllocator::destroy` both look up `generation` and `pages()`.
-  Done: `FreeList::give` shortens with `erase` instead of `resize`, -5 instructions per destroy.
 - [ ] **+3 to 5 % on unchanged paths after the parallel `giveMany`:** in `ecs_compare_sc`, destroy on one thread 820 →
   848 µs, all at once 781 → 821, add + remove recorded 541 → 564 (7 runs each), though their code did not change.
   The probe that calls `destroy(span)` directly shows no difference. Presumably code placement in that binary; not
@@ -243,7 +241,10 @@ next to them, and the other way round (`World::Watch`, each side counts itself a
 where the two meet in time: a thread that creates while the main thread destroys batches of 64 asserted in 3 of 3
 runs. Destroy without `lock` (`86d3592`, -10 %); bulk destroy with kill masks (`fa865dc`); `World::parallelDestroy`
 with `PageSort` and `giveMany` over threads (1M entities, 6 components: 10 538 → 2 422 µs on 16 threads); bulk
-create with reused indices in rows (`bfd4be4`, 2.1 instead of 10.3 ns at 1024).
+create with reused indices in rows (`bfd4be4`, 2.1 instead of 10.3 ns at 1024). Small costs of
+destroy one by one (2026-10-26): `FreeList::give` shortens with `erase` instead of `resize`, -5 instructions per
+destroy; `World::destroy` looks up the owner and the generation once (`EntityAllocator::find`), -4 more, 1.82 instead
+of 1.88 ms for 100K created and destroyed (`perf_ecs_world create`).
 
 ## Entity locality: say at create which components an entity will get
 

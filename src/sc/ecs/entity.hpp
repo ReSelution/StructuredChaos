@@ -373,15 +373,35 @@ namespace sc::ecs::internal {
     }
 
   public:
-    [[nodiscard]] bool valid(Entity entity) const noexcept {
+    // What destroy needs of an entity that exists, from find: its
+    // generation and the owner of its page. Empty for one that does not.
+    struct Living {
+      uint32_t *generation = nullptr;
+      uint16_t owner = 0;
+
+      [[nodiscard]] explicit operator bool() const noexcept { return generation != nullptr; }
+    };
+
+    // valid, with what destroy needs: World::destroy looked up the owner and
+    // the generation for valid and again for destroy, with the virtual calls
+    // of the columns in between. Creating 100K entities with 2 components and
+    // destroying them one by one took 29.33 instead of 29.73M instructions
+    // and 1.82 instead of 1.88 ms (Clang, perf_ecs_world create).
+    [[nodiscard]] SC_FORCE_INLINE Living find(Entity entity) const noexcept {
       const uint32_t index = indexOf(entity);
       // Also for an index from INDEX_LIMIT on: its page is never handed out.
-      if (owners()[index >> PAGE_BITS].load(std::memory_order_acquire) == 0) {
-        return false;
+      const uint16_t owner = owners()[index >> PAGE_BITS].load(std::memory_order_acquire);
+      if (owner == 0) {
+        return {};
       }
-      const uint32_t *current = generation(index);
-      return current != nullptr && *current == generationOf(entity);
+      uint32_t *const current = generation(index);
+      if (current == nullptr || *current != generationOf(entity)) {
+        return {};
+      }
+      return {.generation = current, .owner = owner};
     }
+
+    [[nodiscard]] bool valid(Entity entity) const noexcept { return static_cast<bool>(find(entity)); }
 
     // The entity must exist. Its index is handed out again with another
     // generation, so that the entity stays invalid.
@@ -391,9 +411,16 @@ namespace sc::ecs::internal {
     // this forced without it took 1.87 ms.
     SC_FORCE_INLINE void destroy(Entity entity) {
       const uint32_t index = indexOf(entity);
-      ++*generation(index);
+      destroy({.generation = generation(index), .owner = owners()[index >> PAGE_BITS].load(std::memory_order_relaxed)},
+              index);
+    }
+
+    // The same with what find gave for it.
+    SC_FORCE_INLINE void destroy(Living living, uint32_t index) {
+      assert(living);
+      ++*living.generation;
       // Back to where it came from.
-      areaOf(index).free.give(index);
+      areaTable()[living.owner - 1].load(std::memory_order_relaxed)->free.give(index);
     }
 
     // destroy for every entity that exists: one given twice or no longer
