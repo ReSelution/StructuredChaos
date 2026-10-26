@@ -164,12 +164,10 @@ Decided on 2026-10-21: the same rule as above; what other entities need goes thr
 of components the loop does not name. The scheduler rejects a system that edits a component it also goes through
 (`usesModifiedOtherwise`), and nested `modify` is asserted against (`internal::inModify`).
 
-- [ ] **Escaping references:** C++ cannot stop a callback from storing `&component`; document it. Reads need no
-  lock: `get<const T>` on other entities is already safe within a stage, the scheduler keeps writers of `T` out of
-  it and `Commands::erase` only applies at the end of the stage.
-- [ ] **Determinism:** immediate changes from several threads land in an order that depends on timing (the comment on
-  `World::each` that said so now states the rule instead); a command buffer applies them in a fixed order. Relevant
-  for replays and lockstep networking; state it as a trade-off, not only as a speed gain.
+Documented on 2026-10-26: a reference a loop function gets is meant for the call, it stays on the component until
+that is removed (comment on `World::each`); changes to other entities from several threads of a loop are made in no
+fixed order, also through `Commands`, whose lists are applied in the order of the threads while which entities a
+thread got depends on timing: only what one thread records is the same from run to run (comment on `addParallel`).
 
 Decided on 2026-10-25: reading a component the loop writes, on other entities, through a query of the function or of
 a listener of an event it emits, is the caller's to keep apart, as writing through `get` (2026-10-22); only the comment

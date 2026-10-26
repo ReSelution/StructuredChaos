@@ -2077,6 +2077,15 @@ namespace sc::ecs {
     // entity. Not checked, as a loop over the players may well read the
     // Health of their enemies.
     //
+    // Which entities a thread of the loop gets depends on timing, so changes
+    // to other entities from several threads are made in no fixed order:
+    // Edit::modify in the order the threads come to it, Commands once the
+    // stage is over in the order of the threads, each list in its own order.
+    // The same from run to run is only what one thread records. Where that
+    // matters (replays, lockstep networking), the changes must not depend on
+    // their order, as damage that is subtracted, or come from a system added
+    // with add, which runs on one thread.
+    //
     // grain is the number of pages a thread takes at a time.
     template<typename F>
     Scheduler &addParallel(F &&function, std::string name = {}, size_t grain = 1) {

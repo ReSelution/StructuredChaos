@@ -1447,6 +1447,13 @@ namespace sc::ecs {
     // assert, see internal::assertNotLooped. Other components of other
     // entities are free to change, see parallelEach for doing it from several
     // threads.
+    //
+    // A reference the function gets is meant for the call. Components do not
+    // move, so it stays on the component until that is removed or its entity
+    // destroyed, through Commands also at the end of the stage; nothing
+    // catches one that is kept longer, whose memory may by then be another
+    // entity's or given back. Kept until a later stage, it is read next to
+    // the systems the scheduler lets write the component then.
     template<typename... Terms, typename Function>
     void each(Function &&function) {
       eachSince<Terms...>(0, function);
