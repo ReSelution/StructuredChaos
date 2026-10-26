@@ -9,12 +9,11 @@
 #include <cstring>
 #include <exception>
 #include <mutex>
+#include <new>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
-
-#include <mimalloc.h>
 
 #include "sc/memory/virtual_memory.hpp"
 #include "sc/threading/threading.hpp"
@@ -107,6 +106,8 @@ namespace sc::ecs::internal {
     // The generations of this many indices are kept in one piece.
     static constexpr unsigned BLOCK_BITS = 16;
     static constexpr uint32_t BLOCK_SIZE = uint32_t{1} << BLOCK_BITS;
+    // A block starts on a cache line.
+    static constexpr std::align_val_t BLOCK_ALIGN{64};
     // Also for the indices from INDEX_LIMIT on, which share a block with
     // those below it.
     static constexpr size_t BLOCK_COUNT = size_t{1} << (INDEX_BITS - BLOCK_BITS);
@@ -248,7 +249,9 @@ namespace sc::ecs::internal {
       // several of them.
       const uint32_t pages = pageCount();
       for (uint32_t place = 0; place < pages; ++place) {
-        mi_free(blocks()[pageAt(place) >> (BLOCK_BITS - PAGE_BITS)].exchange(nullptr, std::memory_order_relaxed));
+        ::operator delete(
+            blocks()[pageAt(place) >> (BLOCK_BITS - PAGE_BITS)].exchange(nullptr, std::memory_order_relaxed),
+            BLOCK_ALIGN);
       }
       const uint32_t areas = m_areaCount.load(std::memory_order_relaxed);
       // m_common is the allocator's own.
@@ -680,8 +683,8 @@ namespace sc::ecs::internal {
           // read (the zero page) and then a write, two faults per 4 KiB; now
           // one, in create. 100K created and then destroyed all at once, µs
           // create + destroy, block fresh from the OS: 245 + 763 before,
-          // 386 + 510 now; block reused from mimalloc: 428 + 461 before,
-          // 318 + 410 now (mi_zalloc zeroed all 256 KiB at once).
+          // 386 + 510 now; block reused from the allocator: 428 + 461
+          // before, 318 + 410 now (mi_zalloc zeroed all 256 KiB at once).
           std::memset(generation(first), 0, PAGE_SIZE * sizeof(uint32_t));
           area.cursor = page + 1 < m_pageLimit ? page + 1 : 0;
           const uint32_t place = m_pageCount.load(std::memory_order_relaxed);
@@ -706,7 +709,7 @@ namespace sc::ecs::internal {
         return;
       }
       // Only under m_pageMutex, so no other thread makes it meanwhile.
-      slot.store(static_cast<uint32_t *>(mi_malloc_aligned(BLOCK_SIZE * sizeof(uint32_t), 64)),
+      slot.store(static_cast<uint32_t *>(::operator new(BLOCK_SIZE * sizeof(uint32_t), BLOCK_ALIGN)),
                  std::memory_order_release);
     }
 
