@@ -29,6 +29,17 @@
 
 namespace compare {
 
+  // mimalloc gives freed memory back to the OS only after a delay, in whatever
+  // allocates next: a benchmark that frees its world after every sample had
+  // one sample in a hundred spend ~44 ms in madvise, inside a destroy of sc.
+  // Given back at once instead, every free in the timing pays for it (create
+  // +20 to +1000 % in every library). Never given back, the times are those
+  // of the delay without the outliers; report_memory gives it back itself.
+  inline const bool NEVER_PURGE = [] {
+    mi_option_set(mi_option_purge_delay, -1);
+    return true;
+  }();
+
   constexpr size_t ENTITY_COUNT = 100'000;
   // The loops that are spread over threads go through more entities, so that
   // there is something to spread.
@@ -656,8 +667,12 @@ namespace compare {
 
   // Reports by how much the memory of the process grows with the world that
   // the function builds and returns. What was freed on the way goes back to
-  // the OS first, so that it does not count.
+  // the OS first, so that it does not count: at once, not after the delay of
+  // the purge (with the delay, mi_collect left 8 to 33 % more resident) and
+  // not never, as NEVER_PURGE has it for the times. Each row runs in a
+  // process of its own, so the change stays there.
   template <typename Build> void report_memory(const char *row, Build &&build) {
+    mi_option_set(mi_option_purge_delay, 0);
     mi_collect(true);
     const size_t before = resident_memory();
     const auto world = build();
