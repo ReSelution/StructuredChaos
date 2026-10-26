@@ -694,7 +694,10 @@ namespace sc::ecs {
     [[nodiscard]] Pages pages() const noexcept { return m_pages; }
 
     // An entity without components, in the area of those.
-    [[nodiscard]] Entity create() { return m_entities.create(); }
+    [[nodiscard]] Entity create() {
+      const CreateWatch watch{*this};
+      return m_entities.create();
+    }
 
     // An entity in the area of a set of components, without them: entities
     // created for the same components, in whatever order, lie together in the
@@ -707,6 +710,7 @@ namespace sc::ecs {
     template<typename... Components>
       requires(sizeof...(Components) != 0)
     [[nodiscard]] Entity create() {
+      const CreateWatch watch{*this};
       return m_entities.create(areaOf<Components...>());
     }
 
@@ -714,6 +718,7 @@ namespace sc::ecs {
     template<typename... Components>
       requires(sizeof...(Components) != 0)
     void create(std::span<Entity> entities) {
+      const CreateWatch watch{*this};
       m_entities.create(entities, areaOf<Components...>(), [](uint32_t, uint32_t) {});
     }
 
@@ -736,6 +741,7 @@ namespace sc::ecs {
     // only turns into when it is not const.
       requires(!std::is_convertible_v<First &, std::span<Entity>> && !std::is_same_v<First, Rare>)
     [[nodiscard]] SC_FORCE_INLINE Entity create(const First &first, const Rest &...rest) {
+      const CreateWatch watch{*this};
       const Entity entity = m_entities.create(areaOf<First, Rest...>());
       column<First>().emplace(entity, first);
       (column<Rest>().emplace(entity, rest), ...);
@@ -756,6 +762,7 @@ namespace sc::ecs {
     // exception is thrown on.
     template<typename... Components>
     void create(std::span<Entity> entities, const Components &...components) {
+      const CreateWatch watch{*this};
       (column<Components>().expect(entities.size()), ...);
       const auto fill = [&]([[maybe_unused]] uint32_t first, [[maybe_unused]] uint32_t count) {
         (column<Components>().fill(first, count, components), ...);
@@ -789,6 +796,7 @@ namespace sc::ecs {
     void create(std::span<Entity> entities, Make &&make) {
       static_assert((std::is_nothrow_move_constructible_v<Components> && ...),
                     "the components are moved into place, where nothing may be thrown");
+      const CreateWatch watch{*this};
       (column<Components>().expect(entities.size()), ...);
       size_t done = 0;
       try {
@@ -810,7 +818,10 @@ namespace sc::ecs {
 
     // An entity that is unlike most others, see Rare. It is an entity like any
     // other, only with an index from an area of its own.
-    [[nodiscard]] Entity create(Rare) { return m_entities.create(rare); }
+    [[nodiscard]] Entity create(Rare) {
+      const CreateWatch watch{*this};
+      return m_entities.create(rare);
+    }
 
     [[nodiscard]] bool valid(Entity entity) const noexcept { return m_entities.valid(entity); }
 
@@ -834,6 +845,7 @@ namespace sc::ecs {
       if (!m_removeHooked.empty()) [[unlikely]] {
         runRemoveHooks(entity);
       }
+      const DestroyWatch watch{*this};
       // From ASK_COLUMNS_FROM on, only the columns that have it get the
       // virtual call, see ColumnPages.
       const uint32_t index = indexOf(entity);
@@ -920,10 +932,48 @@ namespace sc::ecs {
     }
 
   private:
+    // Counts a create or a destroy for as long as it exists and asserts that
+    // none of the other kind runs: create takes indices from the free lists
+    // without a lock and adds components, destroy gives indices back and
+    // takes components away without locked instructions. For a thread of
+    // the user's own, which assertAlone does not see; caught only where the
+    // two meet in time. Each side counts itself before it looks at the
+    // other (seq_cst both), so of two that meet, at least one sees the
+    // other. A destroy counts only once its onRemove hooks are done, which
+    // may create on its thread. Nothing in release builds.
+    template<bool CREATE>
+    class Watch {
+    public:
+#ifndef NDEBUG
+      explicit Watch(const World &world) noexcept : m_own(CREATE ? &world.m_creates : &world.m_destroys) {
+        m_own->fetch_add(1, std::memory_order_seq_cst);
+        if constexpr (CREATE) {
+          assert(world.m_destroys.load(std::memory_order_seq_cst) == 0 &&
+                 "sc::ecs: create next to a destroy on another thread; nothing may run next to destroy");
+        } else {
+          assert(world.m_creates.load(std::memory_order_seq_cst) == 0 &&
+                 "sc::ecs: destroy next to a create on another thread; nothing may run next to destroy");
+        }
+      }
+      ~Watch() { m_own->fetch_sub(1, std::memory_order_seq_cst); }
+#else
+      explicit Watch(const World & /*world*/) noexcept {}
+#endif
+      Watch(const Watch &) = delete;
+      Watch &operator=(const Watch &) = delete;
+
+#ifndef NDEBUG
+    private:
+      std::atomic<uint32_t> *m_own;
+#endif
+    };
+    using CreateWatch = Watch<true>;
+    using DestroyWatch = Watch<false>;
+
     // destroy gives indices back to lists that create takes from without a
     // lock, and takes components away without locked instructions. A loop or
-    // stage on other threads is all the world can tell about; a thread of
-    // the user's own that creates next to it is not caught.
+    // stage on other threads is all the world can tell about here; a thread
+    // of the user's own that creates next to it is caught by Watch.
     // NOLINTNEXTLINE(readability-convert-member-functions-to-static): uses members in debug builds
     void assertAlone() const noexcept {
       assert(m_parallelRuns.load(std::memory_order_relaxed) == 0 &&
@@ -932,6 +982,7 @@ namespace sc::ecs {
 
     size_t destroyQuietly(std::span<const Entity> entities) {
       assertAlone();
+      const DestroyWatch watch{*this};
       if (m_killPlace == nullptr) {
         // Without memory until a block is used, see startKillBlock.
         m_killPlace = static_cast<uint32_t *>(memory::reserve(KILL_PLACE_BYTES));
@@ -1035,6 +1086,7 @@ namespace sc::ecs {
     // threads (runRemoveHooks).
     size_t parallelDestroy(std::span<const Entity> entities) {
       assertAlone();
+      const DestroyWatch watch{*this};
       const size_t helpers = entities.size() / ENTITIES_PER_THREAD;
       if (helpers == 0) {
         return destroyQuietly(entities);
@@ -1954,6 +2006,9 @@ namespace sc::ecs {
 #ifndef NDEBUG
     // Parallel loops and stages running now, see assertAlone.
     mutable std::atomic<uint32_t> m_parallelRuns{0};
+    // Creates and destroys running now, see Watch.
+    mutable std::atomic<uint32_t> m_creates{0};
+    mutable std::atomic<uint32_t> m_destroys{0};
 #endif
 
     // The onAdd hooks of the component for every entity of the span that has

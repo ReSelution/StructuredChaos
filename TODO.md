@@ -227,8 +227,6 @@ unless noted, rank among 7–8 frameworks.
   848 µs, all at once 781 → 821, add + remove recorded 541 → 564 (7 runs each), though their code did not change.
   The probe that calls `destroy(span)` directly shows no difference. Presumably code placement in that binary; not
   looked into.
-- [ ] **`World::destroy` next to threads of the user's own:** a thread that the user starts and that creates next to
-  `destroy` is not caught (`FreeList::give` against `take` without a lock); only the comment says so.
 - [ ] **Knee in create between 16K and 32K entities:** create with two components 10.1 → 12.3 ns per entity (14.9 at
   262K), bulk 1.6 → 3.9; pico_ecs flat at 11. It is the end of the L2 (512 KB per core): the benchmark makes and
   destroys the whole world every iteration, L2 misses per entity 0.07 at 16K, 0.31 at 32K. Not page faults, not the
@@ -239,7 +237,10 @@ unless noted, rank among 7–8 frameworks.
 
 Done: debug builds assert that `destroy`, `destroy(span)` and `parallelDestroy` run while no parallel loop and no
 stage of more than one system runs on the world (`World::assertAlone`, counted with `internal::ParallelRun`); a
-system that takes `World &` runs alone and may still destroy. Destroy without `lock` (`86d3592`, -10 %); bulk destroy with kill masks (`fa865dc`); `World::parallelDestroy`
+system that takes `World &` runs alone and may still destroy. Since 2026-10-26 also a create of a thread of the user's own
+next to them, and the other way round (`World::Watch`, each side counts itself and then looks at the other), caught
+where the two meet in time: a thread that creates while the main thread destroys batches of 64 asserted in 3 of 3
+runs. Destroy without `lock` (`86d3592`, -10 %); bulk destroy with kill masks (`fa865dc`); `World::parallelDestroy`
 with `PageSort` and `giveMany` over threads (1M entities, 6 components: 10 538 → 2 422 µs on 16 threads); bulk
 create with reused indices in rows (`bfd4be4`, 2.1 instead of 10.3 ns at 1024).
 
