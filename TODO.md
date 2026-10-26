@@ -30,8 +30,6 @@ out from the pages instead of counted (its own cost not measured).
 the background lane with the cache's loader or the one given; afterwards a system only asks `ready()`. `find` and `get` read
 without a lock, `forceLoad`, `apply` and `collect` change the map and must not run next to them.
 
-- [ ] **A debug check for pointers of `get`:** they are good until the next `forceLoad` or `collect` (in a system, the
-  end of its stage); nothing catches one that is kept longer.
 - [ ] **`forceLoad` while a loader on the lane uses the old resource:** the scheduler keeps systems apart, not tasks.
   A reload that keeps the old one until the new one is loaded needs a second place in the entry.
 - [ ] **Unload and reload with the handles kept:** today a resource goes only once all its handles are gone, and
@@ -45,6 +43,11 @@ without a lock, `forceLoad`, `apply` and `collect` change the map and must not r
   to the simulation of the next frame (as Bevy's extract or Naughty Dog's fiber jobs do). Not tried in a frame yet:
   the run holds its worker until it is done, and the parallel stages of both worlds share the workers. Only matters
   once a CPU-bound frame shows it.
+
+Decided on 2026-10-26, no debug check for pointers of `get`: the way to a resource is its handle (`*handle`), which
+counts itself in, so collect keeps the entry, and asserts `ready()`. `get` is the shortcut for those who know how long
+it lasts (until the next `forceLoad` or `collect`, in a system the end of its stage, as its comment says); it counts
+nothing so that threads reading one key do not meet on a cache line, which a checked pointer would undo.
 
 Done: `Resources<T, Key, Hash>` as a system parameter after `scheduler.provide(cache)` (finding the cache per run not
 measured); GPU resources go through `memory::DeletionQueue` in their destructor, the cache knows no frames; whoever
