@@ -217,7 +217,7 @@ unless noted, rank among 7–8 frameworks.
   a span of one entity, as one destroy through `Commands`, 100 types 1 510 → 210 ns. Through `Commands`, the whole
   `scheduler.run` per destroyed entity (all threads, 2 / 20 / 100 types): 1 000 per frame 9.8 / 9.9 / 10.0 ns, 10 per
   frame 27 / 31 / 46, 1 per frame 185 / 217 / 371, of which 143 ns is a frame whose system records nothing; 100K at
-  once 6 to 13 ns, with a spread between runs not looked into. Still about 2.2 ns per column;
+  once 6 to 13 ns, the spread from mimalloc, see "A purge of mimalloc" below. Still about 2.2 ns per column;
   a per-entity record of its columns would visit only those, at a cost in every emplace and erase. pico_ecs is
   flattered: its
   entity benchmarks never call `PicoEcsApplication::init()`, so its destroy skips `ecs_sync_destroy`. Bulk destroy
@@ -226,6 +226,15 @@ unless noted, rank among 7–8 frameworks.
   848 µs, all at once 781 → 821, add + remove recorded 541 → 564 (7 runs each), though their code did not change.
   The probe that calls `destroy(span)` directly shows no difference. Presumably code placement in that binary; not
   looked into.
+- [ ] **A purge of mimalloc lands in whatever allocates next:** "destroy entities, all at once" in `ecs_compare_sc`
+  had a mean of ~710 µs in 5 of 6 runs and ~300 in the other (2026-10-26). Every sample gets a world of its own and
+  frees it afterwards; mimalloc gives that memory back to the OS only after its purge delay, in the next allocation
+  that takes its slow path. Here that is the `push_back` of `m_killPages` in `addKillPage`: one sample of 100 runs
+  ~44 ms on the CPU, 151 `madvise(MADV_DONTNEED)` of 2 MiB (300 MB) inside `destroy`. With
+  `MIMALLOC_PURGE_DELAY=-1` the mean is 291 to 334 µs in 6 of 6 runs, with `0` likewise. Open: the benchmark could
+  purge outside the timing (`mi_collect(true)` before every sample), the same for all frameworks or only sc; in a
+  game the same lands in a frame after a level was freed, at tens of ms (`mi_option_purge_delay`, or a
+  `mi_collect` at a loading screen).
 - [ ] **Knee in create between 16K and 32K entities:** create with two components 10.1 → 12.3 ns per entity (14.9 at
   262K), bulk 1.6 → 3.9; pico_ecs flat at 11. It is the end of the L2 (512 KB per core): the benchmark makes and
   destroys the whole world every iteration, L2 misses per entity 0.07 at 16K, 0.31 at 32K. Not page faults, not the
@@ -244,7 +253,11 @@ with `PageSort` and `giveMany` over threads (1M entities, 6 components: 10 538 �
 create with reused indices in rows (`bfd4be4`, 2.1 instead of 10.3 ns at 1024). Small costs of
 destroy one by one (2026-10-26): `FreeList::give` shortens with `erase` instead of `resize`, -5 instructions per
 destroy; `World::destroy` looks up the owner and the generation once (`EntityAllocator::find`), -4 more, 1.82 instead
-of 1.88 ms for 100K created and destroyed (`perf_ecs_world create`).
+of 1.88 ms for 100K created and destroyed (`perf_ecs_world create`). The generations of a page are zeroed in `makePage`
+instead of with the whole block (`mi_malloc_aligned`, not `mi_zalloc_aligned`): a block fresh from the OS took two
+faults per 4 KiB in the first destroy (the zero page, then a copy), now one in create; 100K created and destroyed all
+at once, create + destroy 1 008 → 896 µs with a new block, 889 → 728 µs with a reused one. `ecs_compare_sc` level,
+create on all threads -5 %.
 
 ## Entity locality: say at create which components an entity will get
 
