@@ -44,6 +44,9 @@ if sc_tsan
 endif
 
 # The ECS uses first-class mimalloc heaps, which are not reliable before 3.5.3.
+# TODO: stale, src/sc/ecs uses no mimalloc heap any more (only mi_malloc_aligned
+# and mi_free in entity.hpp); the heaps are in sc/memory/heap.hpp, used by
+# magpie_translator.hpp. Check whether 3.5.3 is still needed for those.
 mimalloc_dep = dependency(
   'mimalloc',
   version: '>=3.5.3',
