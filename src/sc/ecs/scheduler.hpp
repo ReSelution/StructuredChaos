@@ -2141,9 +2141,10 @@ namespace sc::ecs {
 
     // Runs every system once. Stages with more than one system and systems
     // added with addParallel run on the thread pool, so sc::threading::init
-    // must have been called before, and run must not be called from a pool
-    // thread. Before the first stage it calls then of the tasks of Tasks that
-    // are done, see Tasks.
+    // must have been called before. run may itself be called from a task of
+    // the pool, e.g. for a render world next to the next frame; it then holds
+    // that worker until it is done. Before the first stage it calls then of
+    // the tasks of Tasks that are done, see Tasks.
     //
     // If a system throws, the systems running at the same time still finish,
     // what they recorded through Commands is not done, later systems are

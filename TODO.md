@@ -40,9 +40,11 @@ without a lock, `forceLoad`, `apply` and `collect` change the map and must not r
   Only once the world streams that way; chunks that are destroyed and spawned again need nothing more.
 - [ ] **One allocation per push in `DeletionQueue`:** the function with its captures, plus one per `bind` of a new key
   (the copy of the loader). Not measured; typed lists (`VkImage` + `VmaAllocation`) if thousands per frame show.
-- [ ] **Frames overlapping without a render thread:** `Scheduler::run` must not be called from a pool thread, so a
-  render world cannot run its systems next to the simulation of the next frame yet (as Bevy's extract or Naughty
-  Dog's fiber jobs do). Only matters once a CPU-bound frame shows it.
+- [ ] **Frames overlapping without a render thread:** `Scheduler::run` may run in a task of the pool (2026-10-25: the
+  scheduler tests pass with every run moved to a worker, also under TSan), so a render world can run its systems next
+  to the simulation of the next frame (as Bevy's extract or Naughty Dog's fiber jobs do). Not tried in a frame yet:
+  the run holds its worker until it is done, and the parallel stages of both worlds share the workers. Only matters
+  once a CPU-bound frame shows it.
 
 Done: `Resources<T, Key, Hash>` as a system parameter after `scheduler.provide(cache)` (finding the cache per run not
 measured); GPU resources go through `memory::DeletionQueue` in their destructor, the cache knows no frames; whoever
