@@ -121,11 +121,12 @@ Goal: a system emits an event and its listeners run right away, on the emitting 
 - [ ] **No write per applied change:** `applyChange` sets `finish` to null in every change it does, so that `clear`
   after an exception knows what is left. A position per page (and one for the lists in order) would tell the same
   without writing 1M changes back; not measured whether it matters.
-- [ ] **Mask read with `relaxed` in `parallelEach`:** while `tryEmplace` of another thread sets it with `acq_rel`,
-  seeing the bit does not formally guarantee seeing the made value (fine on x86, not on ARM). Not checked again since
-  the rule of 2026-10-21 keeps other threads from adding to the columns a loop names.
-
 Done:
+
+- **Mask read with `relaxed` in `parallelEach` stays** (checked 2026-10-26): under the rule below, every bit a loop
+  reads and the value behind it were made before the loop started, and `parallelFor` hands them on to every thread
+  that joins (the job stored with release and loaded with acquire, the ticket through `atomic_queue` the same way).
+  While the loop runs, only the thread of a page changes its bits.
 
 - **`World::modify` / `Edit::modify`** with the `making` bit, counted in the page with `occupy`: 16 threads × 2000
   rounds on 8 targets lose no update, without the bit ~19 % were lost. `Edit` and `LocalEdit` replaced `Change` and

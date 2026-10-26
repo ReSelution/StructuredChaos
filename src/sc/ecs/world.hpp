@@ -1813,7 +1813,13 @@ namespace sc::ecs {
           }
 
           // The entities of a word: with all of the components, without the
-          // excluded ones.
+          // excluded ones. Relaxed, also where the CPU orders less than x86
+          // does: no thread adds to or removes from the columns a loop names
+          // on other entities while it runs, see the rule at each, so every
+          // bit read here and the value behind it were made before the loop
+          // started, and parallelFor hands them on (the job stored with
+          // release, loaded with acquire by every thread that joins). While
+          // it runs, only the thread of a page changes its bits.
           const auto maskOf = [&](uint32_t word) {
             uint64_t mask = (std::get<G>(pages).mask[word].load(std::memory_order_relaxed) & ...);
             ((mask &=
