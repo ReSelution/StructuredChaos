@@ -933,13 +933,8 @@ namespace sc::ecs {
     size_t destroyQuietly(std::span<const Entity> entities) {
       assertAlone();
       if (m_killPlace == nullptr) {
+        // Without memory until a block is used, see startKillBlock.
         m_killPlace = static_cast<uint32_t *>(memory::reserve(KILL_PLACE_BYTES));
-        // TODO: KILL_PLACE_BYTES is 4 MiB, committed at the first destroy of
-        // many; on Windows that counts against the commit limit, though only
-        // the places of pages in use are touched. CommittedStart does not fit
-        // (pages are not used from the first on); blocks as for the headers
-        // of a column would.
-        memory::commit(m_killPlace, KILL_PLACE_BYTES);
       }
       // The bits of the entities of one word of a kill page, gathered here
       // while the entities come in its order and written once it changes:
@@ -963,6 +958,10 @@ namespace sc::ecs {
           addKills(m_killPages[place - 1], word, bits);
         }
         const uint32_t number = index >> PAGE_BITS;
+        const uint32_t block = number / KILL_BLOCK_PAGES;
+        if ((m_killBlocks[block / 64] & (uint64_t{1} << (block % 64))) == 0) [[unlikely]] {
+          startKillBlock(block);
+        }
         // The place of the page in m_killPages, plus one; zero for none yet.
         place = m_killPlace[number];
         if (place == 0) [[unlikely]] {
@@ -987,6 +986,15 @@ namespace sc::ecs {
       }
       m_killPages.clear();
       return destroyed;
+    }
+
+    // Gives a block of m_killPlace its memory, all zero; all of it would be
+    // 4 MiB against the commit limit on Windows. In blocks, not from the
+    // start on as CommittedStart: the areas of sets start far apart, the
+    // second one in the middle of the pages.
+    SC_NOINLINE SC_COLD void startKillBlock(uint32_t block) {
+      memory::commit(m_killPlace + (size_t{block} * KILL_BLOCK_PAGES), memory::OS_PAGE_SIZE);
+      m_killBlocks[block / 64] |= uint64_t{1} << (block % 64);
     }
 
     // A page for destroyQuietly to gather entities in, at the end of
@@ -1882,6 +1890,9 @@ namespace sc::ecs {
     static constexpr uint32_t NO_WORD = ~uint32_t{0};
     // For every page there may be.
     static constexpr size_t KILL_PLACE_BYTES = (size_t{1} << (INDEX_BITS - PAGE_BITS)) * sizeof(uint32_t);
+    // The places in a page of the OS, given their memory together.
+    static constexpr uint32_t KILL_BLOCK_PAGES = memory::OS_PAGE_SIZE / sizeof(uint32_t);
+    static constexpr size_t KILL_BLOCKS = KILL_PLACE_BYTES / memory::OS_PAGE_SIZE;
 
     // The column of every component type used with this world, at
     // internal::componentIndex. An entry is written once, under the mutex, and
@@ -1914,6 +1925,8 @@ namespace sc::ecs {
     // pages are used. A std::vector of them filled 4 MiB with 2^20 pages.
     std::vector<internal::KillPage> m_killPages;
     uint32_t *m_killPlace = nullptr;
+    // A bit for every block of m_killPlace that has its memory.
+    std::array<uint64_t, KILL_BLOCKS / 64> m_killBlocks{};
     // For destroy of many entities on the pool: the entities by page, the
     // indices each page gave back, and how many.
     internal::PageSort<const Entity> m_destroySort;
