@@ -166,8 +166,13 @@ namespace sc::ecs::internal {
       // give for many indices: open, add each, close. Must have nothing
       // running next to it from open to close.
       void open() {
-        // What take took since the last time.
-        indices.resize(static_cast<size_t>(std::max<int64_t>(left.load(std::memory_order_relaxed), 0)));
+        // What take took since the last time. Only ever shorter, so erase:
+        // resize kept its path for growing the list, which take never needs.
+        // Creating 100K entities with 2 components and destroying them one
+        // by one took 29.73 instead of 30.23M instructions (Clang,
+        // perf_ecs_world create).
+        const auto kept = static_cast<ptrdiff_t>(std::max<int64_t>(left.load(std::memory_order_relaxed), 0));
+        indices.erase(indices.begin() + kept, indices.end());
       }
       void add(uint32_t index) { indices.push_back(index); }
       void close() { left.store(static_cast<int64_t>(indices.size()), std::memory_order_release); }

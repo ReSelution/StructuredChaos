@@ -222,8 +222,8 @@ unless noted, rank among 7–8 frameworks.
   flattered: its
   entity benchmarks never call `PicoEcsApplication::init()`, so its destroy skips `ecs_sync_destroy`. Bulk destroy
   (`fa865dc`) is below it: 4.2 / 5.3.
-- [ ] **Small costs of destroy:** `valid` and `EntityAllocator::destroy` both look up `generation` and `pages()`;
-  `FreeList::give` calls `resize` on every destroy, needed only if `take` took something since.
+- [ ] **Small costs of destroy:** `valid` and `EntityAllocator::destroy` both look up `generation` and `pages()`.
+  Done: `FreeList::give` shortens with `erase` instead of `resize`, -5 instructions per destroy.
 - [ ] **+3 to 5 % on unchanged paths after the parallel `giveMany`:** in `ecs_compare_sc`, destroy on one thread 820 →
   848 µs, all at once 781 → 821, add + remove recorded 541 → 564 (7 runs each), though their code did not change.
   The probe that calls `destroy(span)` directly shows no difference. Presumably code placement in that binary; not
