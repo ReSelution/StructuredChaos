@@ -635,7 +635,9 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
     REQUIRE(scheduler.stages() == Stages{{0}, {1}});
     scheduler.run(world);
 
-    REQUIRE(world.pageCount() == pages);
+    // A page for every thread at most: a thread whose chunk of the free list
+    // is used up makes one while others still hold indices in theirs.
+    REQUIRE(world.pageCount() <= pages + sc::threading::threadSlots());
     size_t created = 0;
     world.each<const Frozen, const Spawner>([&](Entity entity, const Spawner &spawner) {
       created += world.valid(entity) && !world.contains<Position>(entity) && spawner.count == -1;

@@ -299,10 +299,22 @@ all; memory of the world 2.36 / 1.68 MB.
 - [ ] **First use in the benchmarks:** every measured run of the create and destroy benchmarks gets a world of its own,
   for every framework alike, so they measure every first touch of its tables (create all at once +15 %, about 1.3 µs
   per page fault; `parallelDestroy` +35 µs). Not made to look better by touching the tables in the constructor.
-- [ ] **create one by one in an emptied world still slower than in a new one:** 1 095 against 929 µs; `create` alone
-  103 µs new, 248 emptied. Most is `FreeList::take`, one `fetch_sub` per create, where a new page needs none. Tried
-  and dropped: a cache of 13 indices per `Share` (248 → 141 µs), because free indices then no longer always come
-  before new pages. A game creates a few hundred per frame, where it is fractions of a microsecond.
+- **The free list in chunks** (2026-10-29, was "create one by one in an emptied world still slower than in a new one",
+  1 095 against 929 µs, most of it one `fetch_sub` per create). A thread takes a chunk of up to 4 092 given back indices
+  with one `fetch_sub` and hands them out from its `Share`; emptied chunks go back on a stack for `give`, which never
+  runs next to a take. 100K entities with 2 components created in a world emptied before: 16 threads 5.3 ms → 0.22 ms
+  (with one fetch_sub per index every thread wrote the same cache line; with chunks of one OS page, 1 020 indices,
+  four threads still shared a page of a column: 0.94 ms), one thread 1 078 → 960 µs (`ecs_compare_sc`). Destroyed
+  one by one and created again, `perf_ecs_world create`: 1.86 → 1.77 ms, at 6 instructions more per entity. The price,
+  the reason the cache of 13 indices per `Share` was dropped before: a thread holding a chunk keeps its indices from
+  the others, who make new pages meanwhile, at most one chunk per thread and area (test_scheduler allows a page per
+  thread for it). Left: destroy one by one in a new world +9.6 % (718 → 787 µs, +6 instructions per entity).
+- [ ] **Creating on all threads in a new world waits on the kernel:** 450 µs and 572 faults for 100K entities with 2
+  components on 16 threads, against 185 µs and 33 faults in memory a world before had (which `ecs_compare` measures).
+  The user time is the same (1.2 to 1.4 ms per run), the kernel takes 1.1 to 1.3 ms instead of 0.2 to 0.4: every 4 KiB
+  of a column is zeroed on its first write, under the lock of its 2 MiB, which all threads write to. Tried without
+  gain: `Pages::Huge` (161 faults, 495 µs), `populate` of a whole page of the column at its start (445 µs). Only the
+  first use of the memory; not pursued.
 
 Done: destroy all at once on one thread +24 % fixed by remembering the list of the last page (785 µs); emptied pages
 no longer give their memory back at once (`MADV_FREE` on Linux, create all at once in an emptied world 539 → 174 µs;

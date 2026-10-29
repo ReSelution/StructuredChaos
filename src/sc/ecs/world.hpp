@@ -694,7 +694,12 @@ namespace sc::ecs {
     [[nodiscard]] Pages pages() const noexcept { return m_pages; }
 
     // An entity without components, in the area of those.
-    [[nodiscard]] Entity create() {
+    //
+    // Inlined, as EntityAllocator::create: since the chunks of the free list
+    // Clang kept one of the two out of line, and creating 100K entities one
+    // by one with 2 components took 155 instead of 141 instructions per
+    // entity.
+    [[nodiscard]] SC_FORCE_INLINE Entity create() {
       const CreateWatch watch{*this};
       return m_entities.create();
     }

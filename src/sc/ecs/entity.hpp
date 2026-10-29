@@ -13,6 +13,7 @@
 #include <span>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "sc/memory/virtual_memory.hpp"
@@ -116,22 +117,70 @@ namespace sc::ecs::internal {
     static constexpr unsigned PAGE_NUMBER_BITS = INDEX_BITS - PAGE_BITS;
     static constexpr uint32_t PAGE_COUNT = INDEX_LIMIT >> PAGE_BITS;
 
-    // The indices a thread hands out next, which nobody else has.
+    // Indices destroy gave back, in the order it gave them, one OS page.
+    struct Chunk {
+      static constexpr uint32_t CAPACITY = ((4 * memory::OS_PAGE_SIZE) - 16) / sizeof(uint32_t);
+
+      // The next one on the stack of empty chunks, see FreeList::recycle.
+      Chunk *next = nullptr;
+      uint32_t count = 0;
+      uint32_t indices[CAPACITY];
+    };
+    static_assert(sizeof(Chunk) == 4 * memory::OS_PAGE_SIZE);
+
+    // The indices a thread hands out next, which nobody else has: those of
+    // its page from next to end, and before them the first left of a chunk
+    // it took from the free list.
     struct alignas(64) Share {
       uint32_t next = 0;
       uint32_t end = 0;
+      Chunk *chunk = nullptr;
+      uint32_t left = 0;
     };
 
-    // The indices destroy gave back, to be handed out again.
+    // The indices destroy gave back, to be handed out again, in chunks: a
+    // thread takes a whole chunk with one fetch_sub and hands its indices
+    // out without another atomic. One list with a fetch_sub per index made
+    // every creating thread write the same cache line: 100K entities with 2
+    // components created in a world emptied before took 5.3 ms on 16 threads
+    // against 1.17 ms on one. The cost: a chunk a thread holds is not there
+    // for the others, at most CAPACITY indices per thread and area, as the
+    // rest of the page a thread holds.
     struct FreeList {
-      // How many of the indices are left to hand out, from the back. Below
+      FreeList() = default;
+      FreeList(const FreeList &) = delete;
+      FreeList &operator=(const FreeList &) = delete;
+      ~FreeList() {
+        for (Chunk *chunk: all) {
+          delete chunk;
+        }
+      }
+
+      // How many chunks are left to hand out, from the back of chunks. Below
       // zero when several threads went for the last one.
       alignas(64) std::atomic<int64_t> left{0};
-      // Only changed by give, so take reads it without a lock.
-      std::vector<uint32_t> indices;
+      // The chunks threads have emptied, for give to fill again.
+      std::atomic<Chunk *> empty{nullptr};
+      // Only changed by give, so take reads it without a lock. All of them
+      // full but the last one.
+      std::vector<Chunk *> chunks;
+      // Where add writes in the last chunk, and its end; its count is
+      // written by close. A pointer and an end as in a vector: with the count
+      // of the last chunk read for every index, World::destroy(span) of 100K
+      // entities took 455 instead of 326 µs.
+      uint32_t *fill = nullptr;
+      uint32_t *fillEnd = nullptr;
+      // The last chunk, and how many there are, for give one index at a
+      // time: looked up in chunks, destroying 100K entities one by one took
+      // 13 instead of 6 instructions more per entity than the list of
+      // single indices.
+      Chunk *last = nullptr;
+      int64_t published = 0;
+      // Every chunk the list made, wherever it is now.
+      std::vector<Chunk *> all;
 
-      // False if there is none.
-      [[nodiscard]] bool take(uint32_t &index) noexcept {
+      // Takes a chunk into the share. False if there is none.
+      [[nodiscard]] bool take(Share &share) noexcept {
         // Read first: once nothing is left, no thread writes this any more.
         if (left.load(std::memory_order_acquire) <= 0) {
           return false;
@@ -140,22 +189,19 @@ namespace sc::ecs::internal {
         if (before <= 0) {
           return false;
         }
-        index = indices[static_cast<size_t>(before - 1)];
+        share.chunk = chunks[static_cast<size_t>(before - 1)];
+        share.left = share.chunk->count;
         return true;
       }
 
-      // take for up to count indices with one fetch_sub: those of the span,
-      // in the order destroy gave them back. Empty if there is none.
-      [[nodiscard]] std::span<const uint32_t> takeMany(size_t count) noexcept {
-        if (count == 0 || left.load(std::memory_order_acquire) <= 0) {
-          return {};
-        }
-        const int64_t before = left.fetch_sub(static_cast<int64_t>(count), std::memory_order_acq_rel);
-        if (before <= 0) {
-          return {};
-        }
-        const auto taken = static_cast<size_t>(std::min(before, static_cast<int64_t>(count)));
-        return {indices.data() + (static_cast<size_t>(before) - taken), taken};
+      // A chunk whose indices the thread has all handed out, for give to
+      // fill again. Only give takes chunks off the stack, never next to a
+      // take, so a chunk cannot come back meanwhile (no ABA).
+      void recycle(Chunk *chunk) noexcept {
+        Chunk *head = empty.load(std::memory_order_relaxed);
+        do {
+          chunk->next = head;
+        } while (!empty.compare_exchange_weak(head, chunk, std::memory_order_release, std::memory_order_relaxed));
       }
 
       // Must have nothing running next to it. Inlined, see destroy.
@@ -168,20 +214,100 @@ namespace sc::ecs::internal {
       // give for many indices: open, add each, close. Must have nothing
       // running next to it from open to close.
       void open() {
-        // What take took since the last time. Only ever shorter, so erase:
-        // resize kept its path for growing the list, which take never needs.
-        // Creating 100K entities with 2 components and destroying them one
-        // by one took 29.73 instead of 30.23M instructions (Clang,
-        // perf_ecs_world create).
-        const auto kept = static_cast<ptrdiff_t>(std::max<int64_t>(left.load(std::memory_order_relaxed), 0));
-        indices.erase(indices.begin() + kept, indices.end());
+        // The chunks take took since the last time belong to their threads.
+        const int64_t kept = std::max<int64_t>(left.load(std::memory_order_relaxed), 0);
+        if (kept < published) [[unlikely]] {
+          chunks.resize(static_cast<size_t>(kept));
+          refill();
+        }
       }
-      void add(uint32_t index) { indices.push_back(index); }
-      void close() { left.store(static_cast<int64_t>(indices.size()), std::memory_order_release); }
+      SC_FORCE_INLINE void add(uint32_t index) {
+        if (fill == fillEnd) [[unlikely]] {
+          extend();
+        }
+        // extend leaves it in a chunk, which the analyzer of clang-tidy does
+        // not follow.
+        assert(fill != nullptr);
+        *fill++ = index;
+      }
+      void close() {
+        if (last != nullptr) {
+          last->count = static_cast<uint32_t>(fill - last->indices);
+        }
+        left.store(published, std::memory_order_release);
+      }
 
-      // How many indices are left to hand out.
+      // How many indices there are from open on: every chunk is full but
+      // the last one.
+      [[nodiscard]] size_t filled() const noexcept {
+        return chunks.empty() ? 0 : ((chunks.size() - 1) * Chunk::CAPACITY) + chunks.back()->count;
+      }
+      // Makes it hold count indices from open on, the new ones at the
+      // places filled() had nothing, to be written with copy.
+      void grow(size_t count) {
+        while (filled() < count) {
+          if (chunks.empty() || chunks.back()->count == Chunk::CAPACITY) {
+            chunks.push_back(fresh());
+          }
+          Chunk &last = *chunks.back();
+          last.count = static_cast<uint32_t>(std::min<size_t>(Chunk::CAPACITY, last.count + (count - filled())));
+        }
+        refill();
+      }
+      // Writes the indices to the places from place on, in the order of
+      // the list as filled() counts.
+      void copy(std::span<const uint32_t> indices, size_t place) noexcept {
+        while (!indices.empty()) {
+          Chunk &chunk = *chunks[place / Chunk::CAPACITY];
+          const size_t offset = place % Chunk::CAPACITY;
+          const size_t count = std::min(indices.size(), Chunk::CAPACITY - offset);
+          std::ranges::copy(indices.first(count), chunk.indices + offset);
+          indices = indices.subspan(count);
+          place += count;
+        }
+      }
+
+      // How many indices are left to hand out, but those in the chunks of
+      // the threads.
       [[nodiscard]] size_t size() const noexcept {
-        return static_cast<size_t>(std::max<int64_t>(left.load(std::memory_order_acquire), 0));
+        const auto count = static_cast<size_t>(std::max<int64_t>(left.load(std::memory_order_acquire), 0));
+        size_t indices = 0;
+        for (size_t i = 0; i < count; ++i) {
+          indices += chunks[i]->count;
+        }
+        return indices;
+      }
+
+    private:
+      // fill and fillEnd for the last chunk as its count has it.
+      void refill() noexcept {
+        published = static_cast<int64_t>(chunks.size());
+        last = chunks.empty() ? nullptr : chunks.back();
+        fill = last != nullptr ? last->indices + last->count : nullptr;
+        fillEnd = last != nullptr ? last->indices + Chunk::CAPACITY : nullptr;
+      }
+
+      // The last chunk is full: another one after it.
+      SC_NOINLINE void extend() {
+        if (last != nullptr) {
+          last->count = Chunk::CAPACITY;
+        }
+        chunks.reserve(chunks.size() + 1);
+        chunks.push_back(fresh());
+        refill();
+      }
+
+      // An empty chunk: one a thread emptied, or else a new one.
+      Chunk *fresh() {
+        if (Chunk *const chunk = empty.load(std::memory_order_acquire)) {
+          empty.store(chunk->next, std::memory_order_relaxed);
+          chunk->count = 0;
+          return chunk;
+        }
+        all.reserve(all.size() + 1);
+        auto *const chunk = new Chunk;
+        all.push_back(chunk);
+        return chunk;
       }
     };
 
@@ -277,8 +403,9 @@ namespace sc::ecs::internal {
     [[nodiscard]] SC_FORCE_INLINE Entity create(uint32_t area) { return create(this->area(area), area); }
 
     // The same in COMMON_AREA, which the allocator holds itself: through the
-    // table of areas, 1M creates took 8.4 instead of 7.7 ms.
-    [[nodiscard]] Entity create() { return create(m_common, COMMON_AREA); }
+    // table of areas, 1M creates took 8.4 instead of 7.7 ms. Inlined, see
+    // World::create.
+    [[nodiscard]] SC_FORCE_INLINE Entity create() { return create(m_common, COMMON_AREA); }
 
     // An entity for every place of the span, as create makes them. Calls the
     // function with every run of indices it handed out, as (first index,
@@ -308,19 +435,32 @@ namespace sc::ecs::internal {
     [[nodiscard]] Entity create(Rare) { return create(RARE_AREA); }
 
   private:
-    [[nodiscard]] Entity create(Area &in, uint32_t area) {
-      if (uint32_t index = 0; in.free.take(index)) {
-        return makeEntity(index, *generation(index));
-      }
-
-      return withShare(in, [&](Share &share) {
+    // Inlined with withShare and the lambda, a new page out of line: with
+    // all of it in one function Clang kept that out of line, and creating
+    // 100K entities with 2 components and destroying them one by one took
+    // 31.8 instead of 29.9M instructions (perf_ecs_world create; 29.3M with
+    // the list of single indices before the chunks).
+    [[nodiscard]] SC_FORCE_INLINE Entity create(Area &in, uint32_t area) {
+      return withShare(in, [&](Share &share) SC_FORCE_INLINE_LAMBDA {
+        if (share.left != 0 || in.free.take(share)) {
+          const uint32_t index = share.chunk->indices[--share.left];
+          if (share.left == 0) [[unlikely]] {
+            in.free.recycle(std::exchange(share.chunk, nullptr));
+          }
+          return makeEntity(index, *generation(index));
+        }
         if (share.next == share.end) [[unlikely]] {
-          share.next = makePage(in, area);
-          share.end = share.next + PAGE_SIZE;
+          startPage(in, area, share);
         }
         // Never handed out before.
         return makeEntity(share.next++, 0);
       });
+    }
+
+    // The next page of the area for the share.
+    SC_NOINLINE SC_COLD void startPage(Area &in, uint32_t area, Share &share) {
+      share.next = makePage(in, area);
+      share.end = share.next + PAGE_SIZE;
     }
 
     template<typename Function>
@@ -341,19 +481,45 @@ namespace sc::ecs::internal {
         }
       };
       size_t made = 0;
-      const std::span<const uint32_t> reused = in.free.takeMany(entities.size());
-      for (size_t i = 0; i < reused.size();) {
-        const uint32_t first = reused[i];
-        uint32_t count = 1;
-        while (i + count < reused.size() && reused[i + count] == first + count) {
-          ++count;
+      // The indices given back first, from the back of each chunk, so that
+      // those destroy gave back in a row keep their order. Taken from the
+      // share under withShare, gone through outside of it: in its lambda,
+      // with made and entities through references, creating 100K entities
+      // with 2 components at once in a world emptied before took 255 instead
+      // of 163 µs.
+      while (made < entities.size()) {
+        Chunk *emptied = nullptr;
+        const std::span<const uint32_t> reused = withShare(in, [&](Share &share) -> std::span<const uint32_t> {
+          if (share.left == 0 && !in.free.take(share)) {
+            return {};
+          }
+          const auto taken = static_cast<uint32_t>(std::min<size_t>(entities.size() - made, share.left));
+          share.left -= taken;
+          const std::span<const uint32_t> part{share.chunk->indices + share.left, taken};
+          if (share.left == 0) {
+            emptied = std::exchange(share.chunk, nullptr);
+          }
+          return part;
+        });
+        if (reused.empty()) {
+          break;
         }
-        for (uint32_t k = 0; k < count; ++k) {
-          entities[made + k] = makeEntity(first + k, *generation(first + k));
+        for (size_t i = 0; i < reused.size();) {
+          const uint32_t first = reused[i];
+          uint32_t count = 1;
+          while (i + count < reused.size() && reused[i + count] == first + count) {
+            ++count;
+          }
+          for (uint32_t k = 0; k < count; ++k) {
+            entities[made + k] = makeEntity(first + k, *generation(first + k));
+          }
+          give(first, count);
+          made += count;
+          i += count;
         }
-        give(first, count);
-        made += count;
-        i += count;
+        if (emptied != nullptr) {
+          in.free.recycle(emptied);
+        }
       }
 
       withShare(in, [&](Share &share) {
@@ -459,7 +625,7 @@ namespace sc::ecs::internal {
 
     // How many entities exist: every index of the pages handed out to the
     // threads, less those the threads have not handed out yet and those
-    // destroy gave back. Worked out, not counted by create and destroy: a
+    // destroy gave back, in the lists and in the chunks of the threads. Worked out, not counted by create and destroy: a
     // count would be one more locked instruction per create, on a cache line
     // that every creating thread writes. Reads the Share of every thread in
     // every area, 129 cache lines each. Nothing may create or destroy next to
@@ -474,7 +640,7 @@ namespace sc::ecs::internal {
           continue;
         }
         for (const Share &share: in->shares) {
-          count -= size_t{share.end - share.next};
+          count -= size_t{share.end - share.next} + share.left;
         }
         count -= in->free.size();
       }
@@ -519,7 +685,7 @@ namespace sc::ecs::internal {
       m_fills.resize(areas);
       for (uint32_t area = 0; area < areas; ++area) {
         const Area *const in = areaTable()[area].load(std::memory_order_relaxed);
-        m_fills[area] = in != nullptr ? in->free.indices.size() : 0;
+        m_fills[area] = in != nullptr ? in->free.filled() : 0;
       }
       m_places.resize(pages.size());
       for (size_t i = 0; i < pages.size(); ++i) {
@@ -532,14 +698,14 @@ namespace sc::ecs::internal {
       }
       for (uint32_t area = 0; area < areas; ++area) {
         if (Area *const in = areaTable()[area].load(std::memory_order_relaxed)) {
-          in->free.indices.resize(m_fills[area]);
+          in->free.grow(m_fills[area]);
         }
       }
       threading::parallelFor(pages.size(), 1, helpers, [&](size_t first, size_t last) {
         for (size_t i = first; i < last; ++i) {
           if (!pages[i].empty()) {
             FreeList &list = areaOf(pages[i].front()).free;
-            std::ranges::copy(pages[i], list.indices.begin() + static_cast<std::ptrdiff_t>(m_places[i]));
+            list.copy(pages[i], m_places[i]);
           }
         }
       });
@@ -657,7 +823,7 @@ namespace sc::ecs::internal {
     // (threading::NO_THREAD_ID) and pool threads beyond MAX_THREADS, use one
     // together, one at a time.
     template<typename Function>
-    std::invoke_result_t<Function &, Share &> withShare(Area &area, Function &&function) {
+    SC_FORCE_INLINE std::invoke_result_t<Function &, Share &> withShare(Area &area, Function &&function) {
       const uint32_t thread = threading::threadId();
       if (thread < MAX_THREADS) [[likely]] {
         return function(area.shares[thread]);
