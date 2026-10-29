@@ -63,6 +63,20 @@ namespace {
     int value{0};
   };
 
+  // Changed by many threads at once without a bit, through the atomic. It
+  // cannot be copied by itself, so this does it by hand.
+  struct Counter {
+    std::atomic<int> value{0};
+
+    Counter() = default;
+    Counter(const Counter &other) : value(other.value.load(std::memory_order_relaxed)) {}
+    Counter &operator=(const Counter &other) {
+      value.store(other.value.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      return *this;
+    }
+    ~Counter() = default;
+  };
+
   // Owns something, which shows whether every one that was made is gone.
   struct Named {
     std::string name;
@@ -831,6 +845,52 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
       // How many entities hit it, twice each.
       const int hits = i < targets ? static_cast<int>((entities.size() - i + targets - 1) / targets) : 0;
       REQUIRE(world.get<Health>(entities[i]).value == 100 - (2 * hits));
+    }
+  }
+
+  SECTION("A Loop Modifies The Same Entity From Every Thread") {
+    // The bit of one entity, which every thread wants for every call.
+    scheduler.addParallel(
+        [&](Edit<Health> edit, const Position &) { edit.modify(entities[0], [](Health &health) { health.value -= 1; }); });
+    scheduler.run(world);
+    REQUIRE(world.get<Health>(entities[0]).value == 100 - static_cast<int>(entities.size()));
+  }
+
+  SECTION("A Loop Records Modifications Of Entities That Other Threads Go For As Well") {
+    // The same through Commands, to a few entities and to one: made once the
+    // stage is over, a page on a thread, and every one counts.
+    for (const size_t targets: {size_t{10}, size_t{1}}) {
+      for (const Entity entity: entities) {
+        world.get<Health>(entity).value = 100;
+      }
+      Scheduler recorder;
+      recorder.addParallel([&](Commands commands, const Position &pos) {
+        commands.modify(entities[static_cast<size_t>(pos.x) % targets], [](Health &health) { health.value -= 1; });
+      });
+      recorder.run(world);
+      for (size_t i = 0; i < targets; ++i) {
+        const int hits = static_cast<int>((entities.size() - i + targets - 1) / targets);
+        REQUIRE(world.get<Health>(entities[i]).value == 100 - hits);
+      }
+    }
+  }
+
+  SECTION("A Loop Modifies Other Entities Without The Bit Through An Atomic") {
+    // LocalEdit takes no bit; the component keeps the threads apart itself.
+    for (const size_t targets: {size_t{10}, size_t{1}}) {
+      for (size_t i = 0; i < targets; ++i) {
+        world.emplaceOrReplace<Counter>(entities[i]);
+      }
+      Scheduler counter;
+      counter.addParallel([&](LocalEdit<Counter> edit, const Position &pos) {
+        edit.modify(entities[static_cast<size_t>(pos.x) % targets],
+                    [](Counter &count) { count.value.fetch_add(1, std::memory_order_relaxed); });
+      });
+      counter.run(world);
+      for (size_t i = 0; i < targets; ++i) {
+        const int hits = static_cast<int>((entities.size() - i + targets - 1) / targets);
+        REQUIRE(world.get<Counter>(entities[i]).value.load(std::memory_order_relaxed) == hits);
+      }
     }
   }
 
