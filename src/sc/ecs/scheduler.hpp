@@ -910,6 +910,15 @@ namespace sc::ecs {
   // Health of a random other one, on one thread, ns per hit: Edit::modify
   // 6.4, LocalEdit::modify 2.2, Query::get and writing 1.1 (it does not look
   // whether the entity has one).
+  //
+  // Threads may also meet on an entity through LocalEdit where the
+  // component keeps them apart itself, with an atomic its function changes;
+  // then every other access to that component has to be atomic as well.
+  // ecs_compare, 1M entities damaging one of 1 000 targets / the same one,
+  // all threads (16), ms for all hits: LocalEdit::modify on an atomic float
+  // 0.86 / 56.9, Edit::modify and Commands::modify on a plain one 15.0 /
+  // 13.6 and 3.82 / 3.82. An atomic float is a CAS loop, which many threads
+  // on one entity keep failing: there Commands is still the way.
   enum class Locking : uint8_t {
     // Takes the making bit, see Edit.
     Bit,
