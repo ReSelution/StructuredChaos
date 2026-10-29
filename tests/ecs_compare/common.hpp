@@ -45,6 +45,9 @@ namespace compare {
   // The loops that are spread over threads go through more entities, so that
   // there is something to spread.
   constexpr size_t PARALLEL_ENTITY_COUNT = 1'000'000;
+  // The entities the PARALLEL_ENTITY_COUNT ones damage in the *_FEW
+  // benchmarks.
+  constexpr size_t FEW_TARGETS = 1'000;
   constexpr float DT = 1.0f / 60.0f;
 
   // Plain aggregates, so that no library has to run a constructor it could
@@ -642,31 +645,6 @@ namespace compare {
     report(section, row("changes").c_str(), times.changes);
     report(section, row("systems").c_str(), times.iterate);
     report(section, row("frame").c_str(), times.frame);
-  }
-
-  // Whether damage dealt from several threads arrives: PARALLEL_ENTITY_COUNT
-  // entities on all threads each damage the Health of one target by 1, in the
-  // way the library provides for writing another entity from a parallel
-  // system. The section of the report; scripts/ecs_compare.py takes the
-  // values of a section whose name starts with "hits lost" as counts. Without
-  // a comma, so that it can be run on its own.
-  inline constexpr const char *LOST = "hits lost when 1 000 000 entities damage others on all threads";
-
-  // The rows of LOST: the targets the hits go to, with the way the library
-  // has after it, e.g. "1 of 1 000 entities, ensure".
-  namespace lost {
-    inline constexpr size_t FEW_TARGETS = 1'000;
-    inline constexpr const char *FEW = "1 of 1 000 entities";
-    inline constexpr const char *ONE = "the same entity";
-  } // namespace lost
-
-  // The hits of PARALLEL_ENTITY_COUNT entities by 1 each that did not arrive,
-  // read from the Health the targets have left, which was 0 before. The sum
-  // stays exact in a float below 2^24.
-  inline void report_lost(const char *row, const char *variant, float health_left) {
-    const std::string label = std::string{row} + ", " + variant;
-    const double arrived = -static_cast<double>(health_left);
-    report(LOST, name::parallel(label.c_str()).c_str(), static_cast<double>(PARALLEL_ENTITY_COUNT) - arrived);
   }
 
   // What a world costs in memory rather than in time. The section of the

@@ -17,8 +17,7 @@ namespace {
     flecs::entity_t entity;
   };
 
-  // A hit on AtomicHealth through the live component, the way PR #915 of
-  // flecs left multithreaded writes to the application: get_mut hands out
+  // A hit on AtomicHealth through the component itself: get_mut hands out
   // the storage and, unlike ensure, queues no command for it.
   void hit_atomic(flecs::entity entity, flecs::entity_t target) {
     entity.world().entity(target).get_mut<AtomicHealth>().damage(1.0f);
@@ -361,11 +360,11 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
   const flecs::entity last = world.entities.back();
   REQUIRE(steered(last.get<Velocity>(), last.get<Position>(), world.entities[order.back()].get<Position>()));
 
-  // The hits of RECORD_FEW and RECORD_ONE as events, see enqueue_damage: the
-  // way flecs has for writing another entity from several threads that
-  // keeps every hit, as Commands::modify is for sc.
+  // The hits of RECORD_FEW and RECORD_ONE as events, see enqueue_damage:
+  // recorded on every thread and made at the merge, as Commands::modify does
+  // for sc.
   {
-    constexpr size_t FEW = lost::FEW_TARGETS;
+    constexpr size_t FEW = FEW_TARGETS;
     const flecs::entity boss = world.entities.front();
     observe_damage(ecs);
     const flecs::system few = ecs.system<const Target>("record_few").multi_threaded().each(
@@ -400,11 +399,12 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     one.disable();
   }
 
-  // ATOMIC_HEALTH_FEW and ATOMIC_HEALTH_ONE, see hit_atomic. flecs has no
-  // lock of its own for such a call, MODIFY_FEW and MODIFY_ONE stay empty.
-  // The targets get AtomicHealth next to their Health.
+  // ATOMIC_HEALTH_FEW and ATOMIC_HEALTH_ONE, see hit_atomic. flecs leaves
+  // keeping such writes apart to the component, so MODIFY_FEW and
+  // MODIFY_ONE have no row here. The targets get AtomicHealth next to their
+  // Health.
   {
-    constexpr size_t FEW = lost::FEW_TARGETS;
+    constexpr size_t FEW = FEW_TARGETS;
     const flecs::entity boss = world.entities.front();
     for (size_t i = 0; i < FEW; ++i) {
       world.entities[i].set<AtomicHealth>(AtomicHealth{0.0f});
@@ -608,113 +608,6 @@ namespace {
 } // namespace
 
 TEST_CASE(HEAVY_WORLD, "[ecs_compare][!benchmark]") { run_heavy<Heavy>(); }
-
-namespace {
-
-  // The world of LOST: targets with Health 0, and PARALLEL_ENTITY_COUNT
-  // entities that each name one of them, in turn.
-  struct Hits {
-    World base;
-    flecs::world &world = base.world;
-    std::vector<flecs::entity> targets;
-
-    Hits(size_t target_count, int32_t threads) {
-      world.set_threads(threads);
-      targets.reserve(target_count);
-      for (size_t i = 0; i < target_count; ++i) {
-        targets.push_back(world.entity().set<Health>({0.0f}).set<AtomicHealth>(AtomicHealth{0.0f}));
-      }
-      for (size_t i = 0; i < PARALLEL_ENTITY_COUNT; ++i) {
-        world.entity().set<Target>({targets[i % target_count].id()});
-      }
-    }
-
-    [[nodiscard]] float health_left() const {
-      float sum = 0.0f;
-      for (const flecs::entity &target: targets) {
-        sum += target.get<Health>().value;
-      }
-      return sum;
-    }
-
-    [[nodiscard]] float atomic_health_left() const {
-      float sum = 0.0f;
-      for (const flecs::entity &target: targets) {
-        sum += target.get<AtomicHealth>().left();
-      }
-      return sum;
-    }
-  };
-
-  // While the world is deferred, ensure of a component the entity has hands
-  // out the component itself (flecs_defer_ensure finds it and queues an add
-  // that does nothing), so threads that hit the same target read and write
-  // it at the same time without a lock: a data race, which is what is
-  // counted here.
-  void hit_with_ensure(size_t target_count, const char *row, int32_t threads) {
-    Hits hits{target_count, threads};
-    hits.world.system<const Target>("hit").multi_threaded().each([](flecs::entity entity, const Target &target) {
-      entity.world().entity(target.entity).ensure<Health>().value -= 1.0f;
-    });
-    hits.world.progress(DT);
-    report_lost(row, "ensure", hits.health_left());
-  }
-
-  // set does the same while the world is deferred, for a component the
-  // entity has: the value goes into the component itself, since PR #915 of
-  // flecs (v3.1.4, 2023), which left multithreaded apps to synchronize
-  // themselves; only for an entity without the component is it queued, and
-  // then the last one wins at the merge. Read with get and written with set,
-  // a hit leaves more time for others to come between than with ensure.
-  void hit_with_set(size_t target_count, const char *row, int32_t threads) {
-    Hits hits{target_count, threads};
-    hits.world.system<const Target>("hit").multi_threaded().each([](flecs::entity entity, const Target &target) {
-      const flecs::entity victim = entity.world().entity(target.entity);
-      victim.set<Health>({victim.get<Health>().value - 1.0f});
-    });
-    hits.world.progress(DT);
-    report_lost(row, "set", hits.health_left());
-  }
-
-  // Events enqueued on the targets, see enqueue_damage: every hit arrives.
-  void hit_with_enqueue(size_t target_count, const char *row, int32_t threads) {
-    Hits hits{target_count, threads};
-    observe_damage(hits.world);
-    hits.world.system<const Target>("hit").multi_threaded().each(
-        [](flecs::entity entity, const Target &target) { enqueue_damage(entity, target.entity); });
-    hits.world.progress(DT);
-    report_lost(row, "enqueue", hits.health_left());
-    REQUIRE(hits.health_left() == -static_cast<float>(PARALLEL_ENTITY_COUNT));
-  }
-
-  // An atomic in the component, see hit_atomic: every hit arrives.
-  void hit_with_atomic(size_t target_count, const char *row, int32_t threads) {
-    Hits hits{target_count, threads};
-    hits.world.system<const Target>("hit").multi_threaded().each(
-        [](flecs::entity entity, const Target &target) { hit_atomic(entity, target.entity); });
-    hits.world.progress(DT);
-    report_lost(row, "atomic", hits.atomic_health_left());
-    REQUIRE(hits.atomic_health_left() == -static_cast<float>(PARALLEL_ENTITY_COUNT));
-  }
-
-} // namespace
-
-// ensure and set write the target from the thread of the hit, which the
-// docs of flecs do not warn against. enqueue and an atomic in the component
-// are the ways this comparison found that keep every hit; the docs recommend
-// none. Timed as RECORD_FEW / RECORD_ONE and ATOMIC_HEALTH_FEW /
-// ATOMIC_HEALTH_ONE in LARGE_WORLD.
-TEST_CASE(LOST, "[ecs_compare][!benchmark]") {
-  const auto threads = static_cast<int32_t>(thread_count());
-  hit_with_ensure(lost::FEW_TARGETS, lost::FEW, threads);
-  hit_with_set(lost::FEW_TARGETS, lost::FEW, threads);
-  hit_with_enqueue(lost::FEW_TARGETS, lost::FEW, threads);
-  hit_with_atomic(lost::FEW_TARGETS, lost::FEW, threads);
-  hit_with_ensure(1, lost::ONE, threads);
-  hit_with_set(1, lost::ONE, threads);
-  hit_with_enqueue(1, lost::ONE, threads);
-  hit_with_atomic(1, lost::ONE, threads);
-}
 
 // The memory of the worlds, see memory in common.hpp.
 TEST_CASE(memory::MOVING, "[ecs_compare][.memory]") {

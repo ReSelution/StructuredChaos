@@ -410,7 +410,7 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
   }
 
   {
-    constexpr size_t FEW = lost::FEW_TARGETS;
+    constexpr size_t FEW = FEW_TARGETS;
     constexpr size_t HITS_EACH = PARALLEL_ENTITY_COUNT / FEW;
     static_assert(HITS_EACH * FEW == PARALLEL_ENTITY_COUNT);
     const Entity boss = world.entities.front();
@@ -672,82 +672,6 @@ namespace {
 TEST_CASE(HEAVY_WORLD, "[ecs_compare][!benchmark]") {
   sc::threading::init(thread_count() - 1);
   run_heavy<Heavy>();
-}
-
-namespace {
-
-  // The world of LOST: targets with Health 0, and PARALLEL_ENTITY_COUNT
-  // entities that each name one of them, in turn.
-  struct Hits {
-    sc::ecs::World world{PAGES};
-    std::vector<Entity> targets;
-
-    explicit Hits(size_t target_count) : targets(target_count) {
-      for (Entity &target: targets) {
-        target = world.create(Health{0.0f}, AtomicHealth{0.0f});
-      }
-      for (size_t i = 0; i < PARALLEL_ENTITY_COUNT; ++i) {
-        (void) world.create(Target{targets[i % target_count]});
-      }
-    }
-
-    [[nodiscard]] float health_left() const {
-      float sum = 0.0f;
-      for (const Entity target: targets) {
-        sum += world.get<const Health>(target).value;
-      }
-      return sum;
-    }
-
-    [[nodiscard]] float atomic_health_left() const {
-      float sum = 0.0f;
-      for (const Entity target: targets) {
-        sum += world.get<const AtomicHealth>(target).left();
-      }
-      return sum;
-    }
-  };
-
-  // Edit::modify takes the making bit of the target, Commands::modify
-  // records the hit and makes it once the loop is over, LocalEdit::modify
-  // takes no bit and leaves it to the atomic: every way, every hit arrives.
-  void hit(size_t target_count, const char *row) {
-    const auto damage = [](Health &health) { health.value -= 1.0f; };
-    {
-      Hits hits{target_count};
-      Scheduler scheduler;
-      scheduler.addParallel([&](Edit<Health> edit, const Target &target) { edit.modify(target.entity, damage); });
-      scheduler.run(hits.world);
-      report_lost(row, "modify", hits.health_left());
-      REQUIRE(hits.health_left() == -static_cast<float>(PARALLEL_ENTITY_COUNT));
-    }
-    {
-      Hits hits{target_count};
-      Scheduler scheduler;
-      scheduler.addParallel(
-          [&](Commands commands, const Target &target) { commands.modify(target.entity, damage); });
-      scheduler.run(hits.world);
-      report_lost(row, "recorded", hits.health_left());
-      REQUIRE(hits.health_left() == -static_cast<float>(PARALLEL_ENTITY_COUNT));
-    }
-    {
-      Hits hits{target_count};
-      Scheduler scheduler;
-      scheduler.addParallel([&](LocalEdit<AtomicHealth> edit, const Target &target) {
-        edit.modify(target.entity, [](AtomicHealth &health) { health.damage(1.0f); });
-      });
-      scheduler.run(hits.world);
-      report_lost(row, "atomic", hits.atomic_health_left());
-      REQUIRE(hits.atomic_health_left() == -static_cast<float>(PARALLEL_ENTITY_COUNT));
-    }
-  }
-
-} // namespace
-
-TEST_CASE(LOST, "[ecs_compare][!benchmark]") {
-  sc::threading::init(thread_count() - 1);
-  hit(lost::FEW_TARGETS, lost::FEW);
-  hit(1, lost::ONE);
 }
 
 namespace {
