@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -60,6 +61,27 @@ namespace compare {
 
   struct Health {
     float value;
+  };
+
+  // Health that threads change with atomic operations, for ATOMIC_HEALTH_FEW
+  // and ATOMIC_HEALTH_ONE. std::atomic can be neither copied nor moved,
+  // which a library may do when an entity changes its table, so this does
+  // it by hand.
+  struct AtomicHealth {
+    std::atomic<float> value;
+
+    AtomicHealth() : value(0.0f) {}
+    explicit AtomicHealth(float initial) : value(initial) {}
+    AtomicHealth(const AtomicHealth &other) : value(other.value.load(std::memory_order_relaxed)) {}
+    AtomicHealth &operator=(const AtomicHealth &other) {
+      value.store(other.value.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      return *this;
+    }
+    ~AtomicHealth() = default;
+
+    // A hit, from any thread.
+    void damage(float amount) { value.fetch_sub(amount, std::memory_order_relaxed); }
+    [[nodiscard]] float left() const { return value.load(std::memory_order_relaxed); }
   };
 
   struct Timer {
@@ -264,9 +286,9 @@ namespace compare {
     // entity type of its library, that names another entity in no order.
     inline constexpr const char *LOOP_LOOKUP = "1 system, looks up another entity";
     // The same entities damage the Health of others: by 1 each, which must
-    // all arrive when several threads damage the same one. So far only
-    // sc::ecs has a means for that (modify); WRITE_RANDOM is the same
-    // without a lock, which only one thread may do.
+    // all arrive when several threads damage the same one. With a lock the
+    // library takes for the call (sc::ecs Edit::modify); WRITE_RANDOM is the
+    // same without one, which only one thread may do.
     inline constexpr const char *WRITE_RANDOM = "1 system, damages its target, no lock";
     inline constexpr const char *MODIFY_RANDOM = "1 system, damages its target";
     inline constexpr const char *MODIFY_FEW = "1 system, damages 1 of 1 000 entities";
@@ -276,6 +298,12 @@ namespace compare {
     inline constexpr const char *RECORD_RANDOM = "1 system, damages its target, recorded";
     inline constexpr const char *RECORD_FEW = "1 system, damages 1 of 1 000 entities, recorded";
     inline constexpr const char *RECORD_ONE = "1 system, damages the same entity, recorded";
+    // The same with Health as a std::atomic<float> that every hit takes 1
+    // off, through the component itself and no lock of the library: sc::ecs
+    // LocalEdit::modify, flecs get_mut. Every other access to that Health
+    // has to be atomic as well.
+    inline constexpr const char *ATOMIC_HEALTH_FEW = "1 system, damages 1 of 1 000 entities, atomic in the component";
+    inline constexpr const char *ATOMIC_HEALTH_ONE = "1 system, damages the same entity, atomic in the component";
     // Not the ECS: every entity adds 1 to one std::atomic, what the hardware
     // takes at least when all threads go for the same cache line.
     inline constexpr const char *ATOMIC_ONE = "1 system, adds to the same atomic";
@@ -614,6 +642,31 @@ namespace compare {
     report(section, row("changes").c_str(), times.changes);
     report(section, row("systems").c_str(), times.iterate);
     report(section, row("frame").c_str(), times.frame);
+  }
+
+  // Whether damage dealt from several threads arrives: PARALLEL_ENTITY_COUNT
+  // entities on all threads each damage the Health of one target by 1, in the
+  // way the library provides for writing another entity from a parallel
+  // system. The section of the report; scripts/ecs_compare.py takes the
+  // values of a section whose name starts with "hits lost" as counts. Without
+  // a comma, so that it can be run on its own.
+  inline constexpr const char *LOST = "hits lost when 1 000 000 entities damage others on all threads";
+
+  // The rows of LOST: the targets the hits go to, with the way the library
+  // has after it, e.g. "1 of 1 000 entities, ensure".
+  namespace lost {
+    inline constexpr size_t FEW_TARGETS = 1'000;
+    inline constexpr const char *FEW = "1 of 1 000 entities";
+    inline constexpr const char *ONE = "the same entity";
+  } // namespace lost
+
+  // The hits of PARALLEL_ENTITY_COUNT entities by 1 each that did not arrive,
+  // read from the Health the targets have left, which was 0 before. The sum
+  // stays exact in a float below 2^24.
+  inline void report_lost(const char *row, const char *variant, float health_left) {
+    const std::string label = std::string{row} + ", " + variant;
+    const double arrived = -static_cast<double>(health_left);
+    report(LOST, name::parallel(label.c_str()).c_str(), static_cast<double>(PARALLEL_ENTITY_COUNT) - arrived);
   }
 
   // What a world costs in memory rather than in time. The section of the
