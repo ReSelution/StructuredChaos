@@ -394,6 +394,12 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
   REQUIRE(steady.world.query().all<Position>().count() == ENTITY_COUNT);
 }
 
+// No churn case. One written like that of flecs (2026-10-29, changes through
+// the CommandBufferMT of a parallel query) hung at random: at 2 and 8 threads,
+// at different shares of changes, while 1, 4 and 16 threads ran through; the
+// main thread waited in ThreadPool::wait, every worker slept in
+// ThreadPool::thread_func. See "Show the parallel advantage" in TODO.md.
+
 namespace {
 
   struct Heavy {
