@@ -43,10 +43,11 @@ if sc_tsan
   mimalloc_options += 'mi_debug_tsan=true'
 endif
 
-# The ECS uses first-class mimalloc heaps, which are not reliable before 3.5.3.
-# TODO: stale, src/sc/ecs uses no mimalloc heap any more (only mi_malloc_aligned
-# and mi_free in entity.hpp); the heaps are in sc/memory/heap.hpp, used by
-# magpie_translator.hpp. Check whether 3.5.3 is still needed for those.
+# mimalloc replaces malloc and new for the whole program (except under the
+# sanitizers above), so its fixes concern every allocation: 3.5.3 fixes the
+# first new on a thread failing on some platforms (#1398). sc::Heap
+# (sc/memory/heap.hpp) also needs the first-class heaps of v3 that allocate
+# from any thread (since 3.2.6) and the fixes of mi_heap_destroy up to 3.4.5.
 mimalloc_dep = dependency(
   'mimalloc',
   version: '>=3.5.3',
