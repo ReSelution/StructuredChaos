@@ -222,10 +222,10 @@ unless noted, rank among 7–8 frameworks.
   flattered: its
   entity benchmarks never call `PicoEcsApplication::init()`, so its destroy skips `ecs_sync_destroy`. Bulk destroy
   (`fa865dc`) is below it: 4.2 / 5.3.
-- [ ] **+3 to 5 % on unchanged paths after the parallel `giveMany`:** in `ecs_compare_sc`, destroy on one thread 820 →
-  848 µs, all at once 781 → 821, add + remove recorded 541 → 564 (7 runs each), though their code did not change.
-  The probe that calls `destroy(span)` directly shows no difference. Presumably code placement in that binary; not
-  looked into.
+- **+3 to 5 % on unchanged paths after the parallel `giveMany`, gone** (measured again 2026-10-29, `e20eed6~1`
+  against `e20eed6`, both without the purge of mimalloc, 5 runs each, interleaved): all at once -2.9 %, add + remove
+  recorded +1.5 % within the spread; destroy one by one still +5.1 % (829-854 against 875-894 µs). Not looked into:
+  HEAD is faster than before `e20eed6` on all three (one by one 844 → 723, all at once 826 → 303, recorded 541 → 349).
 - **A purge of mimalloc lands in whatever allocates next** (fixed 2026-10-26 in `common.hpp`): "destroy entities, all
   at once" in `ecs_compare_sc` had a mean of ~710 µs in 5 of 6 runs and ~300 in the other. Every sample gets a world of
   its own and frees it afterwards; mimalloc gives that memory back to the OS only after its purge delay, in the next
@@ -290,14 +290,12 @@ all; memory of the world 2.36 / 1.68 MB.
 
 `ecs_compare_sc`, `5e57280` (before both) against `df066c0`.
 
-- [ ] **destroy on all threads: +33 %** (274 → 365 µs). `PageSort` now counts in one pass; in a world that destroyed
-  before, the rest is level. **Open:** in a new world still slower, presumably the first use of the table of page
-  numbers (`mmap`, first faults) and of the vectors per segment. A small hash table instead of the table per page
-  would avoid it, at a cost per page change.
-- [ ] **Looking up another entity and plain iteration, only in the benchmark binary:** lookup +5 % on one thread, +12 %
-  on all; light work +8 / +15 %. A probe with the benchmark's setup shows none of it. Presumably the binary again
-  (code placement), as "+3 to 5 %" above; not shown. Not covered by the probe: the parallel benchmarks go through
-  `Scheduler::run` and `Query::parallelEach`, the probe calls `World::parallelEach`.
+- **destroy on all threads +33 % and lookup / light work, gone at HEAD** (measured again 2026-10-29, without the purge
+  of mimalloc, 5 runs each, interleaved). `5e57280` against `df066c0` still shows destroy on all threads +34 %
+  (278-300 against 357-392 µs), so the purge was not its cause; against HEAD it is +1.4 % (280-298), level. Lookup and
+  light work at 1M: HEAD -3.4 / +0.8 % and -1.0 / +4.4 % (one thread / all), within the spread; on all threads the
+  means of single runs lie between 27 and 74 µs, too wide for differences of 10 %. Which commit since fixed destroy
+  on all threads is not looked into.
 - [ ] **First use in the benchmarks:** every measured run of the create and destroy benchmarks gets a world of its own,
   for every framework alike, so they measure every first touch of its tables (create all at once +15 %, about 1.3 µs
   per page fault; `parallelDestroy` +35 µs). Not made to look better by touching the tables in the constructor.
