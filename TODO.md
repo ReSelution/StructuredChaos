@@ -328,15 +328,38 @@ changes, 1M, all threads: sc 0.39 / 1.53 / 6.16 ms, flecs 3.47 / 24.2 / 74.4 ms;
 0.3 % changes per frame. The parallel run includes a system that picks the changed entities, so compare parallel
 with parallel.
 
-- [ ] **The churn benchmark at 1, 2, 4, 8 threads; gaia.** `scripts/ecs_compare.py --threads` can run it, the
-  numbers are not taken yet; `bench_gaia.cpp` has no churn case. 1M makes a full run long (flecs ~94 s, entt ~88 s, sc ~10
-  s); a hidden tag is an option.
 - [ ] **At 1M the systems get slower with the share of changes,** for sc and flecs alike (all threads: sc 59 → 557
-  µs, flecs 44 → 424 µs from 0 to 50 %). Not the wake-up of the workers. Presumably the changes right before leave
-  the data in other caches or out of them; not measured.
+  µs, flecs 44 → 424 µs from 0 to 50 %). Not the wake-up of the workers, and not caches of other cores: on one thread
+  too (2026-10-29: sc 0.48 → 0.70 ms, flecs 0.21 → 0.48). Not the density of Velocity either, which is about 50 %
+  from the spawn on and stays there. Not measured further.
+- [ ] **gaia has no churn case: it hangs at random.** Written like the case of flecs (changes through the
+  `CommandBufferMT` of a parallel query), it hung at 2 and 8 threads at different shares of changes, the main thread
+  in `ThreadPool::wait`, every worker asleep in `ThreadPool::thread_func`; 1, 4 and 16 threads ran through. Not
+  checked whether the other parallel cases of `bench_gaia.cpp` hang as well, nor fixed: that is gaia's to do. Worth
+  saying in the report all the same: a library whose parallel structural changes can hang without a word is a point
+  against using it, not only a gap in the numbers. Where it ran, its changes got slower with more threads (1M, 50 %:
+  90 / 107 / 141 ms on 1 / 4 / 16 threads).
 - [ ] **Lost updates:** many threads deal damage to few targets, the total must add up. flecs 4.0.1 in multi-threaded
   systems: `ensure`/`get_mut` hand out the component without a lock (data race), `set` is deferred and the last
   command wins at the merge, so two `hp -= 10` from `hp = 100` give 90. With `modify` it must be 80.
+
+Done: the churn benchmark at 1, 2, 4, 8, 16 threads (2026-10-29, `9fafc56`, GCC build, 50 samples). Frame at 1M, ms,
+sc / flecs:
+
+| threads | 1 %         | 10 %        | 50 %        |
+|---------|-------------|-------------|-------------|
+| 1       | 1.70 / 5.08 | 4.60 / 36.2 | 14.7 / 107  |
+| 2       | 0.95 / 3.98 | 2.82 / 29.0 | 9.31 / 92.9 |
+| 4       | 0.55 / 3.28 | 1.94 / 26.1 | 7.98 / 82.3 |
+| 8       | 0.40 / 2.83 | 1.56 / 24.2 | 6.15 / 75.0 |
+| 16      | 0.37 / 2.71 | 1.45 / 23.1 | 5.91 / 71.9 |
+
+Most of the lead is there on one thread (7.3x at 50 %, no entity moves to another table); the threads take it to 12x.
+sc scales up to 8 threads (10 %: 3.2x on 16, 50 %: 2.5x; flecs 1.5x), from 8 to 16 only 4 to 7 %, at 100K not at
+all. On one thread flecs is ahead at 0 % (0.67 against 1.14 ms), sc from 0.1 % on. The systems alone are 2.2x faster
+in flecs on one thread (0.21 against 0.48 ms at 0 %): Velocity is on a random half of the entities, sc searches the
+mask word for the next one, flecs counts up its packed table, see "Sparse data" above. Run on its own with only the
+two parallel churn cases; `scripts/ecs_compare.py` cannot pick cases, a full run per thread count is long.
 
 ## Thread pool
 
