@@ -328,10 +328,6 @@ changes, 1M, all threads: sc 0.39 / 1.53 / 6.16 ms, flecs 3.47 / 24.2 / 74.4 ms;
 0.3 % changes per frame. The parallel run includes a system that picks the changed entities, so compare parallel
 with parallel.
 
-- [ ] **At 1M the systems get slower with the share of changes,** for sc and flecs alike (all threads: sc 59 → 557
-  µs, flecs 44 → 424 µs from 0 to 50 %). Not the wake-up of the workers, and not caches of other cores: on one thread
-  too (2026-10-29: sc 0.48 → 0.70 ms, flecs 0.21 → 0.48). Not the density of Velocity either, which is about 50 %
-  from the spawn on and stays there. Not measured further.
 - [ ] **gaia has no churn case.** One written like the case of flecs (changes through the `CommandBufferMT` of a
   parallel query) hung at random (2026-10-29: at 2 and 8 threads, at different shares of changes; 1, 4 and 16 threads
   ran through), the main thread in `ThreadPool::wait`, every worker asleep in `ThreadPool::thread_func`. Not looked
@@ -354,6 +350,14 @@ all. On one thread flecs is ahead at 0 % (0.67 against 1.14 ms), sc from 0.1 % o
 in flecs on one thread (0.21 against 0.48 ms at 0 %): Velocity is on a random half of the entities, sc searches the
 mask word for the next one, flecs counts up its packed table, see "Sparse data" above. Run on its own with only the
 two parallel churn cases; `scripts/ecs_compare.py` cannot pick cases, a full run per thread count is long.
+
+Done: **at 1M the systems get slower with the share of changes,** for sc and flecs alike (all threads: sc 59 → 557
+µs, flecs 44 → 424 µs from 0 to 50 %; on one thread too, 2026-10-29: sc 0.48 → 0.70 ms, flecs 0.21 → 0.48). At 1M
+the world does not fit into the cache: the 32 MB of L3 of the 5800X against about 20 MB of Position, Health and
+Velocity alone, with masks and ticks on top. The changes right before the systems write pages of Velocity, masks and
+lists of changes, and the more of them, the more of Position and Health they push out before the systems read them.
+Not the wake-up of the workers, and not the density of Velocity, which is about 50 % from the spawn on and stays
+there. Derived from the sizes, not measured with counters.
 
 Done: damage from all threads to few entities, every hit arrives (2026-10-29). Tested for sc in `test_scheduler.cpp`
 (`dac6b9d`): `Edit::modify` on one entity, `Commands::modify` and `LocalEdit::modify` on an atomic, on 10 targets and
