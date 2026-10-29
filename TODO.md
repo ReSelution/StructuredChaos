@@ -332,16 +332,10 @@ with parallel.
   µs, flecs 44 → 424 µs from 0 to 50 %). Not the wake-up of the workers, and not caches of other cores: on one thread
   too (2026-10-29: sc 0.48 → 0.70 ms, flecs 0.21 → 0.48). Not the density of Velocity either, which is about 50 %
   from the spawn on and stays there. Not measured further.
-- [ ] **gaia has no churn case: it hangs at random.** Written like the case of flecs (changes through the
-  `CommandBufferMT` of a parallel query), it hung at 2 and 8 threads at different shares of changes, the main thread
-  in `ThreadPool::wait`, every worker asleep in `ThreadPool::thread_func`; 1, 4 and 16 threads ran through. Not
-  checked whether the other parallel cases of `bench_gaia.cpp` hang as well, nor fixed: that is gaia's to do. Worth
-  saying in the report all the same: a library whose parallel structural changes can hang without a word is a point
-  against using it, not only a gap in the numbers. Where it ran, its changes got slower with more threads (1M, 50 %:
-  90 / 107 / 141 ms on 1 / 4 / 16 threads).
-- [ ] **Lost updates:** many threads deal damage to few targets, the total must add up. flecs 4.0.1 in multi-threaded
-  systems: `ensure`/`get_mut` hand out the component without a lock (data race), `set` is deferred and the last
-  command wins at the merge, so two `hp -= 10` from `hp = 100` give 90. With `modify` it must be 80.
+- [ ] **gaia has no churn case.** One written like the case of flecs (changes through the `CommandBufferMT` of a
+  parallel query) hung at random (2026-10-29: at 2 and 8 threads, at different shares of changes; 1, 4 and 16 threads
+  ran through), the main thread in `ThreadPool::wait`, every worker asleep in `ThreadPool::thread_func`. Not looked
+  into further, and not checked whether the other parallel cases of `bench_gaia.cpp` can hang as well.
 
 Done: the churn benchmark at 1, 2, 4, 8, 16 threads (2026-10-29, `9fafc56`, GCC build, 50 samples). Frame at 1M, ms,
 sc / flecs:
@@ -360,6 +354,24 @@ all. On one thread flecs is ahead at 0 % (0.67 against 1.14 ms), sc from 0.1 % o
 in flecs on one thread (0.21 against 0.48 ms at 0 %): Velocity is on a random half of the entities, sc searches the
 mask word for the next one, flecs counts up its packed table, see "Sparse data" above. Run on its own with only the
 two parallel churn cases; `scripts/ecs_compare.py` cannot pick cases, a full run per thread count is long.
+
+Done: damage from all threads to few entities, every hit arrives (2026-10-29). Tested for sc in `test_scheduler.cpp`
+(`dac6b9d`): `Edit::modify` on one entity, `Commands::modify` and `LocalEdit::modify` on an atomic, on 10 targets and
+on one. Timed in `ecs_compare` with the ways each library has that keep every hit (`550d348`, `f1308e6`); for flecs
+that is `enqueue` of an event and an atomic in the component through `get_mut`, as `set` and `ensure` while deferred
+write a component the entity has straight into it (since v3.1.4, its PR #915). 1M hits on 16 threads, one run of 50
+samples, GCC build, ms, 1 of 1 000 targets / the same one:
+
+| way                                         | sc          | flecs       |
+|---------------------------------------------|-------------|-------------|
+| a lock of the library (`MODIFY_*`)          | 15.0 / 13.6 | –           |
+| recorded (`RECORD_*`)                       | 3.82 / 3.82 | 103 / 102   |
+| atomic in the component (`ATOMIC_HEALTH_*`) | 0.86 / 56.9 | 3.37 / 48.6 |
+
+`Edit::modify` loses on 1 of 1 000 targets because the targets are entities 0 to 999 in a row: their making bits are
+16 words, 2 cache lines, which every hit takes twice; the atomic of the component spreads over about 63 lines (derived,
+not measured). On one target the atomic float is a CAS loop and loses to both other ways. `Commands::modify` is the
+same on both, and on one target ahead of all.
 
 ## Thread pool
 
@@ -430,6 +442,10 @@ flecs does), part of the gap to flecs.
   `LocalEdit` in `2db7fd7`; copied as it is, it does not compile.
 - [ ] **When to use what:** `Edit`, `LocalEdit`, `Commands` in a few sentences, with the numbers of the comments
   (`Edit::modify` 6.4 ns, `LocalEdit::modify` 2.2, `Query::get` 1.1; `Commands` where many threads hit few entities).
+  From the damage on all threads (see "Show the parallel advantage"): a change an atomic can make, on targets spread
+  out, `LocalEdit::modify` with the atomic; on few targets hit by many, `Commands::modify`. A change no atomic can
+  make: `Edit::modify` on targets spread out, `Commands::modify` on few hit by many. `Commands` only once the stage is
+  over; an atomic in a component makes every other access to it atomic as well.
 - [ ] **Benchmarks reproducible:** hardware, compiler, flags, the command for `scripts/ecs_compare.py`; say where flecs
   is ahead (nearly static worlds, loops over randomly mixed components); show EnTT with view and with group.
 - [ ] **Without meson:** list the sources of `src/meson.build`, include paths and dependencies; point to
