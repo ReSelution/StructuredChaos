@@ -55,10 +55,6 @@ mimalloc_dep = dependency(
   default_options: mimalloc_options,
 )
 
-glm_dep = dependency('glm', fallback: ['glm', 'glm_dep'])
-
-xsimd_dep = dependency('xsimd', fallback: ['xsimd', 'xsimd_dep'])
-
 simdutf_dep = dependency(
   'simdutf',
   fallback: ['simdutf', 'simdutf_dep'],
@@ -93,11 +89,4 @@ sc_public_deps = [
 sc_private_deps = [
   liburing_dep,
   simdutf_dep,
-]
-
-# Not used by the library at all, passed on to consumers on purpose so that a
-# game gets its math and SIMD libraries from the same place.
-sc_bundled_deps = [
-  glm_dep,
-  xsimd_dep,
 ]

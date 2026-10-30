@@ -397,7 +397,6 @@ executable('game', 'main.cpp', dependencies: sc_dep, override_options: ['cpp_std
 | [simdutf](https://github.com/simdutf/simdutf) | UTF-16 to UTF-8 conversion |
 | [atomic_queue](https://github.com/max0x7ba/atomic_queue) | Lock-free queues of the thread pool |
 | [PFR](https://github.com/boostorg/pfr) | Nothing since the old ECS went, still passed on |
-| [glm](https://github.com/g-truc/glm), [xsimd](https://github.com/xtensor-stack/xsimd) | Math and SIMD, passed on to consumers |
 | [Catch2](https://github.com/catchorg/Catch2) | Tests and benchmarks |
 
 ## License

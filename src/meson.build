@@ -30,5 +30,5 @@ endif
 sc_dep = declare_dependency(
   sources: sc_dep_sources,
   link_with: sc_lib,
-  dependencies: [chaos_config_dep, sc_public_deps, sc_bundled_deps],
+  dependencies: [chaos_config_dep, sc_public_deps],
 )
