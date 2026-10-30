@@ -850,8 +850,9 @@ TEST_CASE("ECS Scheduler Runs Systems", "[ecs][scheduler][threading]") {
 
   SECTION("A Loop Modifies The Same Entity From Every Thread") {
     // The bit of one entity, which every thread wants for every call.
-    scheduler.addParallel(
-        [&](Edit<Health> edit, const Position &) { edit.modify(entities[0], [](Health &health) { health.value -= 1; }); });
+    scheduler.addParallel([&](Edit<Health> edit, const Position &) {
+      edit.modify(entities[0], [](Health &health) { health.value -= 1; });
+    });
     scheduler.run(world);
     REQUIRE(world.get<Health>(entities[0]).value == 100 - static_cast<int>(entities.size()));
   }

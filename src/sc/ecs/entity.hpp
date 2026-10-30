@@ -625,12 +625,10 @@ namespace sc::ecs::internal {
 
     // How many entities exist: every index of the pages handed out to the
     // threads, less those the threads have not handed out yet and those
-    // destroy gave back, in the lists and in the chunks of the threads. Worked out, not counted by create and destroy: a
-    // count would be one more locked instruction per create, on a cache line
-    // that every creating thread writes. Reads the Share of every thread in
-    // every area, 129 cache lines each. Nothing may create or destroy next to
-    // it, as next to destroy: the shares are the threads' own and read
-    // without a lock.
+    // destroy gave back, in the lists and in the chunks of the threads. Worked out, not counted by create and destroy:
+    // a count would be one more locked instruction per create, on a cache line that every creating thread writes. Reads
+    // the Share of every thread in every area, 129 cache lines each. Nothing may create or destroy next to it, as next
+    // to destroy: the shares are the threads' own and read without a lock.
     [[nodiscard]] size_t alive() const noexcept {
       size_t count = size_t{pageCount()} << PAGE_BITS;
       const uint32_t areas = m_areaCount.load(std::memory_order_acquire);

@@ -367,12 +367,14 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     constexpr size_t FEW = FEW_TARGETS;
     const flecs::entity boss = world.entities.front();
     observe_damage(ecs);
-    const flecs::system few = ecs.system<const Target>("record_few").multi_threaded().each(
-        [&world](flecs::entity entity, const Target &) {
+    const flecs::system few =
+        ecs.system<const Target>("record_few").multi_threaded().each([&world](flecs::entity entity, const Target &) {
           enqueue_damage(entity, world.entities[entity.id() % FEW].id());
         });
-    const flecs::system one = ecs.system<const Target>("record_one").multi_threaded().each(
-        [boss](flecs::entity entity, const Target &) { enqueue_damage(entity, boss.id()); });
+    const flecs::system one =
+        ecs.system<const Target>("record_one").multi_threaded().each([boss](flecs::entity entity, const Target &) {
+          enqueue_damage(entity, boss.id());
+        });
     enable(false, false, false, false);
     ecs.set_threads(threads);
 
@@ -409,10 +411,14 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
     for (size_t i = 0; i < FEW; ++i) {
       world.entities[i].set<AtomicHealth>(AtomicHealth{0.0f});
     }
-    const flecs::system few = ecs.system<const Target>("atomic_few").multi_threaded().each(
-        [&world](flecs::entity entity, const Target &) { hit_atomic(entity, world.entities[entity.id() % FEW]); });
-    const flecs::system one = ecs.system<const Target>("atomic_one").multi_threaded().each(
-        [boss](flecs::entity entity, const Target &) { hit_atomic(entity, boss); });
+    const flecs::system few =
+        ecs.system<const Target>("atomic_few").multi_threaded().each([&world](flecs::entity entity, const Target &) {
+          hit_atomic(entity, world.entities[entity.id() % FEW]);
+        });
+    const flecs::system one =
+        ecs.system<const Target>("atomic_one").multi_threaded().each([boss](flecs::entity entity, const Target &) {
+          hit_atomic(entity, boss);
+        });
 
     one.disable();
     ecs.progress(DT);

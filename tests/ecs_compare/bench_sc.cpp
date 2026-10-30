@@ -495,8 +495,7 @@ TEST_CASE(LARGE_WORLD, "[ecs_compare][!benchmark]") {
       edit.modify(world.entities[sc::ecs::indexOf(entity) % FEW], damageAtomic);
     });
     Scheduler atomicOne;
-    atomicOne.addParallel(
-        [&](LocalEdit<AtomicHealth> edit, const Target &) { edit.modify(boss, damageAtomic); });
+    atomicOne.addParallel([&](LocalEdit<AtomicHealth> edit, const Target &) { edit.modify(boss, damageAtomic); });
 
     atomicFew.run(ecs);
     for (size_t i = 0; i < FEW; ++i) {
