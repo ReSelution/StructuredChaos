@@ -398,7 +398,7 @@ TEST_CASE(STEADY_WORLD, "[ecs_compare][!benchmark]") {
 // the CommandBufferMT of a parallel query) hung at random: at 2 and 8 threads,
 // at different shares of changes, while 1, 4 and 16 threads ran through; the
 // main thread waited in ThreadPool::wait, every worker slept in
-// ThreadPool::thread_func. See "Show the parallel advantage" in TODO.md.
+// ThreadPool::thread_func.
 
 namespace {
 

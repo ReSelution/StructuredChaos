@@ -300,9 +300,6 @@ all; memory of the world 2.36 / 1.68 MB.
   light work at 1M: HEAD -3.4 / +0.8 % and -1.0 / +4.4 % (one thread / all), within the spread; on all threads the
   means of single runs lie between 27 and 74 µs, too wide for differences of 10 %. Which commit since fixed destroy
   on all threads is not looked into.
-- [ ] **First use in the benchmarks:** every measured run of the create and destroy benchmarks gets a world of its own,
-  for every framework alike, so they measure every first touch of its tables (create all at once +15 %, about 1.3 µs
-  per page fault; `parallelDestroy` +35 µs). Not made to look better by touching the tables in the constructor.
 - **The free list in chunks** (2026-10-29, was "create one by one in an emptied world still slower than in a new one",
   1 095 against 929 µs, most of it one `fetch_sub` per create). A thread takes a chunk of up to 4 092 given back indices
   with one `fetch_sub` and hands them out from its `Share`; emptied chunks go back on a stack for `give`, which never
@@ -313,12 +310,6 @@ all; memory of the world 2.36 / 1.68 MB.
   the reason the cache of 13 indices per `Share` was dropped before: a thread holding a chunk keeps its indices from
   the others, who make new pages meanwhile, at most one chunk per thread and area (test_scheduler allows a page per
   thread for it). Left: destroy one by one in a new world +9.6 % (718 → 787 µs, +6 instructions per entity).
-- [ ] **Creating on all threads in a new world waits on the kernel:** 450 µs and 572 faults for 100K entities with 2
-  components on 16 threads, against 185 µs and 33 faults in memory a world before had (which `ecs_compare` measures).
-  The user time is the same (1.2 to 1.4 ms per run), the kernel takes 1.1 to 1.3 ms instead of 0.2 to 0.4: every 4 KiB
-  of a column is zeroed on its first write, under the lock of its 2 MiB, which all threads write to. Tried without
-  gain: `Pages::Huge` (161 faults, 495 µs), `populate` of a whole page of the column at its start (445 µs). Only the
-  first use of the memory; not pursued.
 
 Done: destroy all at once on one thread +24 % fixed by remembering the list of the last page (785 µs); emptied pages
 no longer give their memory back at once (`MADV_FREE` on Linux, create all at once in an emptied world 539 → 174 µs;
@@ -331,11 +322,6 @@ changes inside parallel loops without deferring). Done as the churn benchmark (`
 changes, 1M, all threads: sc 0.39 / 1.53 / 6.16 ms, flecs 3.47 / 24.2 / 74.4 ms; flecs is ahead only below 0.1 to
 0.3 % changes per frame. The parallel run includes a system that picks the changed entities, so compare parallel
 with parallel.
-
-- [ ] **gaia has no churn case.** One written like the case of flecs (changes through the `CommandBufferMT` of a
-  parallel query) hung at random (2026-10-29: at 2 and 8 threads, at different shares of changes; 1, 4 and 16 threads
-  ran through), the main thread in `ThreadPool::wait`, every worker asleep in `ThreadPool::thread_func`. Not looked
-  into further, and not checked whether the other parallel cases of `bench_gaia.cpp` can hang as well.
 
 Done: the churn benchmark at 1, 2, 4, 8, 16 threads (2026-10-29, `9fafc56`, GCC build, 50 samples). Frame at 1M, ms,
 sc / flecs:
