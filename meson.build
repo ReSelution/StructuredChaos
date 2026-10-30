@@ -45,4 +45,6 @@ chaos_config_dep = declare_dependency(
 
 subdir('src')
 
-subdir('tests')
+if not meson.is_subproject()
+  subdir('tests')
+endif
