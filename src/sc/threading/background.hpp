@@ -52,6 +52,16 @@ namespace sc::threading {
   // Without a number of helpers it gets half the workers, see parallelFor.
   [[nodiscard]] bool onBackgroundThread() noexcept;
 
+  // For memory that a task of the lane may still read after it was replaced:
+  // call markBackground after the new value is in place, and free the old one
+  // once backgroundPassed says so. That is once every task running at the mark
+  // has ended; a task that starts later sees the new value. Tasks that are
+  // still queued count as later, so a task reads through a handle it captured,
+  // not through a reference to the value. A Service does not count: it never
+  // ends, and nothing would ever be freed next to one.
+  [[nodiscard]] uint64_t markBackground() noexcept;
+  [[nodiscard]] bool backgroundPassed(uint64_t mark);
+
   namespace internal {
     using BackgroundJob = std::move_only_function<void(std::stop_token)>;
 

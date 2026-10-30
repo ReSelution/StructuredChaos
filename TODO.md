@@ -30,8 +30,6 @@ out from the pages instead of counted (its own cost not measured).
 the background lane with the cache's loader or the one given; afterwards a system only asks `ready()`. `find` and `get` read
 without a lock, `forceLoad`, `apply` and `collect` change the map and must not run next to them.
 
-- [ ] **`forceLoad` while a loader on the lane uses the old resource:** the scheduler keeps systems apart, not tasks.
-  A reload that keeps the old one until the new one is loaded needs a second place in the entry.
 - [ ] **Unload and reload with the handles kept:** today a resource goes only once all its handles are gone, and
   comes back by binding the key again. For entities that stay while their textures go (texture streaming, LOD), an
   entry that keeps its handles in an unloaded state, `ready()` false, and loads again when asked, without a bind.
@@ -53,6 +51,12 @@ Done: `Resources<T, Key, Hash>` as a system parameter after `scheduler.provide(c
 measured); GPU resources go through `memory::DeletionQueue` in their destructor, the cache knows no frames; whoever
 waits for a task that has not started runs the loader itself.
 
+- **`forceLoad` keeps the old resource until the lane has passed:** the new one is made first (its own allocation), the
+  handles stay `ready()` on the old one meanwhile, and a loader that throws changes nothing. The old one goes once every
+  task of the lane running at the swap has ended (`threading::markBackground`, `backgroundPassed`), in `forceLoad`,
+  `apply` or `collect`. Not covered: a `Service`, which never ends, threads of the user's, and a task queued with a
+  reference instead of a handle. Costs one load more in `*handle`, see `ResourceEntry::current`: 3K -2 %, 10K to 100K
+  about +0.25 ns (+30 to +46 %, about one cycle), 2M +2 %. L1 misses and dTLB misses are the same with and without it.
 - **No lock to start and finish a load:** a mutex was taken by `taskDone` on the lane, at SCHED_IDLE, and by
   `startTask` in a `bind` of a system. Now a push-only list that one thread at a time takes and dispatches from, in
   the order of `bind`. 2000 new keys bound per frame on every pool thread while the lane finishes loads of 50 us,

@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
+#include <limits>
 #include <mutex>
 #include <semaphore>
 #include <stop_token>
@@ -94,6 +96,42 @@ namespace sc::threading {
     // laneThreads.size(), for readers that must not take the mutex.
     std::atomic<size_t> laneThreadCount{0};
 
+    inline constexpr uint64_t LANE_IDLE = std::numeric_limits<uint64_t>::max();
+
+    // Raised by every markBackground.
+    std::atomic<uint64_t> laneEpoch{0};
+
+    // The epoch at which the job of a thread of the lane started.
+    struct alignas(64) LaneSlot {
+      std::atomic<uint64_t> since{LANE_IDLE};
+      std::atomic<bool> taken{false};
+    };
+
+    // Guarded by laneThreadMutex; a deque, so that a thread keeps its slot
+    // while others are added. Slots outlive laneThreads: shutdownBackground
+    // joins after it has emptied that, and its running jobs still count.
+    std::deque<LaneSlot> laneSlots;
+
+    // Between taking a job and having destroyed it, so that what its captures
+    // do in their destructors counts as well.
+    class LaneBusy {
+    public:
+      explicit LaneBusy(LaneSlot &slot) noexcept : m_slot(slot) {}
+      LaneBusy(const LaneBusy &) = delete;
+      LaneBusy &operator=(const LaneBusy &) = delete;
+      ~LaneBusy() { m_slot.since.store(LANE_IDLE, std::memory_order_release); }
+
+      void enter() noexcept {
+        m_slot.since.store(laneEpoch.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        // With the fence of backgroundPassed: either it sees this job, or the
+        // job sees the value that was put in place before the mark.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+      }
+
+    private:
+      LaneSlot &m_slot;
+    };
+
     // Lower than the pool, so that a task that computes gets a core only when
     // the workers leave it. Lowering needs no rights; a failure leaves the
     // thread at the normal priority.
@@ -133,7 +171,7 @@ namespace sc::threading {
       }
     }
 
-    void laneThread(const std::stop_token &stopThread, size_t index) {
+    void laneThread(const std::stop_token &stopThread, size_t index, LaneSlot &slot) {
       internal::backgroundThread = true;
       internal::setThreadName("sc-bg-" + std::to_string(index));
       lowerPriority();
@@ -141,6 +179,7 @@ namespace sc::threading {
       // takeWakeUp of the pool.
       bool woken = false;
       while (!stopThread.stop_requested()) {
+        LaneBusy busy(slot);
         QueuedJob next;
         if (!laneQueue.tryPop(next, static_cast<int32_t>(index))) {
           woken = laneSemaphore.try_acquire_for(std::chrono::milliseconds(10));
@@ -155,10 +194,26 @@ namespace sc::threading {
         // Taken after shutdownBackground asked: dropped like the ones it
         // finds in the queue.
         if (stopThread.stop_requested()) {
-          return;
+          break;
         }
+        busy.enter();
         runJob(next, stopThread);
       }
+      slot.taken.store(false, std::memory_order_release);
+    }
+
+    // Under laneThreadMutex: a slot no thread has, also none that is about to
+    // end.
+    LaneSlot &takeLaneSlot() {
+      for (LaneSlot &slot: laneSlots) {
+        if (!slot.taken.load(std::memory_order_acquire)) {
+          slot.taken.store(true, std::memory_order_relaxed);
+          return slot;
+        }
+      }
+      LaneSlot &slot = laneSlots.emplace_back();
+      slot.taken.store(true, std::memory_order_relaxed);
+      return slot;
     }
   } // namespace
 
@@ -178,7 +233,7 @@ namespace sc::threading {
 
     laneThreads.reserve(threads);
     for (size_t i = 0; i < threads; ++i) {
-      laneThreads.emplace_back(laneThread, i);
+      laneThreads.emplace_back(laneThread, i, std::ref(takeLaneSlot()));
     }
     laneThreadCount.store(laneThreads.size(), std::memory_order_release);
   }
@@ -217,6 +272,17 @@ namespace sc::threading {
   }
 
   bool onBackgroundThread() noexcept { return internal::backgroundThread; }
+
+  uint64_t markBackground() noexcept { return laneEpoch.fetch_add(1, std::memory_order_relaxed) + 1; }
+
+  bool backgroundPassed(uint64_t mark) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    const std::scoped_lock lock(laneThreadMutex);
+    return std::ranges::all_of(laneSlots, [mark](const LaneSlot &slot) {
+      // Acquire: what a job that ended did with the old value is over.
+      return slot.since.load(std::memory_order_acquire) >= mark;
+    });
+  }
 
   namespace internal {
     void submitBackground(BackgroundJob job, std::stop_source stop) {

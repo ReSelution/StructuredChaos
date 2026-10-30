@@ -96,11 +96,29 @@ namespace sc::ecs::internal {
     // is true meanwhile, and pending is set only once the bytes are there.
     std::atomic<io::FileReader *> reading{nullptr};
     std::exception_ptr error;
+    // The resource: in storage, until forceLoad replaces it with one of its
+    // own allocation, while the old one stays for whoever still reads it.
+    // Right before storage, to share its cache line: *handle of a 32-byte T
+    // in random order, ns (clang, one thread), 1K / 100K / 2M handles: with no
+    // pointer 0.49 / 0.73 / 4.33, here 0.50 / 0.97-1.02 / 4.42-4.47, behind
+    // storage 0.77 / 1.10-1.12 / 6.58. From 10K to 100K handles about 0.25 ns
+    // more, with the same cache misses and whether or not the read of the value
+    // depends on this load: the cost is one load more, not a miss.
+    std::atomic<T *> current{reinterpret_cast<T *>(storage)};
     alignas(T) std::byte storage[sizeof(T)];
 
     ResourceEntry(uint8_t owner, std::atomic<ResourceEntry *> *unused) noexcept : owner(owner), unused(unused) {}
 
-    [[nodiscard]] T &value() noexcept { return *std::launder(reinterpret_cast<T *>(storage)); }
+    [[nodiscard]] T &value() noexcept { return *std::launder(current.load(std::memory_order_acquire)); }
+
+    // Ends a resource that was current, in storage or allocated.
+    void destroyValue(T *resource) noexcept {
+      if (static_cast<void *>(resource) == static_cast<void *>(storage)) {
+        std::launder(resource)->~T();
+      } else {
+        delete resource;
+      }
+    }
 
     void acquire() noexcept {
       [[maybe_unused]] const uint32_t before = refs.fetch_add(1, std::memory_order_relaxed);
@@ -231,7 +249,7 @@ namespace sc::ecs {
   class ResourceCache;
 
   // A resource of a ResourceCache, or none. Small enough for a component:
-  // one pointer, and getting at the resource is one load, no lookup.
+  // one pointer, and getting at the resource is two loads, no lookup.
   //
   //   struct Material { ResourceHandle<Texture> albedo; };
   //   ...
@@ -443,6 +461,9 @@ namespace sc::ecs {
            now = m_tasks.load(std::memory_order_acquire)) {
         m_tasks.wait(now, std::memory_order_acquire);
       }
+      // Before the entries, which these keep a count of. No handle may be
+      // left, so nothing on the lane reads them any more.
+      freeReplaced(true);
       const auto destroyAll = [](const Map &map) {
         for (const auto &[key, entry]: map) {
           assert((entry->refs.load(std::memory_order_relaxed) & Base::COUNT) == 0);
@@ -691,13 +712,18 @@ namespace sc::ecs {
       return forceLoad(key, 0, loader);
     }
 
-    // Loads the resource of the key anew, on the calling thread, into the
-    // one there is: every handle of it sees the new one once this returns.
-    // A load of it that is not over is waited for first. Throws what loader
-    // threw; the resource is failed then.
+    // Loads the resource of the key anew, on the calling thread: every handle
+    // of it sees the new one once this returns, and stays ready() on the old
+    // one until then. A load of it that is not over is waited for first.
+    // Throws what loader threw: a resource that was loaded stays as it was,
+    // one that was not is failed.
     //
-    // Nobody may use the old one meanwhile: the scheduler keeps systems
-    // apart, not a loader on the lane that holds a handle of it.
+    // The old one stays until every task of the lane that runs now has ended,
+    // as a loader that holds a reference to it would otherwise read freed
+    // memory; the scheduler keeps systems apart, not tasks. Here if none runs,
+    // else in apply or collect. A thread of the user's or a Service that keeps
+    // a reference is not covered, and nor is a task queued with a reference
+    // instead of a handle.
     template<typename Loader>
       requires ResourceLoader<Loader, T>
     ResourceHandle<T> forceLoad(const Key &key, uint8_t owner, Loader &&loader) {
@@ -740,7 +766,8 @@ namespace sc::ecs {
       } catch (...) {
       }
       if (entry->state.load(std::memory_order_relaxed) == internal::ResourceState::Ready) {
-        entry->value().~T();
+        replace(entry, loader);
+        return handle;
       }
       entry->error = nullptr;
       entry->state.store(internal::ResourceState::Loading, std::memory_order_relaxed);
@@ -759,6 +786,7 @@ namespace sc::ecs {
     // keys, which are taken in right after.
     size_t apply() {
       pollFiles();
+      freeReplaced(false);
       if (m_freshCount.load(std::memory_order_relaxed) == 0) {
         return 0;
       }
@@ -785,6 +813,8 @@ namespace sc::ecs {
     // which frees it once the fence of its frame has signalled.
     size_t collect(uint8_t owner = 0) {
       assert(owner < m_owners);
+      // First: an old one that goes may be what kept its entry.
+      freeReplaced(false);
       Base *list = m_unused[owner].head.exchange(nullptr, std::memory_order_acquire);
       if (list == nullptr) {
         return 0;
@@ -1321,9 +1351,68 @@ namespace sc::ecs {
       entry->state.notify_all();
     }
 
+    // An old resource that forceLoad replaced, with a count of its entry,
+    // whose storage it may be in.
+    struct Replaced {
+      Base *entry = nullptr;
+      T *resource = nullptr;
+      uint64_t mark = 0;
+      Replaced *next = nullptr;
+    };
+
+    // The new one is made first, so a loader that throws changes nothing.
+    template<typename Loader>
+    void replace(Base *entry, Loader &loader) {
+      auto replaced = std::make_unique<Replaced>();
+      T *const fresh = new T(loader());
+      replaced->entry = entry;
+      entry->acquire();
+      // Sequentially consistent with the fence of a task of the lane, see
+      // threading::markBackground.
+      replaced->resource = entry->current.exchange(fresh, std::memory_order_seq_cst);
+      replaced->mark = threading::markBackground();
+      {
+        const std::scoped_lock lock(m_replacedMutex);
+        replaced->next = m_replaced;
+        m_replaced = replaced.release();
+        m_replacedCount.fetch_add(1, std::memory_order_relaxed);
+      }
+      freeReplaced(false);
+    }
+
+    // Ends the old resources no task of the lane can read any more, all of
+    // them with force. Without one there, one load.
+    void freeReplaced(bool force) {
+      if (m_replacedCount.load(std::memory_order_relaxed) == 0) {
+        return;
+      }
+      Replaced *gone = nullptr;
+      {
+        const std::scoped_lock lock(m_replacedMutex);
+        Replaced **link = &m_replaced;
+        while (*link != nullptr) {
+          Replaced *const replaced = *link;
+          if (force || threading::backgroundPassed(replaced->mark)) {
+            *link = replaced->next;
+            replaced->next = gone;
+            gone = replaced;
+            m_replacedCount.fetch_sub(1, std::memory_order_relaxed);
+          } else {
+            link = &replaced->next;
+          }
+        }
+      }
+      // Not under the lock: a destructor may do anything.
+      while (gone != nullptr) {
+        const std::unique_ptr<Replaced> replaced(std::exchange(gone, gone->next));
+        replaced->entry->destroyValue(replaced->resource);
+        replaced->entry->release();
+      }
+    }
+
     static void destroy(Base *entry) noexcept {
       if (entry->state.load(std::memory_order_relaxed) == internal::ResourceState::Ready) {
-        entry->value().~T();
+        entry->destroyValue(entry->current.load(std::memory_order_relaxed));
       }
       if (entry->parked()) {
         entry->runPending(entry->pending, internal::PendingRun::Free);
@@ -1367,6 +1456,11 @@ namespace sc::ecs {
     // Reads of bind with a file whose done has not run yet, so that apply
     // polls only while there are some.
     mutable std::atomic<size_t> m_reads{0};
+    // Old resources waiting for the lane, under the mutex; the count lets apply
+    // pass without it.
+    std::mutex m_replacedMutex;
+    Replaced *m_replaced = nullptr;
+    std::atomic<size_t> m_replacedCount{0};
   };
 
 } // namespace sc::ecs

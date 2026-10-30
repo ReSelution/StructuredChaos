@@ -198,9 +198,91 @@ TEST_CASE("ECS Resource Force Load", "[ecs][resource]") {
     CHECK(cache.size() == 2);
   }
 
-  SECTION("a loader that throws leaves it failed") {
+  SECTION("a loader that throws leaves the old one") {
     CHECK_THROWS_AS(cache.forceLoad(1, []() -> Texture { throw std::runtime_error("no file"); }), std::runtime_error);
-    CHECK(old.failed());
+    CHECK(old.ready());
+    CHECK(old->id == 1);
+    CHECK(Texture::alive.load() == 1);
+  }
+
+  SECTION("the old one is ready while its loader runs") {
+    (void) cache.forceLoad(1, [&] {
+      CHECK(old.ready());
+      CHECK(old->id == 1);
+      return Texture(2);
+    });
+    CHECK(old->id == 2);
+  }
+
+  SECTION("a task of the lane keeps reading the old one") {
+    sc::threading::init();
+    std::atomic<bool> holding{false};
+    std::atomic<bool> finish{false};
+    std::atomic<int> read{0};
+    auto task = sc::threading::spawn([&, old] {
+      const Texture &held = *old;
+      holding.store(true);
+      while (!finish.load()) {
+        std::this_thread::yield();
+      }
+      read.store(held.id);
+    });
+    while (!holding.load()) {
+      std::this_thread::yield();
+    }
+
+    (void) cache.forceLoad(1, [] { return Texture(2); });
+    CHECK(old->id == 2);
+    CHECK(Texture::alive.load() == 2);
+    cache.apply();
+    CHECK(Texture::alive.load() == 2);
+
+    finish.store(true);
+    task.get();
+    sc::threading::waitUntilBackgroundFinished();
+    CHECK(read.load() == 1);
+    cache.apply();
+    CHECK(Texture::alive.load() == 1);
+  }
+
+  SECTION("tasks of the lane read next to reloads") {
+    sc::threading::init();
+    std::atomic<bool> finish{false};
+    std::atomic<int> wrong{0};
+    std::vector<sc::threading::BackgroundTask<void>> tasks;
+    for (size_t task = 0; task < sc::threading::backgroundThreadCount(); ++task) {
+      tasks.push_back(sc::threading::spawn([&, old] {
+        while (!finish.load(std::memory_order_relaxed)) {
+          const Texture &held = *old;
+          std::this_thread::yield();
+          if (held.id < 1) {
+            wrong.fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+      }));
+    }
+    for (int reload = 2; reload < 200; ++reload) {
+      (void) cache.forceLoad(1, [reload] { return Texture(reload); });
+    }
+    CHECK(Texture::alive.load() >= 1);
+    finish.store(true);
+    for (auto &task: tasks) {
+      task.get();
+    }
+    sc::threading::waitUntilBackgroundFinished();
+    cache.apply();
+    CHECK(wrong.load() == 0);
+    CHECK(old->id == 199);
+    CHECK(Texture::alive.load() == 1);
+  }
+
+  SECTION("the entry goes after the old one") {
+    (void) cache.forceLoad(1, [] { return Texture(2); });
+    (void) cache.forceLoad(1, [] { return Texture(3); });
+    CHECK(old->id == 3);
+    CHECK(Texture::alive.load() == 1);
+    old.reset();
+    CHECK(cache.collect() == 1);
     CHECK(Texture::alive.load() == 0);
   }
 
