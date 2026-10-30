@@ -3,27 +3,6 @@
 Open points first in every section; done ones are kept short, with their main number and commit. The full
 measurements of the done ones are in the history of this file (before 2026-10-23).
 
-Found while integrating `sc::ecs` into [ecs_benchmark](https://github.com/abeimler/ecs_benchmark)
-(`src/structured-chaos`, pinned to commit `bfd4be4`).
-
-## Decisions of the benchmark integration to review
-
-- **Single thread:** the `World` wrapper of the benchmark calls `sc::threading::init(0)` once, so that the
-  benchmark thread has a slot of its own in `EntityAllocator::withShare` instead of going through `m_sharedMutex`.
-  Still needed at `25cf384`: a create that takes a new index costs 6.4 ns without it and 0.94 with it (65 536
-  entities, clang; with 2 `emplace` 10.7 and 8.6). Indices from the free list skip `withShare`, which is why
-  `BM_CreateEntities` (destroys between iterations) showed 10.34 against 10.29 at `b3e1fef`.
-- **No malloc override:** mimalloc is built with `MI_OVERRIDE OFF`; ecs uses it only through its own `mi_*` calls,
-  the rest of the benchmark runs on the system malloc like every other framework. `tests/ecs_compare` instead uses
-  mimalloc for all libraries.
-- **fmt from vcpkg:** spdlog is built with `SPDLOG_FMT_EXTERNAL`. `SPDLOG_USE_STD_FORMAT` fails because
-  `sc/logger/logger.hpp:147` uses `fmt_lib::runtime`, which `std` does not have; the bundled fmt has the same include
-  guards as the `<fmt/core.h>` of the benchmark's `base/systems/DataSystem.h`.
-
-Done: `emplaceOrReplace` (returns `Emplaced`, not a reference that could outlive the `making` bit; `erase` always
-taking the bit instead cost +38 % in add + remove), bulk `World::destroy(span)` (`fa865dc`), `World::alive()` worked
-out from the pages instead of counted (its own cost not measured).
-
 ## Resource cache
 
 `ResourceCache<T>` in `src/sc/ecs/resource.hpp`: `bind(key)` gives a handle once, at spawn, and loads a new key on
@@ -193,10 +172,9 @@ waiting `modify` waits up to a whole page) and the non-blocking `modify` with a 
   a direct change where many go to the same entities (3.4 against 14.6 ns per hit, all threads on one of 1 000
   targets) because the recorded changes are applied page by page on several threads.
 
-## Single-thread standing in ecs_benchmark
+## Single-thread standing
 
-Measured 2026-10-17 on a Ryzen 7 5800X, after the per-index seed fix in ecs_benchmark (`a9f3135`). ns per entity
-unless noted, rank among 7–8 frameworks.
+Measured 2026-10-17 on a Ryzen 7 5800X. ns per entity unless noted, rank among 7–8 frameworks.
 
 - **Ahead:** remove + add 7.0 / 7.3 (pico_ecs 9.0, Ginseng 10.6, EnTT 20, flecs 130); `get` of one component 0.7
   (Ginseng 1.2, EnTT 2.0), two 1.3, three 1.75 (`a077ca1`); create with two components at 1024 10.2 (pico_ecs
@@ -282,10 +260,8 @@ all; memory of the world 2.36 / 1.68 MB.
 
 - [ ] **The same sets for the other libraries** in `ecs_compare` (entt, flecs, gaia, mustache), file by file;
   archetypes iterate like the areas but move on every emplace.
-- [ ] **Only a hint at create:** components added later do not move the entity. In ecs_benchmark the mixed entities
-  get their hero components only after create; there it helps only if the factory gives the layout at create. The
-  benchmark notes should say that sc gets a hint the others do not need (mustache's factory uses `create<...>()` the
-  same way; measured neutral there, ecs_benchmark `d7e329c`).
+- [ ] **Only a hint at create:** components added later do not move the entity, so it helps only if the layout is
+  given at create.
 - [ ] **Open pages per layout:** every thread keeps a partly filled page per area. Many layouts with few entities give
   many half empty pages: more memory, and `each()` touches more pages (the summary softens it). A limit, or a
   fallback group for small layouts.
@@ -317,8 +293,7 @@ Windows unchanged with `MEM_DECOMMIT`).
 
 ## Show the parallel advantage in numbers
 
-ecs_benchmark is single-threaded on purpose, so none of its results shows the main argument for ecs (structural
-changes inside parallel loops without deferring). Done as the churn benchmark (`bab495e`): frame at 1 / 10 / 50 %
+The main argument for ecs is structural changes inside parallel loops without deferring. Done as the churn benchmark (`bab495e`): frame at 1 / 10 / 50 %
 changes, 1M, all threads: sc 0.39 / 1.53 / 6.16 ms, flecs 3.47 / 24.2 / 74.4 ms; flecs is ahead only below 0.1 to
 0.3 % changes per frame. The parallel run includes a system that picks the changed entities, so compare parallel
 with parallel.
@@ -418,12 +393,8 @@ threads sc 0.19, flecs 4.6. Index → page → slot is one load per column that 
 `World::get` and `Query::get` do not check in release builds whether the entity has the component (EnTT neither,
 flecs does), part of the gap to flecs.
 
-## ecs_benchmark: what its numbers say
+## More benchmarks
 
-- **Iterate\* compare code generation, not iteration:** under GCC `benchmark::DoNotOptimize(T&)` is `asm "+m,r"`, and
-  GCC picks the alternative per loop; with `m` the loop only computes addresses. With a body that writes the
-  components, sc 0.16–0.18 ns per entity at full pages, flecs 0.25–0.27. Until the harness has a real body (a TODO at
-  `dummy_each` of the benchmark), do not quote its Iterate numbers.
 - [ ] Give EnTT the scheduler of sc for the parallel benchmarks; name it "entt + sc::threading" in the report.
   Structural changes stay one-threaded there (its pools are not thread safe).
 - [ ] Tags against flags: a state on 1 / 10 / 50 % of the entities as a tag (sc, flecs) and as a bool in a component
@@ -442,8 +413,7 @@ flecs does), part of the gap to flecs.
   over; an atomic in a component makes every other access to it atomic as well.
 - [ ] **Benchmarks reproducible:** hardware, compiler, flags, the command for `scripts/ecs_compare.py`; say where flecs
   is ahead (nearly static worlds, loops over randomly mixed components); show EnTT with view and with group.
-- [ ] **Without meson:** list the sources of `src/meson.build`, include paths and dependencies; point to
-  `src/structured-chaos/CMakeLists.txt` of ecs_benchmark as a CMake example (not maintained here); a wrap file and
+- [ ] **Without meson:** list the sources of `src/meson.build`, include paths and dependencies; a wrap file and
   `pkg.generate()` for meson and pkg-config users.
 
 ## Tools and demos
